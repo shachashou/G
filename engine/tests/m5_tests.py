@@ -132,6 +132,22 @@ class DiagnosticTests(unittest.TestCase):
 
 
 class BudgetTests(unittest.TestCase):
+    def test_bare_python_keeps_the_parent_virtual_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            job = tmp / "run"
+            probe = "import sys; print(sys.prefix, flush=True)"
+            if importlib.util.find_spec("torch"):
+                probe += "; import torch"
+            result = subprocess.run([sys.executable, str(ROOT / "tools/budget_run.py"),
+                "--ledger", str(tmp / "budget.json"), "--seconds", "10", "--out-dir", str(job),
+                "--", "python", "-c", probe],
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]})
+            log = (job / "console.log").read_text()
+            self.assertEqual(result.returncode, 0, log)
+            self.assertEqual(Path(log.splitlines()[0]).resolve(), Path(sys.prefix).resolve())
+
     def test_deadline_kills_descendants_and_keeps_cumulative_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

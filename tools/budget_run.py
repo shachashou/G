@@ -7,6 +7,8 @@ Example: python tools/budget_run.py --ledger data/m5/budget.json
 The ledger reserves the whole requested timeout before launch. A wrapper crash
 therefore cannot silently restore spent budget. An exclusive lock rejects
 concurrent wrappers; a stale lock requires human inspection, never auto-reset.
+Bare child commands ``python``/``python.exe`` use this runner's interpreter;
+explicit interpreter paths remain unchanged.
 """
 from __future__ import annotations
 
@@ -138,9 +140,15 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
-    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    requested_command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    command = list(requested_command)
     if not command or not math.isfinite(args.seconds) or args.seconds <= 0:
         parser.error("provide a command and finite positive --seconds")
+    # On Windows, CreateProcess can choose the base interpreter beside the
+    # parent executable ahead of PATH, even when a venv is activated. Preserve
+    # the environment that launched this runner instead of re-resolving Python.
+    if command[0].casefold() in ("python", "python.exe"):
+        command[0] = sys.executable
     args.ledger = args.ledger.resolve()
     args.out_dir = args.out_dir.resolve()
     args.ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -165,7 +173,8 @@ def main(argv=None):
             if args.out_dir.exists():
                 parser.error("refusing to overwrite existing run directory")
             args.out_dir.mkdir(parents=True)
-            run = {"command": command, "cwd": str(ROOT), "pid": os.getpid(),
+            run = {"command": command, "requested_command": requested_command,
+                   "runner_python": sys.executable, "cwd": str(ROOT), "pid": os.getpid(),
                    "limit_seconds": args.seconds, "status": "running", "complete": False,
                    "out_dir": str(args.out_dir), "source": source_identity()}
             ledger["runs"].append(run)

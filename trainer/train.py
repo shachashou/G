@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -43,6 +44,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--hidden-lr", type=float,
+                        help="optional W0/b0/W1/b1 learning rate; output keeps --lr")
     parser.add_argument("--wdl-weight", type=float, default=0.2)
     parser.add_argument("--wdl-temperature", type=float, default=100.0)
     parser.add_argument("--quant-reg", type=float, default=0.05)
@@ -59,6 +62,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="clip saturated +/-32767 search scores to +/-N "
                              "(0 disables; loss stays MSE(tanh(score/400)))")
     return parser.parse_args(argv)
+
+
+def make_optimizer(model: nnue.NNUEModel, lr: float,
+                   hidden_lr: float | None = None):
+    """Keep large hidden sums from saturating while the output scale learns."""
+    if hidden_lr is None:
+        return torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    hidden_names = {"W0", "b0", "W1", "b1"}
+    return torch.optim.AdamW([
+        {"params": [p for n, p in model.named_parameters() if n in hidden_names],
+         "lr": hidden_lr},
+        {"params": [p for n, p in model.named_parameters() if n not in hidden_names],
+         "lr": lr}], weight_decay=1e-5)
 
 
 def collate_batch(batch):
@@ -135,8 +151,7 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
 
     config = nnue.ModelConfig(wdl_temperature=args.wdl_temperature)
     model = nnue.NNUEModel(seed=args.seed, config=config).to(device)
-    optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr,
-                                  weight_decay=1e-5)
+    optimiser = make_optimizer(model, args.lr, args.hidden_lr)
     history: list[dict] = []
     data_identity = file_identity(args.data)
     best_val, best_epoch = float("inf"), 0
@@ -205,6 +220,7 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
         "device": info,
         "config": {
             "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
+            "hidden_lr": args.hidden_lr,
             "wdl_weight": args.wdl_weight,
             "wdl_temperature": args.wdl_temperature,
             "quant_reg": args.quant_reg,
@@ -235,6 +251,9 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if any(v is not None and (not math.isfinite(v) or v <= 0)
+           for v in (args.lr, args.hidden_lr)):
+        raise SystemExit("learning rates must be finite and positive")
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = resolve_device(args.device)

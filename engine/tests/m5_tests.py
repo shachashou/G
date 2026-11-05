@@ -9,6 +9,7 @@ import os
 import time
 import argparse
 import importlib.util
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -116,7 +117,7 @@ class DiagnosticTests(unittest.TestCase):
             self.assertFalse(set(manifest["calibration_games"]) & set(manifest["assessment_games"]))
             self.assertGreater(report["comparisons"]["original_vs_final"]["score_units"]["mae"], 0)
             for name in ("fit1", "fit2"):
-                result = subprocess.run(base + ["overfit", "--steps", "2", "--device", "cpu",
+                result = subprocess.run(base + ["overfit", "--steps", "2", "--device", "cpu", "--hidden-lr", "0.001",
                     "--out-dir", str(tmp / name)], capture_output=True, text=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stderr)
             first = json.loads((tmp / "fit1/report.json").read_text())
@@ -124,6 +125,44 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(first["manifest"], second["manifest"])
             self.assertFalse(first["manifest"]["augmentation"])
             self.assertEqual(first["arms"]["float"]["curve"], second["arms"]["float"]["curve"])
+            trained = torch.load(tmp / "fit1/float.pt", weights_only=False)["model_state"]
+            self.assertTrue(torch.load(tmp / "fit1/ste.pt", weights_only=False)["train_args"]["quant_forward"])
+            initial = nnue.NNUEModel(seed=20261106).state_dict()
+            self.assertLess(float((trained["W1"] - initial["W1"]).abs().max()), .0021)
+            self.assertGreater(float((trained["W2"] - initial["W2"]).abs().max()), .01)
+            train_result = subprocess.run([sys.executable, str(ROOT / "trainer/train.py"),
+                "--data", str(data), "--epochs", "2", "--batch-size", "1024", "--device", "cpu",
+                "--hidden-lr", "0.001", "--seed", "20261106", "--output", str(tmp / "trained.pt"),
+                "--history", str(tmp / "training.json")], capture_output=True, text=True, timeout=30)
+            self.assertEqual(train_result.returncode, 0, train_result.stderr)
+            training_report = json.loads((tmp / "training.json").read_text())
+            self.assertEqual(training_report["config"]["hidden_lr"], .001)
+            trained_state = torch.load(tmp / "trained.pt", weights_only=False)["model_state"]
+            self.assertLess(float((trained_state["W1"] - initial["W1"]).abs().max()), .0021)
+            # QAT exports must retain their trained integer forward; calibrating
+            # toward unrounded master weights would change the trained model.
+            import weights_format as wf
+            with torch.no_grad():
+                model.W2.add_(.49)
+            qat_checkpoint = tmp / "qat.pt"
+            payload = torch.load(checkpoint, weights_only=False)
+            payload["model_state"] = model.state_dict()
+            payload["train_args"]["quant_forward"] = True
+            torch.save(payload, qat_checkpoint)
+            expected_weights = model.quantized_weights()
+            for tool in ("export", "fidelity"):
+                if tool == "export":
+                    args = [str(ROOT / "trainer/export.py"), "--output", str(tmp / "qat.nnue"),
+                            "--report", str(tmp / "qat_export.json")]
+                    weights_file = tmp / "qat.nnue"
+                else:
+                    args = [str(ROOT / "trainer/diagnose.py"), "fidelity", "--out-dir", str(tmp / "qat_fidelity")]
+                    weights_file = tmp / "qat_fidelity/candidate.nnue"
+                result = subprocess.run([sys.executable, *args, "--checkpoint", str(qat_checkpoint),
+                    "--data", str(data)], capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(mr.file_identity(weights_file)["sha256"],
+                                 hashlib.sha256(wf.pack_weights(expected_weights)).hexdigest())
             # A replaced dataset must not masquerade as checkpoint holdout data.
             data.write_bytes(data.read_bytes() + b"changed")
             invalid = subprocess.run(base + ["fidelity", "--checkpoint", str(checkpoint),

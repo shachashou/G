@@ -114,13 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         quant_eval = model(x, stm, quantized=True).cpu().tolist()
 
     raw_int = int_evals(weights, samples)
+    trained_quantized = bool(payload.get("train_args", {}).get("quant_forward", False))
+    calibration_reference = quant_eval if trained_quantized else float_eval
     before = error_stats(float_eval, raw_int)
     # The STE integer-equivalent forward must match the reference exactly.
     ste_vs_int = error_stats(quant_eval, raw_int)
 
     head_bias = [0, 0]
     if not args.no_calibrate:
-        head_bias = calibrate_bias(weights, float_eval, raw_int, [s[1] for s in samples])
+        head_bias = calibrate_bias(weights, calibration_reference, raw_int, [s[1] for s in samples])
 
     # Parity is measured against a model rebuilt from the FINAL exported
     # weights (including the calibrated output biases).
@@ -152,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             "weight_clamp": wf.WEIGHT_CLAMP,
             "head_bias_calibration": head_bias,
             "calibrated": not args.no_calibrate,
+            "calibration_reference": "trained_ste" if trained_quantized else "trained_float",
         },
         "parity": {
             "before_calibration": before,

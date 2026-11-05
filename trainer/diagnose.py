@@ -23,6 +23,7 @@ import dataset
 import export
 import features
 import nnue
+import train
 import weights_format as wf
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,15 +163,18 @@ def fidelity(args, out: Path) -> dict:
         with torch.no_grad():
             return model(x, stm, quantized=quantized).tolist()
     original, ste = forwards(assessment), forwards(assessment, True)
+    trained_quantized = bool(training.get("quant_forward", False))
+    trained_forward = ste if trained_quantized else original
     raw = export.int_evals(weights, assessment)
     calibrated = copy.deepcopy(weights)
-    bias = export.calibrate_bias(calibrated, forwards(calibration),
+    bias = export.calibrate_bias(calibrated, forwards(calibration, trained_quantized),
                                  export.int_evals(weights, calibration),
                                  [s[1] for s in calibration])
     final = export.int_evals(calibrated, assessment)
     weights_path = out / "candidate.nnue"
     weights_path.write_bytes(wf.pack_weights(calibrated))
-    variants = {"original_float": original, "ste": ste, "raw_integer": raw,
+    variants = {"original_float": original, "trained_forward": trained_forward,
+                "ste": ste, "raw_integer": raw,
                 "final_calibrated_integer": final}
     cpp = {"available": False, "reason": "--probe not supplied"}
     if args.probe:
@@ -195,18 +199,23 @@ def fidelity(args, out: Path) -> dict:
     return {"mode": "fidelity", "checkpoint": file_identity(args.checkpoint),
             "candidate": file_identity(weights_path), "manifest": manifest,
             "head_bias_calibration": bias, "cpp": cpp,
+            "calibration_reference": "trained_ste" if trained_quantized else "trained_float",
             "predictions": variants, "metrics": variant_metrics,
             "baseline": baselines,
             "comparisons": {"original_vs_raw": prediction_comparison(original, raw, model.config.score_scale),
                             "original_vs_final": prediction_comparison(original, final, model.config.score_scale),
+                            "trained_forward_vs_final": prediction_comparison(trained_forward, final, model.config.score_scale),
                             "ste_vs_raw": prediction_comparison(ste, raw, model.config.score_scale)},
             "interpretation": "Arithmetic parity and export fidelity are separate. No capacity conclusion follows from this report alone."}
 
 
-def activation_stats(model, x):
+def activation_stats(model, x, quantized=False):
     with torch.no_grad():
-        a = x @ model.W0 + model.b0
-        b = a.clamp(0, model.config.qa) @ model.W1 / model.config.qa + model.b1
+        w0, b0, w1, b1, _, _ = model._tensors(quantized)
+        a = (x @ w0 + b0).clamp(wf.INT16_MIN, wf.INT16_MAX)
+        z = a.clamp(0, model.config.qa) @ w1
+        b = (nnue.RoundDivSte.apply(z, model.config.qa) if quantized
+             else z / model.config.qa) + b1
         return {name: {"low_fraction": float((v <= 0).float().mean()),
                        "high_fraction": float((v >= hi).float().mean())}
                 for name, v, hi in (("accumulator", a, model.config.qa),
@@ -230,7 +239,8 @@ def overfit(args, out: Path) -> dict:
     for quantized in (False, True):
         name = "ste" if quantized else "float"
         model = nnue.NNUEModel(seed=args.seed).to(device)
-        optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-5)
+        hidden_lr = args.lr if args.hidden_lr is None else args.hidden_lr
+        optimiser = train.make_optimizer(model, args.lr, args.hidden_lr)
         curve = []
         for step in range(args.steps + 1):
             prediction = model(x, stm, quantized=quantized)
@@ -247,6 +257,7 @@ def overfit(args, out: Path) -> dict:
                        "mse": float(mse.detach()), "ce": float(ce.detach()),
                        "gradient_norms": gradients,
                        "activations_float": activation_stats(model, x),
+                       "activations_forward": activation_stats(model, x, quantized),
                        "prediction": metrics(prediction.detach().cpu().tolist(), samples, model)}
                 curve.append(row)
                 write_json(out / f"{name}_curve.json", {"complete": False, "curve": curve})
@@ -255,10 +266,12 @@ def overfit(args, out: Path) -> dict:
                 optimiser.step()
         # Keep the final same-set checkpoint; never select on independent validation.
         torch.save({"model_state": model.cpu().state_dict(), "config": vars(model.config),
-                    "train_args": vars(args), "diagnostic_only": True}, out / f"{name}.pt")
+                    "train_args": {**vars(args), "quant_forward": quantized},
+                    "diagnostic_only": True}, out / f"{name}.pt")
         write_json(out / f"{name}_curve.json", {"complete": True, "curve": curve})
-        arms[name] = {"curve": curve, "checkpoint": file_identity(out / f"{name}.pt")}
-    return {"mode": "overfit", "manifest": manifest, "arms": arms,
+        arms[name] = {"curve": curve, "checkpoint": file_identity(out / f"{name}.pt"),
+                      "optimizer_group_lrs": {"hidden": hidden_lr, "output": args.lr}}
+    return {"mode": "overfit", "manifest": manifest, "arms": arms, "device": str(device),
             "interpretation": "Compare same-set float/STE fit, gradients and clipping before changing capacity. No held-out strength claim."}
 
 
@@ -277,6 +290,8 @@ def main(argv=None):
     parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--lr", type=float, default=0.1)
+    parser.add_argument("--hidden-lr", type=float,
+                        help="optional W0/b0/W1/b1 learning rate; output keeps --lr")
     parser.add_argument("--wdl-weight", type=float, default=0.2)
     parser.add_argument("--quant-reg", type=float, default=0.05)
     parser.add_argument("--score-clip", type=float, default=0)
@@ -284,6 +299,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.samples < 2 or args.steps < 1 or args.log_every < 1 or args.threads < 1:
         parser.error("samples >=2, steps/log-every/threads >=1 required")
+    if any(v is not None and (not math.isfinite(v) or v <= 0)
+           for v in (args.lr, args.hidden_lr)):
+        parser.error("learning rates must be finite and positive")
     if args.mode == "fidelity" and not args.checkpoint:
         parser.error("fidelity requires --checkpoint")
     if args.out_dir.exists():

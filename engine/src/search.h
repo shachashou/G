@@ -13,6 +13,8 @@ namespace gomoku {
 struct SearchLimits {
   int maxDepth = 8;
   int moveTimeMs = 1000;  // 0 => no clock, use maxDepth only
+  bool useVcf = true;
+  uint64_t vcfNodeLimit = 5000;
 };
 
 struct SearchResult {
@@ -20,6 +22,7 @@ struct SearchResult {
   int score = 0;
   int reachedDepth = 0;
   uint64_t nodes = 0;
+  bool fromVcf = false;
 };
 
 // Negamax Alpha-Beta with Principal Variation Search, a 64MB transposition

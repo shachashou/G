@@ -4,6 +4,7 @@ set(ENGINE_CORE_SRC
   src/eval.cpp
   src/movegen.cpp
   src/search.cpp
+  src/vcf.cpp
   src/random_player.cpp)
 
 # GomokuNNUE engine target
@@ -37,6 +38,12 @@ add_executable(search_tests tests/search_tests.cpp ${ENGINE_CORE_SRC})
 target_compile_features(search_tests PRIVATE cxx_std_20)
 target_include_directories(search_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME search_tests COMMAND search_tests)
+
+# VCF (continuous-fours) tactic tests (ticket 05)
+add_executable(vcf_tests tests/vcf_tests.cpp ${ENGINE_CORE_SRC})
+target_compile_features(vcf_tests PRIVATE cxx_std_20)
+target_include_directories(vcf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME vcf_tests COMMAND vcf_tests)
 
 # Protocol black-box test: drives the exe via stdin/stdout.
 # Prefer the project venv (py -3.12 -m venv .venv), never the system Python.

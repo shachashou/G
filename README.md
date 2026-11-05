@@ -47,6 +47,7 @@ cmake --build build --config Release
 .\build\engine\Release\gomoku_nnue.exe --depth 4      # 固定深度（测试用，忽略时间）
 .\build\engine\Release\gomoku_nnue.exe --movetime 500 # 每步思考 500ms（默认 1000）
 .\build\engine\Release\gomoku_nnue.exe --random       # 随机合法走子基线，用于强度对照
+.\build\engine\Release\gomoku_nnue.exe --no-vcf       # 关闭 VCF 算杀（M2 基线，用于 A/B）
 .\build\engine\Release\gomoku_nnue.exe --help
 ```
 
@@ -61,8 +62,8 @@ py -3.12 -m venv .venv
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-包含 4 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests`）与协议黑盒测试（`protocol_blackbox`，经项目 `.venv` 运行；也可手动执行：
-`.venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe`）。黑盒内含双引擎自对弈、规则切换、时间控制，以及搜索引擎对随机基线 6 局全胜的强度验收。
+包含 5 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests`）与协议黑盒测试（`protocol_blackbox`，经项目 `.venv` 运行；也可手动执行：
+`.venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe`）。黑盒内含双引擎自对弈、规则切换、时间控制、VCF 杀局与搜索引擎对随机基线 6 局全胜的强度验收。
 
 ## 里程碑
 
@@ -77,7 +78,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
-**当前进度**：工单 01–04 完成——M2 达成，引擎已是真会下棋的 Alpha-Beta + 手工评估（PVS/64MB 置换表/Zobrist/杀手/历史启发、邻域候选剪枝、时间管理），对随机基线 6 局全胜。NNUE 与训练流水线在 M4 起落地。
+**当前进度**：工单 01–05 完成——M3 达成，在 Alpha-Beta + 手工评估之上接入 VCF 连续冲四算杀（含 Renju 禁手杀、活四终局、节点/深度上限），根节点命中即返回必胜着法。NNUE 与训练流水线在 M4 起落地。
 
 ## 工具用法（占位，随里程碑填充）
 

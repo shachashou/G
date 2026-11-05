@@ -14,6 +14,7 @@ struct EngineConfig {
   bool random = false;    // --random: baseline random legal mover
   int fixedDepth = 0;     // --depth N: fixed depth, no clock
   int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
+  bool useVcf = true;     // --no-vcf: M2 baseline for A/B comparisons
 };
 
 // Gomocup/piskvork protocol subset over stdin/stdout:

@@ -208,6 +208,33 @@ def test_self_play():
     check(white.close() == 0, "white engine exits cleanly")
 
 
+def test_vcf_puzzle():
+    print("[VCF puzzle]")
+    stones = [(4, 7, 1), (0, 0, 1), (2, 0, 1), (4, 0, 1),
+              (5, 7, 2), (6, 7, 2), (7, 7, 2), (6, 5, 2), (7, 6, 2)]
+
+    def sync_position(e):
+        e.send("START 15")
+        e.recv()
+        e.send("BOARD")
+        for x, y, c in stones:
+            e.send(f"{x},{y},{c}")
+        e.send("DONE")
+
+    e = Engine(["--depth", "2"])
+    sync_position(e)
+    mv = parse_move(e.recv())
+    check(mv == (8, 7), f"VCF engine plays the forcing four (got {mv})")
+    e.close()
+
+    baseline = Engine(["--no-vcf", "--depth", "2"])
+    sync_position(baseline)
+    mv2 = parse_move(baseline.recv())
+    check(mv2 is not None and mv2 not in {(x, y) for x, y, _ in stones},
+          "--no-vcf baseline still answers legally")
+    baseline.close()
+
+
 def test_time_management():
     print("[time management]")
     e = Engine(["--movetime", "1000"])
@@ -282,6 +309,7 @@ def main():
     test_basic_commands()
     test_board_sync()
     test_rule_switch()
+    test_vcf_puzzle()
     test_time_management()
     test_self_play()
     test_strength_vs_random()

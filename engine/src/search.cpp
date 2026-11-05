@@ -6,6 +6,7 @@
 #include <random>
 
 #include "movegen.h"
+#include "vcf.h"
 
 namespace gomoku {
 
@@ -104,6 +105,21 @@ SearchResult Search::findBestMove(Board& board, const SearchLimits& limits) {
   generateCandidates(board, eval, rootMoves);
   if (rootMoves.empty()) return result;  // no legal move
   result.move = rootMoves[0].move;       // safe fallback
+
+  // VCF runs once at the root before Alpha-Beta: a continuous-four forced
+  // win is returned immediately with a mate score, regardless of depth.
+  if (limits.useVcf) {
+    const VcfResult vcf = solveVcf(board, VcfLimits{limits.vcfNodeLimit, 10});
+    nodes_ += vcf.nodes;
+    if (vcf.found && board.isPlayable(vcf.firstMove)) {
+      result.move = vcf.firstMove;
+      result.score = kMate - 1;
+      result.reachedDepth = 0;
+      result.nodes = nodes_;
+      result.fromVcf = true;
+      return result;
+    }
+  }
 
   for (int depth = 1; depth <= limits.maxDepth; ++depth) {
     rootBestMove_ = -1;

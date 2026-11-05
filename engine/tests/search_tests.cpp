@@ -1,4 +1,5 @@
 // Search tactical behaviour tests (ticket 04).
+#include <cmath>
 #include <initializer_list>
 #include <iostream>
 #include <utility>
@@ -71,6 +72,23 @@ int main() {
     const SearchResult r = s.findBestMove(b, SearchLimits{8, 20});
     CHECK(r.move >= 0 && b.isPlayable(r.move));
     CHECK(b.moveCount() == 0);
+  }
+
+  {
+    // VCF A/B: a 5-ply continuous-four win is found at the root even at
+    // depth 2, while the M2 baseline (--no-vcf) sees no mate.
+    Board b = makeBoard({{4, 7}, {0, 0}, {2, 0}, {4, 0}},
+                        {{5, 7}, {6, 7}, {7, 7}, {6, 5}, {7, 6}},
+                        Color::White);
+    Search s1(1 << 20);
+    Search s2(1 << 20);
+    const SearchResult r1 = s1.findBestMove(b, SearchLimits{2, 0, true});
+    const SearchResult r2 = s2.findBestMove(b, SearchLimits{2, 0, false});
+    CHECK(r1.fromVcf);
+    CHECK(r1.score > 900000);
+    CHECK(r1.move == p(8, 7));
+    CHECK(!r2.fromVcf);
+    CHECK(std::abs(r2.score) < 900000);
   }
 
   if (g_failures > 0) {

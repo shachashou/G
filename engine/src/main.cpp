@@ -13,6 +13,7 @@ void printUsage() {
             << "  --random             random legal mover (strength baseline)\n"
             << "  --depth N            fixed search depth N (no clock)\n"
             << "  --movetime N         per-move time budget in ms (default 1000)\n"
+            << "  --no-vcf             disable VCF solver (M2 baseline for A/B)\n"
             << "  --help               show this help\n"
             << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
 }
@@ -34,6 +35,8 @@ int main(int argc, char* argv[]) {
     }
     if (a == "--random") {
       cfg.random = true;
+    } else if (a == "--no-vcf") {
+      cfg.useVcf = false;
     } else if (a == "--depth" && i + 1 < argc) {
       cfg.fixedDepth = std::atoi(argv[++i]);
     } else if (a == "--movetime" && i + 1 < argc) {

@@ -21,9 +21,9 @@ constexpr Color opponent(Color c) {
 constexpr Color colorOf(Cell c) { return static_cast<Color>(c); }
 constexpr Cell cellOf(Color c) { return static_cast<Cell>(c); }
 
-// 15x15 gomoku board with turn tracking and freestyle win detection
-// (five or more in a row wins for either side).
-// Renju forbidden-move exclusion (ticket 03) will hook into isPlayable().
+// 15x15 gomoku board with turn tracking and rule-aware win detection.
+// In Renju mode black's forbidden points are excluded from isPlayable() and
+// black needs EXACTLY five; in freestyle five or more wins for either side.
 class Board {
  public:
   explicit Board(RuleMode mode = RuleMode::Renju);

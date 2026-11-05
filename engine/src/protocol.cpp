@@ -103,7 +103,8 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
     const std::optional<int> move = parseXY(arg);
     if (!move) {
       out << "ERROR malformed move\n";
-    } else if (!board_.isEmpty(*move)) {
+    } else if (!board_.isPlayable(*move)) {
+      // Occupied point or (Renju, black) a forbidden move.
       out << "ERROR illegal move\n";
     } else if (board_.result() != GameResult::Ongoing) {
       // Game already decided; nothing to answer.
@@ -155,7 +156,8 @@ void Protocol::handleInfo(const std::string& arg) {
   const std::string key = arg.substr(0, sp);
   const std::string value = arg.substr(sp + 1);
   if (key == "rule") {
-    // Engine contract: 1 = freestyle, 2 = Renju. Ticket 03 makes it bite.
+    // Engine contract: 1 = freestyle, 2 = Renju. Foul exclusion and
+    // black's exact-five win are enforced in Board::isPlayable / place.
     try {
       const int v = std::stoi(value);
       if (v == static_cast<int>(RuleMode::Freestyle)) {

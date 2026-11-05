@@ -69,6 +69,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
+**当前进度**：工单 01–03 完成——M1 规则层就绪（Renju 禁手判定 + 五连优先 + `INFO rule` 切换，题库与 D4 对称测试全绿）。引擎棋力仍为随机合法走子，搜索随 M2（工单 04）落地。
+
 ## 工具用法（占位，随里程碑填充）
 
 - `tools/` datagen：多进程自我对弈批量生成训练数据（M4）

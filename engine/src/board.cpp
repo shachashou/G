@@ -1,5 +1,7 @@
 #include "board.h"
 
+#include "renju.h"
+
 namespace gomoku {
 
 namespace {
@@ -26,40 +28,23 @@ void Board::reset(RuleMode mode) {
 
 bool Board::isPlayable(int move) const {
   if (!inBounds(move) || cells_[move] != Cell::Empty) return false;
-  // Renju forbidden-move exclusion for black arrives with ticket 03.
+  // Renju: black's forbidden points are simply not legal moves.
+  if (mode_ == RuleMode::Renju && sideToMove_ == Color::Black) {
+    return !renju::isForbiddenMove(cells_, move);
+  }
   return true;
 }
 
 bool Board::createsWin(const std::array<Cell, kCells>& cells, int move, Color c) {
-  const int x = xOf(move);
-  const int y = yOf(move);
-  const Cell target = cellOf(c);
-  for (const Direction& d : kDirections) {
-    int count = 1;
-    for (int i = 1; i < kBoardSize; ++i) {
-      const int nx = x + d.dx * i;
-      const int ny = y + d.dy * i;
-      if (nx < 0 || nx >= kBoardSize || ny < 0 || ny >= kBoardSize) break;
-      if (cells[indexOf(nx, ny)] != target) break;
-      ++count;
-    }
-    for (int i = 1; i < kBoardSize; ++i) {
-      const int nx = x - d.dx * i;
-      const int ny = y - d.dy * i;
-      if (nx < 0 || nx >= kBoardSize || ny < 0 || ny >= kBoardSize) break;
-      if (cells[indexOf(nx, ny)] != target) break;
-      ++count;
-    }
-    if (count >= 5) return true;
-  }
-  return false;
+  // Freestyle semantics (five or more). Renju-aware checks live in renju.h.
+  return renju::isWin(cells, move, c, RuleMode::Freestyle);
 }
 
 void Board::place(int move) {
   history_.push_back({move, result_});
   cells_[move] = cellOf(sideToMove_);
   ++moveCount_;
-  if (createsWin(cells_, move, sideToMove_)) {
+  if (renju::isWin(cells_, move, sideToMove_, mode_)) {
     result_ = sideToMove_ == Color::Black ? GameResult::BlackWin : GameResult::WhiteWin;
   } else if (moveCount_ == kCells) {
     result_ = GameResult::Draw;
@@ -120,7 +105,12 @@ GameResult Board::computeResult() const {
         nx += d.dx;
         ny += d.dy;
       }
-      if (count >= 5) {
+      // Renju: black wins only with EXACTLY five (overline is a foul);
+      // white and all freestyle wins accept five or more.
+      const bool win = (mode_ == RuleMode::Renju && c == Cell::Black)
+                           ? (count == 5)
+                           : (count >= 5);
+      if (win) {
         return c == Cell::Black ? GameResult::BlackWin : GameResult::WhiteWin;
       }
     }

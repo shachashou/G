@@ -141,6 +141,24 @@ def test_board_sync():
     e.close()
 
 
+def test_rule_switch():
+    print("[rule switch]")
+    e = Engine()
+    e.send("START 15")
+    e.recv()
+    e.send("INFO rule 2")
+    e.send("TURN 7,7")
+    mv = parse_move(e.recv())
+    check(mv is not None and mv != (7, 7), "Renju mode: TURN answered normally")
+    e.send("INFO rule 1")
+    e.send("RESTART")
+    check(e.recv() == "OK", "freestyle mode: RESTART -> OK")
+    e.send("BEGIN")
+    mv2 = parse_move(e.recv())
+    check(mv2 is not None, "freestyle mode: BEGIN answered normally")
+    e.close()
+
+
 def test_self_play():
     print("[full self-play game]")
     black = Engine()
@@ -190,6 +208,7 @@ def main():
     test_version_flag()
     test_basic_commands()
     test_board_sync()
+    test_rule_switch()
     test_self_play()
     print()
     if failures:

@@ -1,9 +1,11 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <optional>
 #include <sstream>
 #include <string>
 
+#include "search.h"
 #include "version.h"
 
 namespace gomoku {
@@ -60,7 +62,26 @@ void stripCR(std::string& line) {
   if (!line.empty() && line.back() == '\r') line.pop_back();
 }
 
+int parseInt(const std::string& s) {
+  try {
+    return std::stoi(s);
+  } catch (...) {
+    return 0;
+  }
+}
+
 }  // namespace
+
+Protocol::Protocol(const EngineConfig& cfg) : cfg_(cfg) {
+  if (!cfg_.random) search_ = std::make_unique<Search>();
+}
+
+int Protocol::effectiveMoveTimeMs() const {
+  int ms = cfg_.moveTimeMs;
+  if (timeoutTurnMs_ > 0) ms = timeoutTurnMs_ * 8 / 10;  // GUI cap, with headroom
+  if (timeLeftMs_ > 0) ms = std::min(ms, timeLeftMs_ / 20);
+  return std::max(10, ms);
+}
 
 int Protocol::run(std::istream& in, std::ostream& out) {
   std::string line;
@@ -168,12 +189,37 @@ void Protocol::handleInfo(const std::string& arg) {
     } catch (...) {
     }
   }
-  // Other INFO keys (timeout_turn, timeout_match, ...) are consumed from
-  // ticket 04 (time management); silently accepted for now.
+  if (key == "timeout_turn") {
+    timeoutTurnMs_ = parseInt(value);
+  } else if (key == "timeout_match") {
+    timeoutMatchMs_ = parseInt(value);
+  } else if (key == "time_left") {
+    timeLeftMs_ = parseInt(value);
+  }
+  // Other INFO keys are accepted silently (Gomocup GUIs send many).
 }
 
 void Protocol::playEngineMove(std::ostream& out) {
-  const int move = player_.pickMove(board_);
+  int move = -1;
+  if (cfg_.random) {
+    move = player_.pickMove(board_);
+  } else {
+    SearchLimits limits;
+    if (cfg_.fixedDepth > 0) {
+      limits.maxDepth = cfg_.fixedDepth;
+      limits.moveTimeMs = 0;
+    } else {
+      limits.maxDepth = 8;
+      limits.moveTimeMs = effectiveMoveTimeMs();
+    }
+    const SearchResult result = search_->findBestMove(board_, limits);
+    move = (result.move >= 0 && board_.isPlayable(result.move))
+               ? result.move
+               : player_.pickMove(board_);
+    // timeout_match_ is consumed for protocol completeness; per-move budget
+    // is governed by timeout_turn / time_left above.
+    (void)timeoutMatchMs_;
+  }
   if (move < 0) {
     out << "ERROR no legal move\n";
     return;

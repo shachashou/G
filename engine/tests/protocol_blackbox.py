@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 
 EXE = sys.argv[1] if len(sys.argv) > 1 else "gomoku_nnue.exe"
 SIZE = 15
@@ -25,9 +26,10 @@ def check(cond, msg):
 
 
 class Engine:
-    def __init__(self):
+    def __init__(self, args=None):
+        argv = [EXE] + list(args or [])
         self.p = subprocess.Popen(
-            [EXE], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             text=True, encoding="utf-8", bufsize=1)
         # Watchdog so a protocol bug can never hang the suite.
         self.watchdog = threading.Timer(WATCHDOG_SECONDS, self.p.kill)
@@ -161,8 +163,10 @@ def test_rule_switch():
 
 def test_self_play():
     print("[full self-play game]")
-    black = Engine()
-    white = Engine()
+    # Fixed shallow depth keeps the whole suite under the 10s watchdog;
+    # time-managed search is covered separately.
+    black = Engine(["--depth", "2"])
+    white = Engine(["--depth", "2"])
     for e in (black, white):
         e.send("START 15")
         e.recv()
@@ -204,12 +208,83 @@ def test_self_play():
     check(white.close() == 0, "white engine exits cleanly")
 
 
+def test_time_management():
+    print("[time management]")
+    e = Engine(["--movetime", "1000"])
+    e.send("START 15")
+    e.recv()
+    e.send("INFO timeout_turn 100")
+    e.send("TURN 7,7")
+    t0 = time.time()
+    mv = parse_move(e.recv())
+    elapsed = time.time() - t0
+    check(mv is not None, "time-limited search still returns a legal move")
+    check(elapsed < 3.0, f"INFO timeout_turn honored ({elapsed:.2f}s < 3s)")
+    e.close()
+
+
+def test_strength_vs_random():
+    print("[strength: search engine vs random baseline]")
+    total = 0
+    wins_count = 0
+    for game in range(6):
+        strong = Engine(["--depth", "2"])
+        rnd = Engine(["--random"])
+        for e in (strong, rnd):
+            e.send("START 15")
+            e.recv()
+        engine_black = game % 2 == 0
+        black, white = (strong, rnd) if engine_black else (rnd, strong)
+        black.send("BEGIN")
+
+        board = [[0] * SIZE for _ in range(SIZE)]
+        mv = parse_move(black.recv())
+        mover = black
+        moves = 0
+        outcome = None
+        while mv is not None:
+            legal = 0 <= mv[0] < SIZE and 0 <= mv[1] < SIZE and board[mv[1]][mv[0]] == 0
+            if not legal:
+                outcome = "invalid-move"
+                break
+            board[mv[1]][mv[0]] = 1 if mover is black else 2
+            moves += 1
+            if wins(board, mv[0], mv[1]):
+                outcome = "black-win" if mover is black else "white-win"
+                break
+            if moves >= SIZE * SIZE:
+                outcome = "draw"
+                break
+            other = white if mover is black else black
+            other.send(f"TURN {mv[0]},{mv[1]}")
+            nxt = parse_move(other.recv())
+            if nxt is None:
+                outcome = "bad-reply"
+                break
+            mv = nxt
+            mover = other
+
+        total += 1
+        strong_won = ((outcome == "black-win" and engine_black) or
+                      (outcome == "white-win" and not engine_black))
+        if strong_won:
+            wins_count += 1
+        check(outcome in ("black-win", "white-win", "draw"),
+              f"game {game + 1} finished ({outcome}, {moves} moves)")
+        strong.close()
+        rnd.close()
+    check(wins_count == total,
+          f"search engine beat random baseline in {wins_count}/{total} games")
+
+
 def main():
     test_version_flag()
     test_basic_commands()
     test_board_sync()
     test_rule_switch()
+    test_time_management()
     test_self_play()
+    test_strength_vs_random()
     print()
     if failures:
         print(f"{failures} check(s) FAILED")

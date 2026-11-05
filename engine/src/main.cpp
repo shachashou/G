@@ -1,17 +1,47 @@
+#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
 #include "protocol.h"
 #include "version.h"
 
+namespace {
+
+void printUsage() {
+  std::cout << "Usage: gomoku_nnue [options]\n"
+            << "  --version            print engine banner and exit\n"
+            << "  --random             random legal mover (strength baseline)\n"
+            << "  --depth N            fixed search depth N (no clock)\n"
+            << "  --movetime N         per-move time budget in ms (default 1000)\n"
+            << "  --help               show this help\n"
+            << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
+}
+
+}  // namespace
+
 int main(int argc, char* argv[]) {
-  if (argc > 1 && std::string_view(argv[1]) == "--version") {
-    std::cout << gomoku::kEngineName << ' ' << gomoku::kEngineVersion
-              << " (C++20, MSVC, AVX2) - Renju NNUE engine\n";
-    return 0;
+  gomoku::EngineConfig cfg;
+  for (int i = 1; i < argc; ++i) {
+    const std::string_view a(argv[i]);
+    if (a == "--version") {
+      std::cout << gomoku::kEngineName << ' ' << gomoku::kEngineVersion
+                << " (C++20, MSVC, AVX2) - Renju NNUE engine\n";
+      return 0;
+    }
+    if (a == "--help") {
+      printUsage();
+      return 0;
+    }
+    if (a == "--random") {
+      cfg.random = true;
+    } else if (a == "--depth" && i + 1 < argc) {
+      cfg.fixedDepth = std::atoi(argv[++i]);
+    } else if (a == "--movetime" && i + 1 < argc) {
+      cfg.moveTimeMs = std::atoi(argv[++i]);
+    }
   }
   // Protocol mode: speak Gomocup on stdin/stdout. No banner — extra output
   // would corrupt the protocol stream.
-  gomoku::Protocol protocol;
+  gomoku::Protocol protocol(cfg);
   return protocol.run(std::cin, std::cout);
 }

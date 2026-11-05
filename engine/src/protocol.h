@@ -1,24 +1,33 @@
 #pragma once
 
 #include <iosfwd>
+#include <memory>
 #include <string>
 
 #include "board.h"
 #include "random_player.h"
+#include "search.h"
 
 namespace gomoku {
 
-// Gomocup/piskvork protocol subset over stdin/stdout (ticket 02):
+struct EngineConfig {
+  bool random = false;    // --random: baseline random legal mover
+  int fixedDepth = 0;     // --depth N: fixed depth, no clock
+  int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
+};
+
+// Gomocup/piskvork protocol subset over stdin/stdout:
 //   START [size]      -> OK / ERROR
 //   RESTART           -> OK
 //   BEGIN             -> engine's first move as black
 //   TURN x,y          -> applies opponent move, replies with engine move
 //   BOARD / x,y,c ... / DONE -> sync position, replies with engine move
-//   INFO key value    -> no reply (rule 1=freestyle, 2=renju)
+//   INFO key value    -> no reply (rule 1=freestyle, 2=renju; time controls)
 //   ABOUT             -> engine info line
 //   END               -> exits
 class Protocol {
  public:
+  explicit Protocol(const EngineConfig& cfg);
   // Reads commands until END or EOF; returns process exit code.
   int run(std::istream& in, std::ostream& out);
 
@@ -28,9 +37,16 @@ class Protocol {
   bool readBoard(std::istream& in, std::ostream& out);
   void handleInfo(const std::string& arg);
   void playEngineMove(std::ostream& out);
+  int effectiveMoveTimeMs() const;
 
+  EngineConfig cfg_;
   Board board_;
   RandomPlayer player_;
+  // Allocated only for the search engine: the random baseline stays tiny.
+  std::unique_ptr<Search> search_;
+  int timeoutTurnMs_ = 0;
+  int timeoutMatchMs_ = 0;
+  int timeLeftMs_ = 0;
 };
 
 }  // namespace gomoku

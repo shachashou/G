@@ -34,6 +34,7 @@ class Board {
   static int yOf(int move) { return move / kBoardSize; }
 
   Cell cell(int move) const { return cells_[move]; }
+  const std::array<Cell, kCells>& rawCells() const { return cells_; }
   bool isEmpty(int move) const { return cells_[move] == Cell::Empty; }
   // Empty and legal under the current rule mode (Renju fouls arrive in 03).
   bool isPlayable(int move) const;

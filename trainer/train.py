@@ -52,6 +52,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="cap samples per split for a quick smoke run")
     parser.add_argument("--quant-forward", action="store_true",
                         help="QAT mode: integer-equivalent STE forward")
+    parser.add_argument("--score-clip", type=float, default=0.0,
+                        help="clip saturated +/-32767 search scores to +/-N "
+                             "(0 disables; loss stays MSE(tanh(score/400)))")
     return parser.parse_args(argv)
 
 
@@ -201,6 +204,7 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
             "quant_reg": args.quant_reg,
             "val_fraction": args.val_fraction, "seed": args.seed,
             "quant_forward": args.quant_forward, "limit": args.limit,
+            "score_clip": args.score_clip,
         },
         "dataset": {
             "train_records": len(train_set), "val_records": len(val_set),
@@ -232,13 +236,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"device: {info['device']} | torch {info['torch']} | "
           f"CUDA {info['cuda_available']}"
           + (f" | {info['cuda_name']}" if info["cuda_name"] else ""))
+    if args.score_clip > 0:
+        print(f"score_clip: +/-{args.score_clip:g} (saturated search scores "
+              f"clipped before the tanh loss)")
 
     train_set = ds.BinpackDataset(
         args.data, "train", args.val_fraction, args.seed,
-        augment=True, max_records=args.limit)
+        augment=True, max_records=args.limit, score_clip=args.score_clip)
     val_set = ds.BinpackDataset(
         args.data, "val", args.val_fraction, args.seed,
-        augment=False, max_records=args.limit)
+        augment=False, max_records=args.limit, score_clip=args.score_clip)
     try:
         ds.assert_disjoint(train_set, val_set)
         return run_training(args, train_set, val_set, device, info)

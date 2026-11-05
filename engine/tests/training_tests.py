@@ -248,6 +248,42 @@ def test_game_split(tmp: Path) -> None:
     val_set.close()
 
 
+def test_score_clip(tmp: Path) -> None:
+    """Optional saturation clipping (ticket 10): default behaviour unchanged."""
+    check(dataset.clip_score(32767, 0) == 32767,
+          "score_clip=0 keeps saturated labels (ticket-08 behaviour)")
+    check(dataset.clip_score(32767, 600) == 600,
+          "positive saturated label is clipped")
+    check(dataset.clip_score(-32767, 600) == -600,
+          "negative saturated label is clipped")
+    check(dataset.clip_score(120, 600) == 120,
+          "ordinary label is untouched")
+    check(dataset.clip_score(32767, -1) == 32767,
+          "negative clip value disables clipping")
+
+    raw = bytearray(binpack.RECORD_SIZE)
+    raw[0] = 0x01  # one black stone at cell 0 -> ply 1
+    flags = binpack.GAME_START_BIT | binpack.GAME_END_BIT
+    struct.pack_into("<hBBH", raw, binpack.SCORE_OFFSET, 32767, flags, 1, 7)
+    header = binpack.pack_header(binpack.Header(
+        record_count=1, game_count=1, search_depth=4, shard_id=0,
+        base_seed=1))
+    path = tmp / "saturated.binpack"
+    path.write_bytes(header + bytes(raw))
+
+    plain = dataset.BinpackDataset(path, "train", 0.0, 7, augment=False)
+    clipped = dataset.BinpackDataset(path, "train", 0.0, 7, augment=False,
+                                     score_clip=600)
+    try:
+        check(plain[0][2] == 32767.0, "default dataset keeps the raw score")
+        check(clipped[0][2] == 600.0, "dataset applies score_clip to samples")
+        check(list(clipped.iter_samples())[0][2] == 600.0,
+              "iter_samples applies the same clipping")
+    finally:
+        plain.close()
+        clipped.close()
+
+
 def test_torch(tmp: Path) -> None:
     import torch  # noqa: F401
     import nnue
@@ -295,6 +331,18 @@ def test_torch(tmp: Path) -> None:
           "history carries a reviewable validation loss curve")
     check(checkpoint.exists(), "best checkpoint is written")
 
+    clip_history = tmp / "history_clip.json"
+    train.main(["--data", str(synthetic), "--output", str(tmp / "clip.pt"),
+                "--history", str(clip_history), "--epochs", "1",
+                "--batch-size", "4", "--limit", "6", "--device", "cpu",
+                "--score-clip", "600"])
+    clip_report = json.loads(clip_history.read_text(encoding="utf-8"))
+    check(clip_report["config"]["score_clip"] == 600,
+          "--score-clip reaches the dataset and is recorded in history")
+    check(all(row["val_loss"] == row["val_loss"]
+              for row in clip_report["epochs"]),
+          "clipped-label training runs without NaNs")
+
     weight_file = tmp / "exported.nnue"
     report_file = tmp / "export_report.json"
     export.main(["--checkpoint", str(checkpoint), "--data", str(synthetic),
@@ -324,6 +372,7 @@ def main() -> int:
         test_features()
         test_weight_format(tmp)
         test_game_split(tmp)
+        test_score_clip(tmp)
         if has_torch():
             print("torch detected: running model / train / export tests")
             test_torch(tmp)

@@ -64,6 +64,7 @@ Status: ready-for-agent
 - **量化导出**：PyTorch 权重 → int8/int16 二进制文件，带魔数与版本号；C++ 端加载时校验。
 - **NNUE 落地顺序**：标量参考实现先行，与 PyTorch 在采样局面上做数值对齐（容差内）；验证通过后再写 AVX2 向量化增量累加器。
 - **验收门控**：match_runner 批量对打；M5 验收 = 相同搜索配置下 NNUE 引擎对 M3（手工评估 + VCF）胜率 >65%。
+- **最终模型（M6 收敛时冻结）**：训练是循环内的重复动作，**没有独立的"最终训练"阶段**。M4 的首轮权重只验证流水线闭环与跨语言对齐，不是最终模型；M5 门控通过后的权重成为第一个有强度意义的**现任权重（incumbent）**；M6 每轮用现任权重驱动 datagen 自举 → 重训 → 导出 → match_runner 门控，新权重胜率达标才晋级，否则现任保持。**停止条件**：至少跑满 3 轮且连续 2 轮未晋级（或达到用户设定的轮数/时间预算）即判定收敛，把当时的现任权重冻结为最终模型，归档 `weights/final.pt` / `weights/final.nnue` / 训练 history / 导出 report / 各轮门控 JSON，并用 `weights/final_manifest.json` 记录来源轮次、数据、seed 与门控结果；这些产物沿用 `weights/` 的 gitignore 规则不入库。最终模型 = 被门控保留的最后一个晋级版本，而**不是最后一轮训练产物**。
 - **目录结构**：`engine/`（C++ 核心：board、movegen、search、protocol、nnue/ 子模块）、`trainer/`（Python：model、dataset、train、export、features）、`tools/`（datagen、match_runner）、`data/`（raw/binpack，gitignore 排除）、`weights/`（checkpoints + 量化权重）。原 README 中的 `play_gui.py`（pygame GUI）与 `datasets_download.sh` 移除，与"无图形、纯协议"的决定矛盾。
 - **里程碑 M1–M6** 按上文 Solution 执行，VCT 为 M6 之后的可选进阶项。
 

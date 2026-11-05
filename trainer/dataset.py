@@ -27,6 +27,20 @@ except ImportError:  # pragma: no cover - bare Python environment
     _DatasetBase = object
 
 
+def clip_score(value: float, clip: float) -> float:
+    """Clamp a saturated search score into the trainable ``tanh`` range.
+
+    Datagen encodes mate / out-of-range search scores as +/-32767. With the
+    ticket-08 loss ``MSE(tanh(eval/400), tanh(score/400))`` those labels map to
+    a constant +/-1 and give the network almost no usable gradient. Clipping is
+    *optional data cleaning* (``clip <= 0`` keeps the original behaviour), the
+    loss itself is unchanged, and WDL labels already carry the win/loss fact.
+    """
+    if clip <= 0:
+        return value
+    return max(-clip, min(clip, value))
+
+
 def choose_validation_games(n_games: int, val_fraction: float,
                             seed: int) -> set[int]:
     """Deterministic set of game indices held out for validation."""
@@ -61,10 +75,12 @@ def split_record_indices(game_index_map: array, val_games: set[int],
 class BinpackDataset(_DatasetBase):
     def __init__(self, path: str | Path, split: str = "train",
                  val_fraction: float = 0.1, seed: int = 0,
-                 augment: bool = True, max_records: int | None = None):
+                 augment: bool = True, max_records: int | None = None,
+                 score_clip: float = 0.0):
         self.path = Path(path)
         self.split = split
         self.augment = augment and split == "train"
+        self.score_clip = score_clip
         self.reader = binpack.BinpackReader(self.path)
         self.game_index_map = self.reader.game_index_map()
         n_games = self.game_index_map[-1] + 1 if len(self.game_index_map) else 0
@@ -83,7 +99,7 @@ class BinpackDataset(_DatasetBase):
             indices = features.transform_sparse(
                 indices, random.randrange(features.NUM_SYMMETRIES))
         return (features.dense_vector(indices), record.stm,
-                float(record.score), record.wdl)
+                clip_score(float(record.score), self.score_clip), record.wdl)
 
     def close(self) -> None:
         self.reader.close()
@@ -93,7 +109,7 @@ class BinpackDataset(_DatasetBase):
         for i in range(len(self.indices)):
             record = self.reader[self.indices[i]]
             yield (record.feature_indices(), record.stm,
-                   float(record.score), record.wdl)
+                   clip_score(float(record.score), self.score_clip), record.wdl)
 
 
 def assert_disjoint(train: BinpackDataset, val: BinpackDataset) -> None:

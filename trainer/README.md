@@ -113,9 +113,14 @@ body 从偏移 64 起，全部 little-endian、行主序：`W0 int8[450,1024]`�
 
 - 损失：`MSE(tanh(eval/400), tanh(score/400)) + wdl_weight * CE(WDL) + quant_reg * 量化正则`；WDL 三类 logits 由单一 eval 派生 `[-eval/T, 0, +eval/T] + wdl_bias`，类别顺序 `[行棋方负, 和, 行棋方胜]`，与 binpack 里的 WDL 编码一致。`T = 100`（`--wdl-temperature`）让 CE 项有有效梯度；`wdl_bias` 是**训练专用的三维类别先验参数，不写入权重文件**——没有它，单标量对称 logits 的 CE 下限约 `ln(3)`，损失几乎不下降。推理网络始终只输出 1 个标量。
 - 默认 `--epochs 20 --lr 0.1 --batch-size 1024 --wdl-weight 0.2 --quant-reg 0.05 --val-fraction 0.1`。
+- `--score-clip N`（默认 0 = 关闭）：把 datagen 饱和的 ±32767 搜索分裁剪到 ±N 后再进 `tanh`，属于**可选数据清洗**，损失形式不变。`dataset.clip_score()` 对 train/val 样本与 `iter_samples()` 同时生效，取值记入 history 的 `config.score_clip`。工单 10 实测在 7,208 条基准数据上把 val loss `0.854 → 0.690`，但并未解决评估拟合问题（见下）。
 - `--val-fraction` 按**完整对局**随机抽取（确定性由 `--seed` 控制），`dataset.assert_disjoint()` 会在训练前断言两个 split 无对局交集。
 - `--quant-forward` 可切换成整数等价的 STE 前向做量化感知微调；`--quant-reg` 控制接近整数的正则强度。
 - 09 的对齐测试可直接用 `weights_format.read_weights()` + `infer_int()` 作为期望值，或 `NNUEModel.from_quantized_weights()` 重建浮点模型。
+
+### 已知限制：搜索分标签饱和（工单 10 诊断）
+
+`binpack` 的搜索分含大量 mate / 饱和值：本机 `bench-d4` 基准集 17.9% 为 ±32767，只有 19.7% 落在 ±600 内，`tanh(score/400)` 会把它们压成近似常数。裁剪到 ±600 后的目标方差 `0.671`（即「常数预测」的 MSE 基线），而当前 450→1024→15→1 量化架构训练 100 epoch 后 val_mse 仍 `0.564`——只解释了约 16% 的目标方差；导出权重输出集中在 `[-168, 79]`，M5 胜率门控 `0/100`。延长训练、`--score-clip`、调大 lr / 去掉量化正则三组实验均未改善，说明瓶颈在**模型容量或训练目标设计**，不是训练轮数或数据清洗。改动网络维度会改变 `GMNNUE01` 的固定文件布局与工单 09 的跨语言对齐契约，须作为独立设计决策处理。
 
 ## 本机实测（RTX 4080 SUPER，torch 2.6.0+cu124）
 

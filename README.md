@@ -96,9 +96,11 @@ ctest --test-dir build -C Release --output-on-failure
 
 VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
+**最终模型在哪产生**：没有独立的「最终训练」阶段。M4 的 `nnue_v1.nnue` 只验证闭环；M5 门控通过后产生第一个现任权重（incumbent）；M6（工单 11）每轮自举重训并由门控决定是否晋级，至少 3 轮且连续 2 轮未晋级即收敛，把当时的现任权重冻结为 `weights/final.nnue` 并写 `weights/final_manifest.json`。最终模型 = 被门控保留的最后一个晋级版本，而非最后一轮训练产物。详见 `.scratch/gomoku-nnue/spec.md` 与 `issues/11-bootstrap-loop.md`。
+
 **当前进度**：工单 01–09 完成，工单 10 的 AVX2 提速/三档切换/耗时三项已完成，**M4 达成、M5 尚未达成**。自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通，RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`。C++ 端标量推理跨语言对齐实测 PyTorch 浮点 vs C++ `MAE 0.327 / max 0.737`（容差 ≤2），AVX2 后端逐位对齐且单次评估 `1.15 µs`（标量 `3.12 µs`，2.70×），CTest 14/14 全绿。
 
-**M5 胜率门控未达标**：100 局相同配置（`--depth 2`，NNUE vs 手工评估 + VCF）实测 `0W / 0D / 100L`，退出码 2，无超时/崩溃异常（`data/m5_gate.json`）。诊断显示不是接入或 SIMD 问题，而是首轮权重质量：7,208 条训练标签里 17.9% 是 ±32767 饱和搜索分，模型输出仅 `[-185, 30]`，评估缺乏区分度；延长训练到 100 epoch 也只把 20 局胜率从 0% 提到 5%。需先用更大规模数据（工单 07 预案的 1000 万局面约 9.7h）并修复标签尺度，或推进工单 11 用 NNUE 引擎自举生成数据，再重跑门控。详见 `.scratch/gomoku-nnue/issues/10-avx2-m5-acceptance.md`。
+**M5 胜率门控未达标**：100 局相同配置（`--depth 2`，NNUE vs 手工评估 + VCF）实测 `0W / 0D / 100L`，退出码 2，无超时/崩溃异常（`data/m5_gate.json`）。诊断显示不是接入或 SIMD 问题，而是首轮权重质量：7,208 条训练标签里 17.9% 是 ±32767 饱和搜索分，模型输出仅 `[-185, 30]`，评估缺乏区分度；延长训练到 100 epoch 也只把 20 局胜率从 0% 提到 5%。需先用更大规模数据（工单 07 预案的 1000 万局面约 9.7h）并修复标签尺度，或推进工单 11 用 NNUE 引擎自举生成数据，再重跑门控。本轮又补了可选 `--score-clip`（默认关闭）与三组 100-epoch 重训对照：裁剪标签把 val loss `0.854 → 0.690`，但 val_mse 仍为「常数预测」基线的 84%，权重输出仍集中在 `[-168, 79]`，胜率无改善——瓶颈在模型容量 / 训练目标设计，调整网络维度会改变 `GMNNUE01` 固定布局与工单 09 的对齐契约，需独立决策。详见 `.scratch/gomoku-nnue/issues/10-avx2-m5-acceptance.md`。
 
 ## 工具用法
 
@@ -158,7 +160,7 @@ runner 自己做裁判：每步用 `BOARD` 把权威棋盘全量同步给待走�
 
 ### `trainer/`（工单 08）
 
-Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整对局划分 + DataLoader 内实时 D4 八重增广）、`nnue.py`（450→1024→15→双输出头，ClippedReLU，int8/int16 量化域）、`train.py`（`MSE(tanh(score/400)) + CE(WDL)`，收敛曲线 JSON）、`export.py`（带魔数/版本/校验和的 `GMNNUE01` 权重 + 回读自校验）。**450 维特征索引、D4 变换、量化前向与权重文件格式的权威规范见 `trainer/README.md`**，那是工单 09 跨语言对齐的依据。
+Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整对局划分 + DataLoader 内实时 D4 八重增广）、`nnue.py`（450→1024→15→双输出头，ClippedReLU，int8/int16 量化域）、`train.py`（`MSE(tanh(score/400)) + CE(WDL)`，收敛曲线 JSON）、`export.py`（带魔数/版本/校验和的 `GMNNUE01` 权重 + 回读自校验）。**450 维特征索引、D4 变换、量化前向与权重文件格式的权威规范见 `trainer/README.md`**，那是工单 09 跨语言对齐的依据。工单 10 追加了可选 `--score-clip N`（默认 0 关闭）：把 datagen 饱和的 ±32767 搜索分裁剪到 ±N 再进 `tanh`，损失形式与权重格式不变；其饱和标签限制与实测结论见 `trainer/README.md` 的「已知限制」。
 
 ```powershell
 # 依赖（一次性，CUDA 版 torch）
@@ -206,4 +208,4 @@ Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整�
 
 ### 后续工单
 
-- 工单 10（进行中）：技术三项已完成，余 M5 `>65%` 门控待更大规模数据 / 标签尺度修复后重跑；工单 11：datagen（NNUE 引擎）→训练→导出→门控的自举迭代循环。
+- 工单 10（进行中）：技术三项已完成，余 M5 `>65%` 门控待模型容量 / 训练目标决策与大规模数据后重跑；工单 11：datagen（NNUE 引擎）→训练→导出→门控的自举迭代循环，并在收敛时冻结最终模型。

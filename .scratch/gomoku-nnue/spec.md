@@ -1,6 +1,8 @@
 # Spec: 五子棋（Renju）NNUE 引擎与训练流水线
 
-Status: ready-for-agent
+Status: in-progress — M1–M4 完成，M5 推理链完成但胜率门控未达标（工单 10 in-progress），M6 未开始
+
+Last updated: 2026-11-05 — 进度快照与阻塞诊断见「当前状态与关键结论」。
 
 ## Problem Statement
 
@@ -67,6 +69,38 @@ Status: ready-for-agent
 - **最终模型（M6 收敛时冻结）**：训练是循环内的重复动作，**没有独立的"最终训练"阶段**。M4 的首轮权重只验证流水线闭环与跨语言对齐，不是最终模型；M5 门控通过后的权重成为第一个有强度意义的**现任权重（incumbent）**；M6 每轮用现任权重驱动 datagen 自举 → 重训 → 导出 → match_runner 门控，新权重胜率达标才晋级，否则现任保持。**停止条件**：至少跑满 3 轮且连续 2 轮未晋级（或达到用户设定的轮数/时间预算）即判定收敛，把当时的现任权重冻结为最终模型，归档 `weights/final.pt` / `weights/final.nnue` / 训练 history / 导出 report / 各轮门控 JSON，并用 `weights/final_manifest.json` 记录来源轮次、数据、seed 与门控结果；这些产物沿用 `weights/` 的 gitignore 规则不入库。最终模型 = 被门控保留的最后一个晋级版本，而**不是最后一轮训练产物**。
 - **目录结构**：`engine/`（C++ 核心：board、movegen、search、protocol、nnue/ 子模块）、`trainer/`（Python：model、dataset、train、export、features）、`tools/`（datagen、match_runner）、`data/`（raw/binpack，gitignore 排除）、`weights/`（checkpoints + 量化权重）。原 README 中的 `play_gui.py`（pygame GUI）与 `datasets_download.sh` 移除，与"无图形、纯协议"的决定矛盾。
 - **里程碑 M1–M6** 按上文 Solution 执行，VCT 为 M6 之后的可选进阶项。
+
+## 当前状态与关键结论（2026-11-05）
+
+> 本节是进度快照与阻塞定位。权威设计契约以上文 Implementation Decisions 为准，逐工单细节见 `issues/` 与 `README.md`。
+
+### 里程碑 / 工单状态
+
+| 范围 | 状态 | 关键验收 |
+|---|---|---|
+| M1–M3（工单 01–05） | done | Renju 禁手判定、Alpha-Beta + 手工评估 + Gomocup 协议、VCF 算杀；单元测试与协议黑盒全绿 |
+| M4 + 配套工具（工单 06–08） | done | match_runner 门控、64B binpack datagen、PyTorch 训练 + `GMNNUE01` 量化导出；GPU 20 epoch val `0.9609 → 0.8542`，STE 前向 vs 整数参考 64/64 逐位一致 |
+| M5 第一步（工单 09） | done | C++ 标量 NNUE 权重加载 + 跨语言对齐：特征索引 / 整数前向逐位一致，PyTorch float vs C++ `MAE 0.327 / max 0.737 ≤ 2`；NNUE 可下完整对局 |
+| M5 第二步（工单 10） | **in-progress** | AVX2 累加器与 L1 向量化逐位对齐、单次评估 `1.15 µs`（标量 `3.12 µs`，2.70×）、手工 / 标量 / AVX2 三档切换均已完成；**`>65%` 胜率门控未达标** |
+| M6（工单 11） | ready-for-agent | 自举迭代循环 + 最终模型冻结约定（见 Implementation Decisions） |
+
+CTest **14/14 全绿**，引擎版本 `0.9.0`。
+
+### M5 门控实测与诊断链
+
+- **门控结果**：100 局相同配置（`--depth 2`，`--nnue weights\nnue_v1.nnue` vs 手工评估 + VCF），`0W / 0D / 100L`，score rate `0.00%`，`--min-win-rate 0.65` 退出码 2，`anomalies: none`（非超时 / 崩溃 / 非法着法）；记录留在 `data/m5_gate.json`。
+- **排除接入 / SIMD bug**：定点局面（对手活四）两引擎给出相同着法；scalar 与 AVX2 输出逐位一致；工单 09 的跨语言对齐全部通过。差距来自权重本身。
+- **训练标签问题**：`data/raw/bench-d4/train.binpack` 仅 7,208 条，17.9% 是 ±32767 饱和搜索分，p5 `-28,353` / p95 `+32,767`，只有 19.7% 落在 ±600；`MSE(tanh(score/400))` 对这类标签近似常数。v1 权重在 64 个采样局面输出仅 `[-185, 30]`（均值 `-92.75`），与标签 MAE `13,647.7`，评估缺乏区分度。
+- **三组 100-epoch 重训对照（均未改善胜率）**：① 不裁剪 val `0.797` / mse `0.615`（20 局 5%）；② 新增可选 `--score-clip 600`（默认关闭，只清洗标签、不改损失形式与权重格式）val `0.690` / mse `0.564`，eval 仍 `[-168, 79]`（20 局 0%）；③ 再加 `--quant-reg 0 --lr 0.3` 反而 val `0.764` / mse `0.646`。
+- **定量结论**：裁剪后目标方差 `0.671`（即「常数预测」的 MSE 基线），最好 val_mse `0.564` = 基线的 **84%**，模型仅解释约 16% 的目标方差，接近常数预测、没有真正学会拟合搜索分。瓶颈在 `450→1024→15→1` 量化架构对这批标签的**表达能力 / 训练目标设计**，不是数据量、训练轮数、标签清洗或 SIMD 接入。
+
+### 未决设计决策（阻塞 M5 达标）
+
+1. **是否允许改网络架构 / 训练目标**（增大 L1 或输出层、直接回归 `tanh(score/400)`、换标签）：会改变 `GMNNUE01` 的 478,336B 固定布局，需同步重做工单 08 的导出与工单 09 的跨语言对齐契约。
+2. **是否投入大规模数据**：工单 07 预案 1000 万局面约 9.7h（或先做 20 万局面约 12 分钟验证）；按上述诊断，单独加数据收益有限。
+3. **是否直接推进工单 11 自举循环**：需先让 datagen worker 支持 `--nnue`，且仍受决策 1 的架构限制。
+
+**最终模型不在此处产生**：见 Implementation Decisions 的「最终模型（M6 收敛时冻结）」——它是 M6 门控保留的最后一个晋级 incumbent，而不是某一次单独训练或最后一轮产物。
 
 ## Testing Decisions
 

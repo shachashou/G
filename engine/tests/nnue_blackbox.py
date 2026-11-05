@@ -103,9 +103,12 @@ def test_nnue_full_game(weights_path: Path) -> None:
         e.send("START 15")
         check(e.recv() == "OK", "START 15 -> OK with NNUE enabled")
     black.send("ABOUT")
-    check('eval="nnue"' in (black.recv() or ""), "ABOUT reports NNUE backend")
+    about = black.recv() or ""
+    check('eval="nnue"' in about and 'nnue_backend="avx2"' in about,
+          "ABOUT reports NNUE with the default AVX2 backend")
     white.send("ABOUT")
-    check('eval="nnue"' in (white.recv() or ""), "both engines report NNUE")
+    check('nnue_backend="avx2"' in (white.recv() or ""),
+          "both engines use the AVX2 backend")
 
     black.send("BEGIN")
     board = [[0] * SIZE for _ in range(SIZE)]
@@ -146,9 +149,30 @@ def test_backend_selection(weights_path: Path, bad_path: Path) -> None:
     print("[backend selection and fallback]")
     plain = Engine(["--depth", "1"])
     plain.send("ABOUT")
-    check('eval="handcrafted"' in (plain.recv() or ""),
-          "default backend is handcrafted")
+    about = plain.recv() or ""
+    check('eval="handcrafted"' in about and 'nnue_backend="none"' in about,
+          "default backend is handcrafted (three-way switch)")
     check(plain.close() == 0, "default engine exits cleanly")
+
+    for backend in ("scalar", "avx2"):
+        e = Engine(["--nnue", str(weights_path), "--nnue-backend", backend,
+                    "--depth", "1"])
+        e.send("ABOUT")
+        check(f'nnue_backend="{backend}"' in (e.recv() or ""),
+              f"--nnue-backend {backend} is selectable")
+        e.send("TURN 7,7")
+        check(parse_move(e.recv()) is not None,
+              f"--nnue-backend {backend} plays a legal move")
+        check(e.close() == 0, f"--nnue-backend {backend} exits cleanly")
+
+    unknown = Engine(["--nnue", str(weights_path), "--nnue-backend", "sse2",
+                      "--depth", "1"], capture_stderr=True)
+    unknown.send("ABOUT")
+    check('nnue_backend="avx2"' in (unknown.recv() or ""),
+          "unknown backend falls back to AVX2")
+    check(unknown.close() == 0, "unknown backend exits cleanly")
+    check("unknown backend" in unknown.stderr,
+          "unknown backend is reported on stderr")
 
     for label, path, keyword in (
         ("bad magic", bad_path, "bad magic"),

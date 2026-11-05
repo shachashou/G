@@ -3,10 +3,31 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <immintrin.h>
 
 namespace gomoku {
 
+const char* nnueBackendName(NnueBackend backend) {
+  return backend == NnueBackend::Avx2 ? "avx2" : "scalar";
+}
+
+bool nnueBackendFromName(const std::string& name, NnueBackend& out) {
+  if (name == "avx2") {
+    out = NnueBackend::Avx2;
+    return true;
+  }
+  if (name == "scalar") {
+    out = NnueBackend::Scalar;
+    return true;
+  }
+  return false;
+}
+
 namespace {
+
+// Each W1 row is 15 int8 weights; pad to 16 so two 8-byte AVX2 loads cover it
+// with a zero in the unused lane.
+constexpr int kL1Stride = 16;
 
 constexpr char kMagic[kNnueMagicSize] = {'G', 'M', 'N', 'N', 'U', 'E', '0', '1'};
 constexpr uint32_t kFnvOffset = 0x811C9DC5u;
@@ -182,9 +203,18 @@ void NnueNetwork::load(const std::string& path) {
   checkWeights(w1, "W1");
   checkWeights(w2, "W2");
 
+  std::vector<int8_t> w1Padded(static_cast<size_t>(kNnueAcc) * kL1Stride, 0);
+  for (int j = 0; j < kNnueAcc; ++j) {
+    for (int k = 0; k < kNnueL1; ++k) {
+      w1Padded[static_cast<size_t>(j) * kL1Stride + k] =
+          w1[static_cast<size_t>(j) * kNnueL1 + k];
+    }
+  }
+
   w0_ = std::move(w0);
   b0_ = std::move(b0);
   w1_ = std::move(w1);
+  w1Padded_ = std::move(w1Padded);
   b1_ = std::move(b1);
   w2_ = std::move(w2);
   b2_ = std::move(b2);
@@ -197,9 +227,32 @@ void NnueNetwork::load(const std::string& path) {
 }
 
 void NnueNetwork::addFeature(int index, int sign, NnueAccumulator& acc) const {
+  if (backend_ == NnueBackend::Avx2) {
+    addFeatureAvx2(index, sign, acc);
+    return;
+  }
   const int8_t* row = &w0_[static_cast<size_t>(index) * kNnueAcc];
   for (int j = 0; j < kNnueAcc; ++j) {
     acc[j] += sign * static_cast<int32_t>(row[j]);
+  }
+}
+
+void NnueNetwork::addFeatureAvx2(int index, int sign,
+                                 NnueAccumulator& acc) const {
+  // 8 int8 weights -> 8 int32 lanes per iteration; place/undo is a single
+  // vector add/sub over the int32 accumulator (no intermediate saturation,
+  // so the result is bit-identical to the scalar path).
+  const int8_t* row = &w0_[static_cast<size_t>(index) * kNnueAcc];
+  int32_t* out = acc.data();
+  for (int j = 0; j < kNnueAcc; j += 8) {
+    const __m128i bytes =
+        _mm_loadl_epi64(reinterpret_cast<const __m128i*>(row + j));
+    const __m256i weights = _mm256_cvtepi8_epi32(bytes);
+    __m256i current =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(out + j));
+    current = sign > 0 ? _mm256_add_epi32(current, weights)
+                       : _mm256_sub_epi32(current, weights);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + j), current);
   }
 }
 
@@ -228,8 +281,35 @@ void NnueNetwork::updateAccumulator(const Board& board, int move, Cell to,
   }
 }
 
-int NnueNetwork::inferSum(const int32_t* acc, int stm) const {
-  std::array<int32_t, kNnueL1> z{};
+void NnueNetwork::computeL1(const int32_t* acc,
+                            std::array<int32_t, kNnueL1>& z) const {
+  z.fill(0);
+  if (backend_ == NnueBackend::Avx2) {
+    // z[k] = sum_j a[j] * W1[j, k], with a[j] = clamp(acc[j], 0, QA).
+    // Two 8-lane vector accumulators cover the 15 L1 units; the padded
+    // 16th lane of every W1 row is zero and simply gets discarded.
+    __m256i lo = _mm256_setzero_si256();
+    __m256i hi = _mm256_setzero_si256();
+    for (int j = 0; j < kNnueAcc; ++j) {
+      const int32_t a = std::clamp(clampInt16(acc[j]), 0, qa_);
+      if (a == 0) continue;
+      const int8_t* row =
+          &w1Padded_[static_cast<size_t>(j) * kL1Stride];
+      const __m256i factor = _mm256_set1_epi32(a);
+      const __m256i wlo = _mm256_cvtepi8_epi32(
+          _mm_loadl_epi64(reinterpret_cast<const __m128i*>(row)));
+      const __m256i whi = _mm256_cvtepi8_epi32(
+          _mm_loadl_epi64(reinterpret_cast<const __m128i*>(row + 8)));
+      lo = _mm256_add_epi32(lo, _mm256_mullo_epi32(wlo, factor));
+      hi = _mm256_add_epi32(hi, _mm256_mullo_epi32(whi, factor));
+    }
+    alignas(32) int32_t lanes[8];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), lo);
+    for (int k = 0; k < 8; ++k) z[k] = lanes[k];
+    _mm256_store_si256(reinterpret_cast<__m256i*>(lanes), hi);
+    for (int k = 8; k < kNnueL1; ++k) z[k] = lanes[k - 8];
+    return;
+  }
   for (int j = 0; j < kNnueAcc; ++j) {
     const int32_t a = std::clamp(clampInt16(acc[j]), 0, qa_);
     if (a == 0) continue;
@@ -238,6 +318,11 @@ int NnueNetwork::inferSum(const int32_t* acc, int stm) const {
       z[k] += a * static_cast<int32_t>(row[k]);
     }
   }
+}
+
+int NnueNetwork::inferSum(const int32_t* acc, int stm) const {
+  std::array<int32_t, kNnueL1> z{};
+  computeL1(acc, z);
 
   std::array<int32_t, kNnueL1> a2{};
   for (int k = 0; k < kNnueL1; ++k) {

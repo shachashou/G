@@ -209,6 +209,49 @@ int main() {
     }
   }
 
+  // Ticket 10: switching inference backends never changes a single bit.
+  {
+    NnueBackend parsed = NnueBackend::Avx2;
+    CHECK(nnueBackendFromName("scalar", parsed) &&
+          parsed == NnueBackend::Scalar);
+    CHECK(nnueBackendFromName("avx2", parsed) && parsed == NnueBackend::Avx2);
+    CHECK(!nnueBackendFromName("sse2", parsed));
+    CHECK(std::string(nnueBackendName(NnueBackend::Avx2)) == "avx2");
+    CHECK(std::string(nnueBackendName(NnueBackend::Scalar)) == "scalar");
+
+    NnueNetwork scalar;
+    scalar.setBackend(NnueBackend::Scalar);
+    scalar.load(path);
+    CHECK(network.backend() == NnueBackend::Avx2);
+    CHECK(network.infer({112}, 0) == scalar.infer({112}, 0));
+
+    Board board(RuleMode::Freestyle);
+    Evaluator scalarEval, avx2Eval;
+    scalarEval.setNetwork(&scalar);
+    avx2Eval.setNetwork(&network);
+    scalarEval.init(board);
+    avx2Eval.init(board);
+    const int moves[] = {112, 15, 128, 113, 97, 96, 129, 111, 114, 130};
+    const int count = static_cast<int>(sizeof(moves) / sizeof(moves[0]));
+    for (int i = 0; i < count; ++i) {
+      const Color c = board.sideToMove();
+      const int stm = c == Color::Black ? 0 : 1;
+      CHECK(scalarEval.evaluate(board) == avx2Eval.evaluate(board));
+      CHECK(avx2Eval.evaluate(board) ==
+            scalar.infer(nnueSparseIndices(board), stm));
+      scalarEval.update(board, moves[i], cellOf(c));
+      avx2Eval.update(board, moves[i], cellOf(c));
+      board.place(moves[i]);
+      CHECK(scalarEval.evaluate(board) == avx2Eval.evaluate(board));
+    }
+    for (int i = count - 1; i >= 0; --i) {
+      scalarEval.update(board, moves[i], Cell::Empty);
+      avx2Eval.update(board, moves[i], Cell::Empty);
+      board.undo();
+      CHECK(scalarEval.evaluate(board) == avx2Eval.evaluate(board));
+    }
+  }
+
   // int16 saturation happens once, after the full sum.
   {
     const std::string saturatedPath = "nnue_tests_saturated.nnue";

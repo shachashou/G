@@ -81,6 +81,12 @@ Protocol::Protocol(const EngineConfig& cfg) : cfg_(cfg) {
     // playing with the handcrafted evaluator instead.
     try {
       nnue_ = std::make_unique<NnueNetwork>();
+      NnueBackend backend = NnueBackend::Avx2;
+      if (!nnueBackendFromName(cfg_.nnueBackend, backend)) {
+        std::cerr << "NNUE: unknown backend '" << cfg_.nnueBackend
+                  << "', using avx2\n";
+      }
+      nnue_->setBackend(backend);
       nnue_->load(cfg_.nnueWeights);
       if (search_) search_->setNetwork(nnue_.get());
       nnueActive_ = true;
@@ -156,7 +162,10 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
   } else if (cmd == "ABOUT") {
     out << "name=\"" << kEngineName << "\", version=\"" << kEngineVersion
         << "\", author=\"G\", country=\"CN\", eval=\""
-        << (nnueActive_ ? "nnue" : "handcrafted") << "\"\n";
+        << (nnueActive_ ? "nnue" : "handcrafted")
+        << "\", nnue_backend=\""
+        << (nnueActive_ ? nnueBackendName(nnue_->backend()) : "none")
+        << "\"\n";
   } else {
     out << "UNKNOWN\n";
   }

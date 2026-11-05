@@ -118,6 +118,12 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:nnue_probe>")
   set_tests_properties(nnue_parity_tests PROPERTIES TIMEOUT 300)
 
+  # Ticket 10: scalar/AVX2 bit-exact parity and single-evaluation timing.
+  add_test(NAME nnue_backend_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_backend_tests.py"
+            "$<TARGET_FILE:nnue_probe>")
+  set_tests_properties(nnue_backend_tests PROPERTIES TIMEOUT 300)
+
   # Ticket 09: full self-play game with NNUE evaluation + bad-weight fallback.
   add_test(NAME nnue_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"

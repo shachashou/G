@@ -49,6 +49,15 @@ constexpr size_t kNnueFileSize = kNnueHeaderSize + kNnueBodySize;  // 478336
 
 using NnueAccumulator = std::array<int32_t, kNnueAcc>;
 
+// Ticket 10: three evaluation backends are reachable from the CLI:
+//   handcrafted (no --nnue), scalar NNUE, AVX2 NNUE.
+// Both NNUE backends share the exact same int32 accumulator representation,
+// so switching backends never changes the output by even one unit.
+enum class NnueBackend { Scalar, Avx2 };
+
+const char* nnueBackendName(NnueBackend backend);
+bool nnueBackendFromName(const std::string& name, NnueBackend& out);
+
 class NnueError : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
@@ -74,6 +83,11 @@ class NnueNetwork {
   int qb() const { return qb_; }
   int scoreScale() const { return scoreScale_; }
 
+  // Defaults to AVX2 (the production backend); scalar stays available for
+  // bit-exact A/B comparison and as a fallback.
+  void setBackend(NnueBackend backend) { backend_ = backend; }
+  NnueBackend backend() const { return backend_; }
+
   // Loads and fully validates a `GMNNUE01` v1 file. Throws NnueError with a
   // descriptive message; never writes to stdout (Gomocup protocol stream).
   void load(const std::string& path);
@@ -90,14 +104,21 @@ class NnueNetwork {
 
  private:
   void addFeature(int index, int sign, NnueAccumulator& acc) const;
+  void addFeatureAvx2(int index, int sign, NnueAccumulator& acc) const;
+  void computeL1(const int32_t* acc,
+                 std::array<int32_t, kNnueL1>& z) const;
   int inferSum(const int32_t* acc, int stm) const;
 
   std::vector<int8_t> w0_, w1_, w2_;
+  // W1 with each 15-wide row padded to 16 bytes so the AVX2 L1 loop can load
+  // two aligned 8-byte groups without ever touching the next row / the end.
+  std::vector<int8_t> w1Padded_;
   std::vector<int16_t> b0_, b1_, b2_;
   int qa_ = 127;
   int qb_ = 64;
   int scoreScale_ = 400;
   int weightClamp_ = 64;
+  NnueBackend backend_ = NnueBackend::Avx2;
   std::string path_;
   bool loaded_ = false;
 };

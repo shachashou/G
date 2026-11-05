@@ -16,7 +16,9 @@ struct EngineConfig {
   int fixedDepth = 0;     // --depth N: fixed depth, no clock
   int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
   bool useVcf = true;     // --no-vcf: M2 baseline for A/B comparisons
-  std::string nnueWeights;  // --nnue PATH: scalar NNUE evaluation (ticket 09)
+  std::string nnueWeights;  // --nnue PATH: NNUE evaluation (ticket 09)
+  // --nnue-backend scalar|avx2: inference backend (ticket 10, default avx2).
+  std::string nnueBackend = "avx2";
 };
 
 // Gomocup/piskvork protocol subset over stdin/stdout:

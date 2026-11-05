@@ -14,6 +14,7 @@ void printUsage() {
             << "  --depth N            fixed search depth N (no clock)\n"
             << "  --movetime N         per-move time budget in ms (default 1000)\n"
             << "  --no-vcf             disable VCF solver (M2 baseline for A/B)\n"
+            << "  --nnue PATH          scalar NNUE evaluation from a GMNNUE01 file\n"
             << "  --help               show this help\n"
             << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
 }
@@ -41,6 +42,8 @@ int main(int argc, char* argv[]) {
       cfg.fixedDepth = std::atoi(argv[++i]);
     } else if (a == "--movetime" && i + 1 < argc) {
       cfg.moveTimeMs = std::atoi(argv[++i]);
+    } else if (a == "--nnue" && i + 1 < argc) {
+      cfg.nnueWeights = argv[++i];
     }
   }
   // Protocol mode: speak Gomocup on stdin/stdout. No banner — extra output

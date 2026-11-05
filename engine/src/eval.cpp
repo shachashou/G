@@ -82,6 +82,7 @@ void Evaluator::init(const Board& board) {
     blackScore_ += windowValue(cells, w, Color::Black, -1, Cell::Empty);
     whiteScore_ += windowValue(cells, w, Color::White, -1, Cell::Empty);
   });
+  if (network_) network_->initAccumulator(board, nnueAcc_);
 }
 
 void Evaluator::update(const Board& board, int move, Cell to) {
@@ -94,6 +95,7 @@ void Evaluator::update(const Board& board, int move, Cell to) {
     blackScore_ += b1 - b0;
     whiteScore_ += s1 - s0;
   });
+  if (network_) network_->updateAccumulator(board, move, to, nnueAcc_);
 }
 
 int Evaluator::moveHeuristic(const Board& board, int move, Color c) const {
@@ -111,6 +113,12 @@ int Evaluator::moveHeuristic(const Board& board, int move, Color c) const {
 }
 
 int Evaluator::evaluate(const Board& board) const {
+  if (network_) {
+    // The network's head is selected by the side to move and its output is
+    // already in the side-to-move/negamax convention used by the search.
+    const int stm = board.sideToMove() == Color::Black ? 0 : 1;
+    return network_->inferAccumulator(nnueAcc_, stm);
+  }
   const int my = board.sideToMove() == Color::Black ? blackScore_ : whiteScore_;
   const int opp = board.sideToMove() == Color::Black ? whiteScore_ : blackScore_;
   // Small tempo bonus for the side to move.

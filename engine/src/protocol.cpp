@@ -1,6 +1,7 @@
 #include "protocol.h"
 
 #include <algorithm>
+#include <iostream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -74,6 +75,21 @@ int parseInt(const std::string& s) {
 
 Protocol::Protocol(const EngineConfig& cfg) : cfg_(cfg) {
   if (!cfg_.random) search_ = std::make_unique<Search>();
+  if (!cfg_.nnueWeights.empty()) {
+    // Weights are loaded once, not once per search. A bad file must never
+    // write to stdout (Gomocup protocol stream): report on stderr and keep
+    // playing with the handcrafted evaluator instead.
+    try {
+      nnue_ = std::make_unique<NnueNetwork>();
+      nnue_->load(cfg_.nnueWeights);
+      if (search_) search_->setNetwork(nnue_.get());
+      nnueActive_ = true;
+    } catch (const NnueError& error) {
+      nnue_.reset();
+      std::cerr << error.what() << "\n"
+                << "NNUE: falling back to handcrafted evaluation\n";
+    }
+  }
 }
 
 int Protocol::effectiveMoveTimeMs() const {
@@ -139,7 +155,8 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
     handleInfo(arg);
   } else if (cmd == "ABOUT") {
     out << "name=\"" << kEngineName << "\", version=\"" << kEngineVersion
-        << "\", author=\"G\", country=\"CN\"\n";
+        << "\", author=\"G\", country=\"CN\", eval=\""
+        << (nnueActive_ ? "nnue" : "handcrafted") << "\"\n";
   } else {
     out << "UNKNOWN\n";
   }

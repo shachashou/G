@@ -48,11 +48,14 @@ cmake --build build --config Release
 .\build\engine\Release\gomoku_nnue.exe --movetime 500 # 每步思考 500ms（默认 1000）
 .\build\engine\Release\gomoku_nnue.exe --random       # 随机合法走子基线，用于强度对照
 .\build\engine\Release\gomoku_nnue.exe --no-vcf       # 关闭 VCF 算杀（M2 基线，用于 A/B）
+.\build\engine\Release\gomoku_nnue.exe --nnue weights\nnue_v1.nnue  # 标量 NNUE 评估（工单 09）
 .\build\engine\Release\gomoku_nnue.exe --help
 
 # 自我对弈 datagen worker（工单 07，单进程单分片；由 tools/datagen.py 拉起多个）
 .\build\engine\Release\datagen.exe --help
 ```
+
+`--nnue PATH` 加载 `GMNNUE01` v1 量化权重（默认仍是手工威胁评估）。权重只在启动时加载一次；文件缺失或格式不符会在 **stderr** 报清晰错误并回退手工评估，不会污染 Gomocup 的 stdout 协议流。`ABOUT` 的 `eval="nnue"|"handcrafted"` 可用于确认当前后端。`moveHeuristic()`（候选排序 / datagen 开局采样）始终使用手工评估，保证 datagen 可复现。
 
 时间控制：`INFO timeout_turn`（留 20% 余量）、`INFO time_left`（按剩余时间 1/20 封顶）、`INFO timeout_match` 均被接受。
 
@@ -65,16 +68,18 @@ py -3.12 -m venv .venv
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-包含 6 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests`）与 4 个 Python/黑盒测试（`protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests`），共 10 个 CTest；Python 测试都经项目 `.venv` 运行。`training_tests` 的规范/格式/划分部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出的实测。也可手动执行：
+包含 7 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests` / `nnue_tests`）与 6 个 Python/黑盒测试（`protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests` / `nnue_parity_tests` / `nnue_blackbox`），共 13 个 CTest；Python 测试都经项目 `.venv` 运行。`training_tests`、`nnue_parity_tests` 的规范/格式/对齐部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出与 PyTorch 浮点对齐的实测。也可手动执行：
 
 ```powershell
 .venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe
 .venv\Scripts\python.exe engine\tests\match_runner_tests.py build\engine\Release\gomoku_nnue.exe tools\match_runner.py
 .venv\Scripts\python.exe engine\tests\datagen_tests.py build\engine\Release\datagen.exe trainer\binpack.py tools\datagen.py
 .venv\Scripts\python.exe engine\tests\training_tests.py
+.venv\Scripts\python.exe engine\tests\nnue_parity_tests.py build\engine\Release\nnue_probe.exe
+.venv\Scripts\python.exe engine\tests\nnue_blackbox.py build\engine\Release\gomoku_nnue.exe
 ```
 
-黑盒内含双引擎自对弈、规则切换、时间控制、VCF 杀局与搜索引擎对随机基线 6 局全胜的强度验收；`match_runner_tests` 覆盖 100% 胜率门控、结果落盘、freestyle 规则切换与超时/崩溃/非法着法三类异常计负；`datagen_tests` 用真实 worker 落盘，再校验魔数/64 字节布局/WDL 回填/对局边界/分片合并/多进程隔离，并让 C++ 复盘抽样搜索分、检出被篡改的分数；`training_tests` 校验 450 维特征索引/D4 群性质、量化权重格式与整数前向、对局级数据划分，并在 torch 可用时跑通模型→训练→导出。
+黑盒内含双引擎自对弈、规则切换、时间控制、VCF 杀局与搜索引擎对随机基线 6 局全胜的强度验收；`match_runner_tests` 覆盖 100% 胜率门控、结果落盘、freestyle 规则切换与超时/崩溃/非法着法三类异常计负；`datagen_tests` 用真实 worker 落盘，再校验魔数/64 字节布局/WDL 回填/对局边界/分片合并/多进程隔离，并让 C++ 复盘抽样搜索分、检出被篡改的分数；`training_tests` 校验 450 维特征索引/D4 群性质、量化权重格式与整数前向、对局级数据划分，并在 torch 可用时跑通模型→训练→导出；`nnue_tests` 覆盖权重格式拒绝、`round_div`、手算整数前向、int16 饱和与增量累加器对拍；`nnue_parity_tests` 用 `nnue_probe` 比对 C++ 特征索引/标量推理与 Python 整数参考（逐位）及 PyTorch 浮点前向（容差内）；`nnue_blackbox` 验证 NNUE 完整对局与坏权重回退。
 
 ## 里程碑
 
@@ -89,7 +94,7 @@ ctest --test-dir build -C Release --output-on-failure
 
 VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
-**当前进度**：工单 01–08 完成，**M4 达成**——自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通。RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`，导出的 `GMNNUE01` 权重回读自校验通过、整数前向与 PyTorch STE 前向 64/64 逐位一致。下一步 M5：C++ 标量 NNUE 推理与跨语言对齐（工单 09）。
+**当前进度**：工单 01–09 完成，**M4 达成、M5 第一步达成**——自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通。RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`，导出的 `GMNNUE01` 权重回读自校验通过、整数前向与 PyTorch STE 前向 64/64 逐位一致。C++ 端已能加载该权重并下完整对局，跨语言对齐实测 PyTorch 浮点 vs C++ `MAE 0.327 / max 0.737`（容差 ≤2），CTest 13/13 全绿。下一步 M5 收尾：AVX2 增量累加器、微秒级推理与 `>65%` 胜率门控（工单 10）。
 
 ## 工具用法
 
@@ -164,6 +169,20 @@ Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整�
     --output weights\nnue_v1.nnue --report weights\export_report.json
 ```
 
-### 其余工具（待落地）
+### 工单 09：C++ 标量 NNUE 推理（`engine/src/nnue.h/.cpp`）
 
-- 工单 09：C++ 标量 NNUE 推理 + 跨语言数值对齐；工单 10：AVX2 增量累加器与 M5 胜率门控。
+`--nnue PATH` 把叶子评估切到 NNUE。C++ 端逐位复现 `trainer/weights_format.py` 的整数前向：`acc = clamp_i16(b0 + ΣW0)` → `ClippedReLU(0,127)` → `L1` → `round_div(z,127)+b1` → `ClippedReLU(0,64)` → 按行棋方选双输出头；`round_div` 为半数远离零。特征索引、文件格式与校验规则的权威说明仍见 `trainer/README.md`。实现为**纯标量**（无 SIMD）：搜索内用 int32 累加器做落子/撤子差分更新，只在推理时饱和一次，因此与全量稀疏参考前向逐位一致；`moveHeuristic()` 仍走手工评估以保证 datagen 确定性。
+
+```powershell
+# 跨语言对拍（nnue_probe 把 C++ 索引/推理交给 Python 与 torch 比对）
+.venv\Scripts\python.exe engine\tests\nnue_parity_tests.py build\engine\Release\nnue_probe.exe
+
+# 用真实导出权重下棋（ABOUT 里应显示 eval="nnue"）
+.\build\engine\Release\gomoku_nnue.exe --nnue weights\nnue_v1.nnue --depth 4
+```
+
+实测：40 个采样局面上 C++ 稀疏索引与 `features.sparse_indices()` 完全一致、标量/增量两条路径与 `infer_int()` 逐位相等；真实权重上 PyTorch 浮点前向 vs C++ `MAE 0.3273 / max 0.7367`（工单 08 建议容差 ≤2）；两台 NNUE 引擎自对弈完整终局，坏权重/缺失权重只在 stderr 报错并回退手工评估。权重与 `.pt` 产物均被 gitignore，测试自行生成确定性权重，不依赖本地产物。
+
+### 后续工单
+
+- 工单 10：AVX2 增量累加器、后端三档切换（手工 / 标量 / AVX2）与 M5 `>65%` 胜率门控；工单 11：datagen→训练→门控的自举迭代循环。

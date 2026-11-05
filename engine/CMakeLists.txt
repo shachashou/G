@@ -2,6 +2,7 @@ set(ENGINE_CORE_SRC
   src/board.cpp
   src/renju.cpp
   src/eval.cpp
+  src/nnue.cpp
   src/movegen.cpp
   src/search.cpp
   src/vcf.cpp
@@ -15,6 +16,11 @@ add_executable(gomoku_nnue
   ${ENGINE_CORE_SRC})
 target_compile_features(gomoku_nnue PRIVATE cxx_std_20)
 target_include_directories(gomoku_nnue PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# Cross-language parity probe (ticket 09): Python drives it over stdin/stdout.
+add_executable(nnue_probe src/nnue_probe.cpp ${ENGINE_CORE_SRC})
+target_compile_features(nnue_probe PRIVATE cxx_std_20)
+target_include_directories(nnue_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Self-play datagen worker (ticket 07). One process owns one shard file;
 # tools/datagen.py launches many of them in parallel.
@@ -58,6 +64,13 @@ target_compile_features(binpack_tests PRIVATE cxx_std_20)
 target_include_directories(binpack_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME binpack_tests COMMAND binpack_tests)
 
+# Ticket 09: scalar NNUE weight loader, integer forward and incremental
+# accumulator consistency.
+add_executable(nnue_tests tests/nnue_tests.cpp ${ENGINE_CORE_SRC})
+target_compile_features(nnue_tests PRIVATE cxx_std_20)
+target_include_directories(nnue_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME nnue_tests COMMAND nnue_tests)
+
 # Protocol black-box test: drives the exe via stdin/stdout.
 # Prefer the project venv (py -3.12 -m venv .venv), never the system Python.
 set(GOMOKU_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
@@ -97,4 +110,17 @@ if(GOMOKU_PYTHON)
   add_test(NAME training_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_tests.py")
   set_tests_properties(training_tests PROPERTIES TIMEOUT 300)
+
+  # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
+  # (when torch is available) the PyTorch float forward.
+  add_test(NAME nnue_parity_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_parity_tests.py"
+            "$<TARGET_FILE:nnue_probe>")
+  set_tests_properties(nnue_parity_tests PROPERTIES TIMEOUT 300)
+
+  # Ticket 09: full self-play game with NNUE evaluation + bad-weight fallback.
+  add_test(NAME nnue_blackbox
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(nnue_blackbox PROPERTIES TIMEOUT 300)
 endif()

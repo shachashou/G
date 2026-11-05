@@ -5,6 +5,7 @@
 #include <string>
 
 #include "board.h"
+#include "nnue.h"
 #include "random_player.h"
 #include "search.h"
 
@@ -15,6 +16,7 @@ struct EngineConfig {
   int fixedDepth = 0;     // --depth N: fixed depth, no clock
   int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
   bool useVcf = true;     // --no-vcf: M2 baseline for A/B comparisons
+  std::string nnueWeights;  // --nnue PATH: scalar NNUE evaluation (ticket 09)
 };
 
 // Gomocup/piskvork protocol subset over stdin/stdout:
@@ -43,6 +45,10 @@ class Protocol {
   EngineConfig cfg_;
   Board board_;
   RandomPlayer player_;
+  // Weights are loaded once at startup and shared with Search via a borrowed
+  // pointer. Declared before search_ so it outlives the search object.
+  std::unique_ptr<NnueNetwork> nnue_;
+  bool nnueActive_ = false;
   // Allocated only for the search engine: the random baseline stays tiny.
   std::unique_ptr<Search> search_;
   int timeoutTurnMs_ = 0;

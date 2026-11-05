@@ -37,6 +37,10 @@ class Search {
   // size) and can be reproduced offline by replaying that single position.
   void reset();
 
+  // Selects the static evaluation backend for all subsequent searches.
+  // Null keeps the handcrafted evaluator; the network is borrowed.
+  void setNetwork(const NnueNetwork* network) { network_ = network; }
+
   SearchResult findBestMove(Board& board, const SearchLimits& limits);
 
  private:
@@ -54,6 +58,7 @@ class Search {
   bool timeUp() const;
 
   std::vector<TTEntry> tt_;
+  const NnueNetwork* network_ = nullptr;
   size_t ttMask_ = 0;
   uint8_t generation_ = 1;
   std::array<std::array<int, 2>, 64> killers_{};

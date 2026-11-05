@@ -3,6 +3,7 @@
 #include <array>
 
 #include "board.h"
+#include "nnue.h"
 
 namespace gomoku {
 
@@ -13,6 +14,12 @@ namespace gomoku {
 // change when a stone is placed or removed.
 class Evaluator {
  public:
+  // Selects the static evaluation backend. A null pointer (default) keeps the
+  // handcrafted threat evaluator, which also keeps datagen deterministic.
+  // The network is borrowed and must outlive the Evaluator.
+  void setNetwork(const NnueNetwork* network) { network_ = network; }
+  const NnueNetwork* network() const { return network_; }
+
   // Full recompute (search root / BOARD sync).
   void init(const Board& board);
 
@@ -32,6 +39,10 @@ class Evaluator {
  private:
   int blackScore_ = 0;
   int whiteScore_ = 0;
+  const NnueNetwork* network_ = nullptr;
+  // Exact (unsaturated) int32 accumulator, incrementally maintained by
+  // update() so the NNUE backend stays scalar but cheap during search.
+  NnueAccumulator nnueAcc_{};
 };
 
 }  // namespace gomoku

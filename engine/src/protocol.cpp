@@ -89,22 +89,22 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
     }
     if (parsed && size == kBoardSize) {
       board_.reset(board_.ruleMode());
-      out << "OK";
+      out << "OK\n";
     } else {
-      out << "ERROR unsupported board size (only 15x15)";
+      out << "ERROR unsupported board size (only 15x15)\n";
     }
   } else if (cmd == "RESTART") {
     board_.reset(board_.ruleMode());
-    out << "OK";
+    out << "OK\n";
   } else if (cmd == "BEGIN") {
     board_.reset(board_.ruleMode());
     playEngineMove(out);
   } else if (cmd == "TURN") {
     const std::optional<int> move = parseXY(arg);
     if (!move) {
-      out << "ERROR malformed move";
+      out << "ERROR malformed move\n";
     } else if (!board_.isEmpty(*move)) {
-      out << "ERROR illegal move";
+      out << "ERROR illegal move\n";
     } else if (board_.result() != GameResult::Ongoing) {
       // Game already decided; nothing to answer.
     } else {
@@ -117,9 +117,9 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
     handleInfo(arg);
   } else if (cmd == "ABOUT") {
     out << "name=\"" << kEngineName << "\", version=\"" << kEngineVersion
-        << "\", author=\"G\", country=\"CN\"";
+        << "\", author=\"G\", country=\"CN\"\n";
   } else {
-    out << "UNKNOWN";
+    out << "UNKNOWN\n";
   }
 }
 
@@ -131,7 +131,7 @@ bool Protocol::readBoard(std::istream& in, std::ostream& out) {
     stripCR(line);
     if (line == "DONE") {
       if (!ok) {
-        out << "ERROR invalid BOARD data";
+        out << "ERROR invalid BOARD data\n";
         return false;
       }
       board_.finalizeSync();
@@ -145,7 +145,7 @@ bool Protocol::readBoard(std::istream& in, std::ostream& out) {
     }
   }
   // EOF before DONE.
-  out << "ERROR BOARD terminated without DONE";
+  out << "ERROR BOARD terminated without DONE\n";
   return false;
 }
 
@@ -173,11 +173,11 @@ void Protocol::handleInfo(const std::string& arg) {
 void Protocol::playEngineMove(std::ostream& out) {
   const int move = player_.pickMove(board_);
   if (move < 0) {
-    out << "ERROR no legal move";
+    out << "ERROR no legal move\n";
     return;
   }
   board_.place(move);
-  out << moveToXY(move);
+  out << moveToXY(move) << "\n";
 }
 
 }  // namespace gomoku

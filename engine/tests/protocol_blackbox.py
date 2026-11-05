@@ -12,7 +12,7 @@ import threading
 EXE = sys.argv[1] if len(sys.argv) > 1 else "gomoku_nnue.exe"
 SIZE = 15
 DIRS = ((1, 0), (0, 1), (1, 1), (1, -1))
-WATCHDOG_SECONDS = 300
+WATCHDOG_SECONDS = 10
 
 failures = 0
 

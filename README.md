@@ -36,9 +36,25 @@ cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 # 编译
 cmake --build build --config Release
 
-# 运行（当前为骨架：打印引擎标识后退出；协议交互随 M2 落地）
-.\build\engine\Release\gomoku_nnue.exe
+# 查看版本（打印引擎标识后退出）
+.\build\engine\Release\gomoku_nnue.exe --version
+
+# 协议模式（默认）：从标准输入读取 Gomocup 协议命令
+# （START / TURN / BOARD / INFO / ABOUT / END），挂现成 GUI 对弈。
+# 当前棋力：随机合法走子（02 号工单交付；搜索随 M2 落地）
 ```
+
+## 测试
+
+```powershell
+# 创建项目独立 Python 环境（一次性；项目 Python 一律走 .venv）
+py -3.12 -m venv .venv
+
+ctest --test-dir build -C Release --output-on-failure
+```
+
+包含棋盘单元测试（`board_tests`）与协议黑盒测试（`protocol_blackbox`，经项目 `.venv` 运行；也可手动执行：
+`.venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe`）。
 
 ## 里程碑
 

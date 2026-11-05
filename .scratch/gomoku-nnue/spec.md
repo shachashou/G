@@ -92,3 +92,4 @@ Status: ready-for-agent
 - 用户未报 CPU 型号/核数（占位符未填）。datagen 并行度需在 M4 时实测校准：16 线程以上维持 depth 6；若只有 8 线程，降 depth 5 或接受更长时间。跑通"生成→落盘→训练→加载→对弈"最小闭环优先于数据量达标。
 - 根目录 `README.md` 仍是最初的草案（含已废弃的 `play_gui.py`、`datasets_download.sh`），实现启动时需同步更新。
 - `CMakeLists.txt` 目前为空文件，M1 一并初始化。
+- Python 环境约定（用户指定）：一律用 `py -3.12 -m venv .venv` 创建项目独立虚拟环境（本机 Python 3.12.10），不直接使用系统解释器；后续 trainer 的依赖也装进该环境。

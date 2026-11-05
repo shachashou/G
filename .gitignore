@@ -1,0 +1,25 @@
+# Build
+build/
+build-*/
+out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Data & weights (large binaries; keep dirs via .gitkeep)
+data/*
+!data/.gitkeep
+weights/*
+!weights/.gitkeep
+*.binpack
+
+# Model artifacts
+*.pt
+*.nnue
+
+# IDE
+.vs/
+.vscode/
+.idea/

@@ -90,4 +90,11 @@ if(GOMOKU_PYTHON)
             "${CMAKE_SOURCE_DIR}/trainer/binpack.py"
             "${CMAKE_SOURCE_DIR}/tools/datagen.py")
   set_tests_properties(datagen_tests PROPERTIES TIMEOUT 300)
+
+  # Ticket 08 feature/D4 spec, weight format and game-level split tests.
+  # Torch-dependent model/train/export checks run automatically once the
+  # training requirements are installed (otherwise reported as skipped).
+  add_test(NAME training_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_tests.py")
+  set_tests_properties(training_tests PROPERTIES TIMEOUT 300)
 endif()

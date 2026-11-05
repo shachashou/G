@@ -1,0 +1,11 @@
+# Training-side dependencies (ticket 08). Install into the project venv:
+#   py -3.12 -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r trainer\requirements.txt ^
+#       --extra-index-url https://download.pytorch.org/whl/cu124
+#
+# The +cu124 wheel is the CUDA build for this machine's RTX 4080 SUPER.
+# On a CPU-only machine use `pip install torch==2.6.0 numpy` instead; the
+# training scripts auto-select CUDA when available and stay fully functional
+# on CPU (slower, but all tests and the export path are identical).
+numpy>=2.0,<3
+torch==2.6.0+cu124

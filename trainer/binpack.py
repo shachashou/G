@@ -261,6 +261,24 @@ class BinpackReader:
         if game:
             yield game
 
+    def game_index_map(self) -> "array.array[int]":
+        """For every record, the index of its game. Reads only the flags byte.
+
+        Used by the trainer to split train/validation by WHOLE games without
+        materialising every Record object (important for 10M-record files).
+        """
+        from array import array
+
+        mapping = array("I")
+        game = 0
+        for index in range(self.available):
+            offset = HEADER_SIZE + index * RECORD_SIZE + FLAGS_OFFSET
+            flags = self._mmap[offset]
+            if index > 0 and flags & GAME_START_BIT:
+                game += 1
+            mapping.append(game)
+        return mapping
+
     def validate(self, max_records: int | None = None) -> dict:
         """Full structural + semantic validation; returns stats and error list."""
         errors: list[str] = []

@@ -14,6 +14,7 @@ data/*
 weights/*
 !weights/.gitkeep
 *.binpack
+match_results*.json
 
 # Model artifacts
 *.pt

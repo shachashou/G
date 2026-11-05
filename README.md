@@ -20,7 +20,7 @@
 ├── engine/               # C++ 引擎核心
 │   └── src/              #   棋盘/规则/搜索/协议/NNUE 推理（按里程碑逐步填充）
 ├── trainer/              # Python 训练端（模型/数据集/训练/量化导出，M4 落地）
-├── tools/                # 配套工具：datagen、match_runner（M4+ 逐步落地）
+├── tools/                # 配套工具：match_runner（已完成）、datagen（M4）
 ├── data/                 # 数据集（git 忽略，仅保留目录）
 └── weights/              # 权重与 checkpoint（git 忽略，仅保留目录）
 ```
@@ -62,8 +62,14 @@ py -3.12 -m venv .venv
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-包含 5 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests`）与协议黑盒测试（`protocol_blackbox`，经项目 `.venv` 运行；也可手动执行：
-`.venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe`）。黑盒内含双引擎自对弈、规则切换、时间控制、VCF 杀局与搜索引擎对随机基线 6 局全胜的强度验收。
+包含 5 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests`）、协议黑盒测试（`protocol_blackbox`）与 `match_runner` 自检（`match_runner_tests`），共 7 个 CTest；两个 Python 测试都经项目 `.venv` 运行。也可手动执行：
+
+```powershell
+.venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe
+.venv\Scripts\python.exe engine\tests\match_runner_tests.py build\engine\Release\gomoku_nnue.exe tools\match_runner.py
+```
+
+黑盒内含双引擎自对弈、规则切换、时间控制、VCF 杀局与搜索引擎对随机基线 6 局全胜的强度验收；`match_runner_tests` 覆盖 100% 胜率门控、结果落盘、freestyle 规则切换与超时/崩溃/非法着法三类异常计负。
 
 ## 里程碑
 
@@ -78,10 +84,42 @@ ctest --test-dir build -C Release --output-on-failure
 
 VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
-**当前进度**：工单 01–05 完成——M3 达成，在 Alpha-Beta + 手工评估之上接入 VCF 连续冲四算杀（含 Renju 禁手杀、活四终局、节点/深度上限），根节点命中即返回必胜着法。NNUE 与训练流水线在 M4 起落地。
+**当前进度**：工单 01–06 完成——M3 达成（Alpha-Beta + 手工评估 + VCF 连续冲四算杀），并补齐强度度量基础设施 `match_runner`。NNUE 与训练流水线在 M4 起落地。
 
-## 工具用法（占位，随里程碑填充）
+## 工具用法
 
-- `tools/` datagen：多进程自我对弈批量生成训练数据（M4）
-- `tools/` match_runner：两个引擎 build 批量对打、胜率门控（M4 末）
+### `tools/match_runner.py`（工单 06）
+
+runner 自己做裁判：每步用 `BOARD` 把权威棋盘全量同步给待走方引擎，校验并计时每条回复；两个引擎不共享增量状态。判负/判和遵循五连优先、Renju 黑恰好五连、黑长连非法、白/freestyle 长连胜（三三/四四禁手由引擎自身 `isPlayable` 过滤）。
+
+```powershell
+# 相同搜索配置下比较两版引擎（两边务必给相同的 --depth / --movetime）
+.venv\Scripts\python.exe tools\match_runner.py `
+    --engine-a ".\build\engine\Release\gomoku_nnue.exe --depth 4" `
+    --engine-b ".\build\engine\Release\gomoku_nnue.exe --depth 4 --no-vcf" `
+    --games 20 --rule 2 --opening-plies 2 --seed 7 `
+    --output data\match_results.json
+
+# 强度门控（M5：NNUE 对 M3 胜率 >65%；不达标退出码 2）
+.venv\Scripts\python.exe tools\match_runner.py `
+    --engine-a ".\build\engine\Release\nnue_v1.exe --depth 4" `
+    --engine-b ".\build\engine\Release\gomoku_nnue.exe --depth 4" `
+    --games 100 --min-win-rate 0.65 --output data\m5_gate.json
+
+# 自检：搜索引擎对 02 随机基线，交替先手 4 局应 100% 胜
+.venv\Scripts\python.exe tools\match_runner.py `
+    --engine-a ".\build\engine\Release\gomoku_nnue.exe --depth 2" `
+    --engine-b ".\build\engine\Release\gomoku_nnue.exe --random" `
+    --games 4 --min-win-rate 1.0 --output data\match_selfcheck.json
+```
+
+- `--engine-a/-b`：完整命令串（可含引号包住的 exe 路径与 CLI 参数）；`--games` 按局号奇偶交替先后手；`--rule 1|2` 下发 `INFO rule`（1=freestyle，2=Renju 默认）。
+- `--opening-plies 0..8`（默认 2）、`--opening-region`（默认中心 7×7）、`--seed`：随机开局，≤8 手时黑子 ≤4，Renju 禁手不可能出现。
+- `--move-timeout`（每步回复超时秒数，默认 10）、`--timeout-turn`（下发 `INFO timeout_turn` 毫秒）、`--max-plies`（默认 225，到限判和）。
+- 超时、崩溃 / stdout 关闭、坏回复、越界或占用点、Renju 黑长连：一律记为**该方失败**并写入 anomaly 明细。
+- `--output` 的 JSON 含运行配置、W/D/L 与胜率统计、以及每局完整着法序列（含随机开局标记与走子方归属），可离线复查。`--min-win-rate` 门控使用 score rate `(wins + 0.5*draws)/games`，JSON 里同时给出严格胜率 `decisive_win_rate`。
+
+### 其余工具（待落地）
+
+- `tools/` datagen：多进程自我对弈批量生成训练数据（工单 07）
 - `trainer/`：数据加载、训练、量化导出脚本（M4，`venv + requirements.txt`）

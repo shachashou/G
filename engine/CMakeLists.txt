@@ -60,4 +60,12 @@ if(GOMOKU_PYTHON)
   add_test(NAME protocol_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_blackbox.py"
             "$<TARGET_FILE:gomoku_nnue>")
+
+  # Match runner self-test (ticket 06): real engine vs random baseline plus
+  # illegal-move / timeout / crash anomaly paths driven by a fake engine.
+  add_test(NAME match_runner_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/match_runner_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>"
+            "${CMAKE_SOURCE_DIR}/tools/match_runner.py")
+  set_tests_properties(match_runner_tests PROPERTIES TIMEOUT 120)
 endif()

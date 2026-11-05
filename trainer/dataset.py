@@ -32,7 +32,8 @@ def clip_score(value: float, clip: float) -> float:
 
     Datagen encodes mate / out-of-range search scores as +/-32767. With the
     ticket-08 loss ``MSE(tanh(eval/400), tanh(score/400))`` those labels map to
-    a constant +/-1 and give the network almost no usable gradient. Clipping is
+    targets near +/-1. This compresses label magnitudes but does not by itself
+    remove the prediction's gradient. Clipping is
     *optional data cleaning* (``clip <= 0`` keeps the original behaviour), the
     loss itself is unchanged, and WDL labels already carry the win/loss fact.
     """

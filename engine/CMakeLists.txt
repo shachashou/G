@@ -83,6 +83,12 @@ else()
   endif()
 endif()
 if(GOMOKU_PYTHON)
+  # Ticket 12: bounded diagnostic/paired-gate/budget CLI contracts.
+  add_test(NAME m5_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/m5_tests.py"
+            --engine "$<TARGET_FILE:gomoku_nnue>" --probe "$<TARGET_FILE:nnue_probe>")
+  set_tests_properties(m5_tests PROPERTIES TIMEOUT 120)
+
   add_test(NAME protocol_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_blackbox.py"
             "$<TARGET_FILE:gomoku_nnue>")

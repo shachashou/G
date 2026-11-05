@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -28,6 +29,8 @@ import torch
 from torch.utils.data import DataLoader
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from run_support import file_identity
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -135,6 +138,7 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
     optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=1e-5)
     history: list[dict] = []
+    data_identity = file_identity(args.data)
     best_val, best_epoch = float("inf"), 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.history.parent.mkdir(parents=True, exist_ok=True)
@@ -192,10 +196,12 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
                 "history": history,
                 "train_args": vars(args),
                 "device": info,
+                "data_identity": data_identity,
             }, args.output)
 
     report = {
         "data": str(Path(args.data).resolve()),
+        "data_identity": data_identity,
         "device": info,
         "config": {
             "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,

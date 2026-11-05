@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from decimal import Decimal
 import json
+import math
 import queue
 import random
 import re
@@ -35,8 +37,11 @@ import subprocess
 import sys
 import threading
 import time
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+from run_support import file_identity, source_identity, write_json
 
 SIZE = 15
 CELLS = SIZE * SIZE
@@ -46,6 +51,15 @@ MOVE_RE = re.compile(r"(\d+),(\d+)")
 # (overline / 4-4 / 3-3) needs at least 5 black stones, so every randomly
 # generated opening is legal without duplicating the engine's foul rules.
 MAX_OPENING_PLIES = 8
+
+
+def gate_result(wins: int, draws: int, games: int, threshold: float,
+                strict: bool = False) -> dict:
+    """Evaluate original counts, not the rounded display score."""
+    points = Decimal(2 * wins + draws)
+    required = Decimal(str(threshold)) * (2 * games)
+    return {"threshold": threshold, "strict": strict,
+            "passed": points > required if strict else points >= required}
 
 
 class EngineFailure(Exception):
@@ -78,6 +92,72 @@ class MatchConfig:
     max_plies: int
     output: Path
     min_win_rate: float | None
+    paired_openings: bool = False
+    openings: Path | None = None
+    freeze_openings: Path | None = None
+    strict_gate: bool = False
+    m5_gate: bool = False
+
+
+class InvalidMatch(Exception):
+    """Invalid experiment configuration/backend; never a valid strength result."""
+
+
+def opening_manifest(cfg: MatchConfig) -> dict:
+    count = cfg.games // 2 if cfg.paired_openings else cfg.games
+    if cfg.openings:
+        manifest = json.loads(cfg.openings.read_text(encoding="utf-8"))
+        if (manifest.get("seed") != cfg.seed or
+                manifest.get("plies") != cfg.opening_plies or
+                manifest.get("region") != cfg.opening_region):
+            raise InvalidMatch("frozen opening seed/plies/region mismatch")
+    else:
+        positions, seen, attempt = [], set(), 0
+        unique = math.perm(cfg.opening_region ** 2, cfg.opening_plies) >= count
+        while len(positions) < count:
+            position = random_opening(random.Random(cfg.seed + attempt * 1_000_003),
+                                      cfg.opening_plies, cfg.opening_region)
+            attempt += 1
+            key = tuple(position)
+            if unique and key in seen:
+                continue
+            seen.add(key)
+            positions.append(position)
+        manifest = {"schema": 1, "seed": cfg.seed, "plies": cfg.opening_plies,
+                    "region": cfg.opening_region, "positions": positions}
+    positions = manifest.get("positions", [])
+    if len(positions) != count:
+        raise InvalidMatch("frozen opening count mismatch")
+    lo = (SIZE - cfg.opening_region) // 2
+    for position in positions:
+        if (len(position) != cfg.opening_plies or
+                any(not isinstance(p, (list, tuple)) or len(p) != 2 or
+                    any(type(v) is not int or not lo <= v < lo + cfg.opening_region
+                        for v in p) for p in position) or
+                len({tuple(p) for p in position}) != len(position)):
+            raise InvalidMatch("malformed frozen opening")
+    if cfg.m5_gate and len({json.dumps(p) for p in positions}) != count:
+        raise InvalidMatch("formal M5 needs 100 distinct openings")
+    return manifest
+
+
+def engine_identity(spec: EngineSpec) -> dict:
+    path = shutil.which(spec.argv[0]) or spec.argv[0]
+    result = {"command": spec.command, "exe": file_identity(path)}
+    if "--nnue" in spec.argv:
+        result["weights"] = file_identity(spec.argv[spec.argv.index("--nnue") + 1])
+    return result
+
+
+def check_backend(engine, spec: EngineSpec) -> str:
+    engine.send("ABOUT")
+    about = engine.recv_line()
+    expected = "nnue" if "--nnue" in spec.argv else "handcrafted"
+    if f'eval="{expected}"' not in about:
+        raise InvalidMatch(f"{spec.label}: expected {expected}, ABOUT={about!r}")
+    if expected == "nnue" and 'nnue_backend="avx2"' not in about:
+        raise InvalidMatch(f"{spec.label}: expected AVX2, ABOUT={about!r}")
+    return about
 
 
 def split_command(command: str) -> list[str]:
@@ -242,7 +322,7 @@ def color_name(color: int) -> str:
     return "black" if color == 1 else "white"
 
 
-def play_game(cfg: MatchConfig, game_index: int) -> dict:
+def play_game(cfg: MatchConfig, game_index: int, opening=None) -> dict:
     started = time.monotonic()
     a_is_black = game_index % 2 == 0
     rng = random.Random(cfg.seed + game_index * 1_000_003)
@@ -250,6 +330,7 @@ def play_game(cfg: MatchConfig, game_index: int) -> dict:
     moves: list[dict] = []
     anomalies: list[dict] = []
     engines: dict[str, Engine] = {}
+    about: dict[str, str] = {}
     result: str | None = None
     reason: str | None = None
     engine_plies = 0
@@ -273,13 +354,18 @@ def play_game(cfg: MatchConfig, game_index: int) -> dict:
         for label, engine in engines.items():
             try:
                 engine.start(cfg.rule, cfg.timeout_turn)
+                if cfg.m5_gate:
+                    about[label] = check_backend(engine, engine.spec)
             except EngineFailure as failure:
+                if cfg.m5_gate:
+                    raise InvalidMatch(f"{label}: startup verification failed: {failure}") from failure
                 anomaly(failure.kind, failure.detail, label, 0)
                 result = offender_loses(label)
                 reason = f"{failure.kind} at startup"
 
         if result is None:
             for ply, (x, y) in enumerate(
+                opening if opening is not None else
                 random_opening(rng, cfg.opening_plies, cfg.opening_region)
             ):
                 color = 1 if ply % 2 == 0 else 2
@@ -341,6 +427,8 @@ def play_game(cfg: MatchConfig, game_index: int) -> dict:
 
     return {
         "game": game_index + 1,
+        "pair": game_index // 2 + 1 if cfg.paired_openings else None,
+        "about": about,
         "a_color": "black" if a_is_black else "white",
         "b_color": "white" if a_is_black else "black",
         "result": result,
@@ -355,9 +443,18 @@ def play_game(cfg: MatchConfig, game_index: int) -> dict:
 
 
 def run_matches(cfg: MatchConfig) -> dict:
+    manifest = opening_manifest(cfg)
+    provenance = {"A": engine_identity(cfg.engine_a),
+                  "B": engine_identity(cfg.engine_b), "source": source_identity()}
     games = []
+    invalid = None
     for index in range(cfg.games):
-        game = play_game(cfg, index)
+        opening_index = index // 2 if cfg.paired_openings else index
+        try:
+            game = play_game(cfg, index, manifest["positions"][opening_index])
+        except (InvalidMatch, OSError) as error:
+            invalid = str(error)
+            break
         games.append(game)
         print(
             f"[{game['game']}/{cfg.games}] A={game['a_color']} B={game['b_color']}"
@@ -374,8 +471,13 @@ def run_matches(cfg: MatchConfig) -> dict:
         for item in game["anomalies"]:
             anomaly_counts[item["kind"]] = anomaly_counts.get(item["kind"], 0) + 1
 
-    return {
+    report = {
         "schema": 1,
+        "complete": len(games) == cfg.games and invalid is None,
+        "invalid_reason": invalid,
+        "provenance": provenance,
+        "openings": {"manifest": manifest,
+                     **(file_identity(cfg.openings) if cfg.openings else {})},
         "config": {
             "engine_a": cfg.engine_a.command,
             "engine_b": cfg.engine_b.command,
@@ -388,19 +490,34 @@ def run_matches(cfg: MatchConfig) -> dict:
             "timeout_turn": cfg.timeout_turn,
             "max_plies": cfg.max_plies,
             "min_win_rate": cfg.min_win_rate,
+            "paired_openings": cfg.paired_openings,
+            "m5_gate": cfg.m5_gate,
+            "strict_gate": cfg.strict_gate,
         },
         "summary": {
             "games": len(games),
             "a_wins": wins,
             "a_losses": losses,
             "draws": draws,
-            "win_rate": round((wins + 0.5 * draws) / len(games), 4),
-            "decisive_win_rate": round(wins / len(games), 4),
+            "win_rate": round((wins + 0.5 * draws) / len(games), 4) if games else 0,
+            "decisive_win_rate": round(wins / len(games), 4) if games else 0,
             "a_as_black": sum(g["a_color"] == "black" for g in games),
             "anomaly_counts": anomaly_counts,
         },
         "games": games,
     }
+    if cfg.min_win_rate is not None:
+        report["gate"] = gate_result(wins, draws, len(games), cfg.min_win_rate,
+                                     cfg.strict_gate)
+        report["gate"]["passed"] &= report["complete"]
+    if cfg.m5_gate:
+        # Detect changed files as well as backend fallback during the match.
+        if any(engine_identity(spec) != provenance[spec.label]
+               for spec in (cfg.engine_a, cfg.engine_b)):
+            report["complete"] = False
+            report["invalid_reason"] = "engine/weights changed during match"
+            report["gate"]["passed"] = False
+    return report
 
 
 def print_report(report: dict, output: Path) -> None:
@@ -444,14 +561,32 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
                         help="JSON result file (default match_results.json)")
     parser.add_argument("--min-win-rate", type=float, default=None,
                         help="strength gate on score rate; exit 2 when not met")
+    parser.add_argument("--paired-openings", action="store_true")
+    parser.add_argument("--openings", type=Path, help="frozen opening JSON")
+    parser.add_argument("--freeze-openings", type=Path,
+                        help="write opening JSON without running engines")
+    parser.add_argument("--strict-gate", action="store_true", help="use > instead of >=")
+    parser.add_argument("--m5-gate", action="store_true",
+                        help="formal 200-game paired strict M5 acceptance")
     args = parser.parse_args(argv)
 
     if args.games < 1:
         parser.error("--games must be >= 1")
+    if args.m5_gate:
+        args.paired_openings = True
+        args.strict_gate = True
+        args.min_win_rate = 0.65
+        if (args.games != 200 or args.rule != 2 or args.timeout_turn != 0 or
+                args.max_plies != 225 or not args.openings):
+            parser.error("M5 needs --games 200 --openings FILE, Renju, full games, no clock")
+    if args.paired_openings and args.games % 2:
+        parser.error("paired openings require an even game count")
     if not 0 <= args.opening_plies <= MAX_OPENING_PLIES:
         parser.error(f"--opening-plies must be 0..{MAX_OPENING_PLIES}")
     if args.opening_region < 1 or args.opening_region > SIZE or args.opening_region % 2 == 0:
         parser.error("--opening-region must be an odd number in 1..15")
+    if args.opening_plies > args.opening_region ** 2:
+        parser.error("opening region too small for requested plies")
     if args.move_timeout <= 0:
         parser.error("--move-timeout must be > 0")
     if args.max_plies < 1:
@@ -463,6 +598,21 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         argv_b = split_command(args.engine_b)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.m5_gate:
+        # Only the evaluator may differ. The build's Search default is 64MB TT.
+        def search_args(argv):
+            rest = list(argv[1:])
+            for option in ("--nnue", "--nnue-backend"):
+                if option in rest:
+                    i = rest.index(option)
+                    del rest[i:i + 2]
+            return rest
+        if (search_args(argv_a) != ["--depth", "2"] or argv_b[1:] != ["--depth", "2"]
+                or "--nnue" not in argv_a or
+                Path(argv_a[0]).resolve() != Path(argv_b[0]).resolve() or
+                ("--nnue-backend" in argv_a and
+                 argv_a[argv_a.index("--nnue-backend") + 1] != "avx2")):
+            parser.error("M5: same exe, A --depth 2 --nnue PATH [--nnue-backend avx2], B --depth 2")
 
     return MatchConfig(
         engine_a=EngineSpec("A", args.engine_a, argv_a),
@@ -477,22 +627,38 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         max_plies=args.max_plies,
         output=Path(args.output),
         min_win_rate=args.min_win_rate,
+        paired_openings=args.paired_openings,
+        openings=args.openings,
+        freeze_openings=args.freeze_openings,
+        strict_gate=args.strict_gate,
+        m5_gate=args.m5_gate,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     cfg = parse_args(argv)
-    report = run_matches(cfg)
-    cfg.output.parent.mkdir(parents=True, exist_ok=True)
-    cfg.output.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
+    try:
+        if cfg.freeze_openings:
+            if cfg.freeze_openings.exists():
+                raise InvalidMatch("refusing to overwrite frozen openings")
+            write_json(cfg.freeze_openings, opening_manifest(cfg))
+            return 0
+        report = run_matches(cfg)
+    except (InvalidMatch, OSError, ValueError, IndexError) as error:
+        write_json(cfg.output, {"complete": False, "invalid_reason": str(error)})
+        print(f"Invalid match: {error}", file=sys.stderr)
+        return 3
+    write_json(cfg.output, report)
+    if not report["complete"]:
+        print(f"Invalid match: {report['invalid_reason']}", file=sys.stderr)
+        return 3
     print_report(report, cfg.output)
 
     if cfg.min_win_rate is not None:
         rate = report["summary"]["win_rate"]
-        ok = rate >= cfg.min_win_rate
-        print(f"Gate: win_rate {rate * 100:.2f}% >= {cfg.min_win_rate * 100:.2f}% -> "
+        ok = report["gate"]["passed"]
+        op = ">" if cfg.strict_gate else ">="
+        print(f"Gate: win_rate {rate * 100:.2f}% {op} {cfg.min_win_rate * 100:.2f}% -> "
               f"{'PASS' if ok else 'FAIL'}")
         if not ok:
             return 2

@@ -9,15 +9,15 @@ Architecture matches `trainer/weights_format.py` exactly::
 Two forward modes share one topology:
 
 * ``quantized=False`` (default training): continuous float weights, plain
-  division. Fully differentiable and stable. A quantisation regularizer keeps
-  weights near integers so post-training rounding is nearly lossless.
+  division. A quantisation regularizer encourages weights near integers;
+  measured export fidelity, not arithmetic parity, determines the actual loss.
 * ``quantized=True`` (optional QAT / parity check): weights are rounded with a
   straight-through estimator and divisions use ``round_div`` (also STE). Every
   intermediate value is then an exact integer, so this path is numerically
   identical to the C++ integer forward in `weights_format.infer_int`.
 
-Parameters start as small INTEGERS, so rounding at export changes almost
-nothing and the float/int parity error stays small.
+Parameters start as small integers. Training can move them away from integers;
+original-model to exported-model fidelity must be measured independently.
 """
 from __future__ import annotations
 

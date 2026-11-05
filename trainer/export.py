@@ -74,7 +74,7 @@ def sample_positions(path: Path, count: int) -> list[tuple[list[int], int, float
 
 
 def int_evals(weights: dict, samples) -> list[int]:
-    return [wf.infer_int(weights, indices, stm) for indices, stm, _ in samples]
+    return [wf.infer_int(weights, sample[0], sample[1]) for sample in samples]
 
 
 def error_stats(a: list[float], b: list[float]) -> dict:
@@ -85,6 +85,19 @@ def error_stats(a: list[float], b: list[float]) -> dict:
         "max": round(max(diffs), 5) if diffs else 0.0,
         "exact_matches": sum(1 for d in diffs if d == 0),
     }
+
+
+def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
+    """Training/calibration-set correction, reusable by independent diagnostics."""
+    bias = []
+    for head in (0, 1):
+        deltas = [float(f) - float(i) for f, i, h in zip(float_eval, integer_eval, heads)
+                  if h == head]
+        delta = int(round(statistics.median(deltas))) if deltas else 0
+        original = weights["b2"][head]
+        weights["b2"][head] = max(wf.INT16_MIN, min(wf.INT16_MAX, original + delta))
+        bias.append(weights["b2"][head] - original)
+    return bias
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,17 +120,7 @@ def main(argv: list[str] | None = None) -> int:
 
     head_bias = [0, 0]
     if not args.no_calibrate:
-        for head in (0, 1):
-            deltas = [float(f) - float(i)
-                      for f, i, (_, s, _) in zip(float_eval, raw_int, samples)
-                      if s == head]
-            if deltas:
-                head_bias[head] = int(round(statistics.median(deltas)))
-        weights["b2"] = [
-            max(wf.INT16_MIN, min(wf.INT16_MAX,
-                                  weights["b2"][h] + head_bias[h]))
-            for h in (0, 1)
-        ]
+        head_bias = calibrate_bias(weights, float_eval, raw_int, [s[1] for s in samples])
 
     # Parity is measured against a model rebuilt from the FINAL exported
     # weights (including the calibrated output biases).

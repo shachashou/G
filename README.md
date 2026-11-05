@@ -4,6 +4,10 @@
 
 **设计契约的权威版本见 `.scratch/gomoku-nnue/spec.md`，工单见 `.scratch/gomoku-nnue/issues/`。**
 
+**2026-11-05 M5 诊断决策更新**：先解决 M5 再推进 M6；固定小样本拟合与训练原模型到最终量化导出的保真度检查优先，尚不能认定网络容量是根因。执行契约见 [工单 12](.scratch/gomoku-nnue/issues/12-m5-diagnostics-and-gate.md)。正式门控现约定为 100 个配对开局 / 200 局、Renju / depth 2 / VCF 开启 / 64MB TT，得分率严格 >65%；runner 的 `--m5-gate` 已支持该契约，下文旧比赛命令仅作历史诊断/工具用法示例。首轮实验累计运行预算 2 小时；预计 >5 分钟或无法估时的任务交用户自行运行，agent 准备命令并分析产物。
+
+诊断、配对开局与严格门控工具已准备，命令和结果说明见 [M5 用户运行指南](tools/M5.md)。正式比赛与长时间诊断仍须按阶段由用户运行。
+
 ## 核心决定（已达成的共识）
 
 - **规则**：默认 Renju（黑方三三/四四/长连禁手，五连优先于禁手，白无禁手、长连算胜）；`INFO rule` 可切换 freestyle（无禁手）。自由开局，不做开局交换规则。
@@ -69,7 +73,7 @@ py -3.12 -m venv .venv
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-包含 7 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests` / `nnue_tests`）与 7 个 Python/黑盒测试（`protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests` / `nnue_parity_tests` / `nnue_backend_tests` / `nnue_blackbox`），共 14 个 CTest；Python 测试都经项目 `.venv` 运行。`training_tests`、`nnue_parity_tests` 的规范/格式/对齐部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出与 PyTorch 浮点对齐的实测。也可手动执行：
+包含 7 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests` / `nnue_tests`）与 8 个 Python/黑盒测试（`m5_tests` / `protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests` / `nnue_parity_tests` / `nnue_backend_tests` / `nnue_blackbox`），共 15 个 CTest；Python 测试都经项目 `.venv` 运行。`m5_tests` 的门控/预算部分以及 `training_tests`、`nnue_parity_tests` 的规范/格式/对齐部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出与 PyTorch 浮点对齐的实测。也可手动执行：
 
 ```powershell
 .venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe
@@ -100,7 +104,7 @@ VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
 **当前进度**：工单 01–09 完成，工单 10 的 AVX2 提速/三档切换/耗时三项已完成，**M4 达成、M5 尚未达成**。自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通，RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`。C++ 端标量推理跨语言对齐实测 PyTorch 浮点 vs C++ `MAE 0.327 / max 0.737`（容差 ≤2），AVX2 后端逐位对齐且单次评估 `1.15 µs`（标量 `3.12 µs`，2.70×），CTest 14/14 全绿。
 
-**M5 胜率门控未达标**：100 局相同配置（`--depth 2`，NNUE vs 手工评估 + VCF）实测 `0W / 0D / 100L`，退出码 2，无超时/崩溃异常（`data/m5_gate.json`）。诊断显示不是接入或 SIMD 问题，而是首轮权重质量：7,208 条训练标签里 17.9% 是 ±32767 饱和搜索分，模型输出仅 `[-185, 30]`，评估缺乏区分度；延长训练到 100 epoch 也只把 20 局胜率从 0% 提到 5%。需先用更大规模数据（工单 07 预案的 1000 万局面约 9.7h）并修复标签尺度，或推进工单 11 用 NNUE 引擎自举生成数据，再重跑门控。本轮又补了可选 `--score-clip`（默认关闭）与三组 100-epoch 重训对照：裁剪标签把 val loss `0.854 → 0.690`，但 val_mse 仍为「常数预测」基线的 84%，权重输出仍集中在 `[-168, 79]`，胜率无改善——瓶颈在模型容量 / 训练目标设计，调整网络维度会改变 `GMNNUE01` 固定布局与工单 09 的对齐契约，需独立决策。详见 `.scratch/gomoku-nnue/issues/10-avx2-m5-acceptance.md`。
+**M5 胜率门控未达标**：旧 100 局相同配置（`--depth 2`，NNUE vs 手工评估 + VCF）实测 `0W / 0D / 100L`，退出码 2，无异常（`data/m5_gate.json`）。7,208 条训练标签里 17.9% 是 ±32767 饱和搜索分，v1 模型输出仅 `[-185, 30]`；三组 100-epoch 重训也未明显改善棋力。但这些证据不足以排除数据覆盖、优化或量化问题，先前「网络容量已确认为瓶颈」及「解释 16% 方差」的推断不再作为结论。导出报告中约 0.36 的误差来自导出权重重建模型与整数推理；训练原模型到最终导出的保真度仍待核验。按工单 12 的诊断顺序，再凭证据选择数据或模型调整；单改训练目标且推理契约不变时，不必改变 `GMNNUE01` 布局。
 
 ## 工具用法
 
@@ -204,8 +208,8 @@ Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整�
 .\build\engine\Release\gomoku_nnue.exe --nnue weights\nnue_v1.nnue --depth 2
 ```
 
-本机实测：标量 `3,117.55 ns/eval`，AVX2 `1,154.87 ns/eval`（**1.15 µs，2.70×**）；CTest 14/14 全绿。**但 M5 胜率门控 100 局 `0W/0D/100L` 未达标**——根因是首轮权重质量（7,208 条标签中 17.9% 为 ±32767 饱和分，模型输出仅 `[-185,30]`），不是 SIMD 或接入 bug；详见 `issues/10-avx2-m5-acceptance.md` 的诊断与下一步。
+此前实测：标量 `3,117.55 ns/eval`，AVX2 `1,154.87 ns/eval`（**1.15 µs，2.70×**）；CTest 14/14 全绿。**但旧 M5 门控 100 局 `0W/0D/100L` 未达标**。已测样本中的算术对齐不等于训练到导出的保真度或全部接入行为已获验证；根因与下一步诊断见工单 12。
 
 ### 后续工单
 
-- 工单 10（进行中）：技术三项已完成，余 M5 `>65%` 门控待模型容量 / 训练目标决策与大规模数据后重跑；工单 11：datagen（NNUE 引擎）→训练→导出→门控的自举迭代循环，并在收敛时冻结最终模型。
+- 工单 12：M5 诊断与正式门控准备，长任务交用户运行后分析结果；工单 10 保持进行中，正式 200 局门控通过后才完成 M5；工单 11 在此依赖解除后推进自举迭代与最终模型冻结。

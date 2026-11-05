@@ -79,6 +79,19 @@ bool Search::timeUp() const {
   return std::chrono::steady_clock::now() >= deadline_;
 }
 
+void Search::reset() {
+  std::fill(tt_.begin(), tt_.end(), TTEntry{});
+  generation_ = 1;
+  for (auto& k : killers_) {
+    k[0] = -1;
+    k[1] = -1;
+  }
+  history_.fill(0);
+  nodes_ = 0;
+  stop_ = false;
+  rootBestMove_ = -1;
+}
+
 SearchResult Search::findBestMove(Board& board, const SearchLimits& limits) {
   SearchResult result;
   Evaluator eval;

@@ -32,6 +32,11 @@ class Search {
  public:
   explicit Search(uint64_t ttBytes = 64ull * 1024 * 1024);
 
+  // Clears the transposition table and heuristics. Datagen calls this before
+  // every move so a record's score depends only on (position, depth, VCF, TT
+  // size) and can be reproduced offline by replaying that single position.
+  void reset();
+
   SearchResult findBestMove(Board& board, const SearchLimits& limits);
 
  private:

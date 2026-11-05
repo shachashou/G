@@ -5,7 +5,8 @@ set(ENGINE_CORE_SRC
   src/movegen.cpp
   src/search.cpp
   src/vcf.cpp
-  src/random_player.cpp)
+  src/random_player.cpp
+  src/binpack.cpp)
 
 # GomokuNNUE engine target
 add_executable(gomoku_nnue
@@ -14,6 +15,12 @@ add_executable(gomoku_nnue
   ${ENGINE_CORE_SRC})
 target_compile_features(gomoku_nnue PRIVATE cxx_std_20)
 target_include_directories(gomoku_nnue PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+# Self-play datagen worker (ticket 07). One process owns one shard file;
+# tools/datagen.py launches many of them in parallel.
+add_executable(datagen src/datagen.cpp ${ENGINE_CORE_SRC})
+target_compile_features(datagen PRIVATE cxx_std_20)
+target_include_directories(datagen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 # Board / random-player unit tests (ticket 02)
 add_executable(board_tests tests/board_tests.cpp ${ENGINE_CORE_SRC})
@@ -45,6 +52,12 @@ target_compile_features(vcf_tests PRIVATE cxx_std_20)
 target_include_directories(vcf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME vcf_tests COMMAND vcf_tests)
 
+# 64-byte binpack record round-trip tests (ticket 07)
+add_executable(binpack_tests tests/binpack_tests.cpp ${ENGINE_CORE_SRC})
+target_compile_features(binpack_tests PRIVATE cxx_std_20)
+target_include_directories(binpack_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME binpack_tests COMMAND binpack_tests)
+
 # Protocol black-box test: drives the exe via stdin/stdout.
 # Prefer the project venv (py -3.12 -m venv .venv), never the system Python.
 set(GOMOKU_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
@@ -68,4 +81,13 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>"
             "${CMAKE_SOURCE_DIR}/tools/match_runner.py")
   set_tests_properties(match_runner_tests PROPERTIES TIMEOUT 120)
+
+  # Datagen end-to-end test (ticket 07): real C++ worker writes shards,
+  # Python read end validates / merges, C++ worker replays sampled scores.
+  add_test(NAME datagen_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/datagen_tests.py"
+            "$<TARGET_FILE:datagen>"
+            "${CMAKE_SOURCE_DIR}/trainer/binpack.py"
+            "${CMAKE_SOURCE_DIR}/tools/datagen.py")
+  set_tests_properties(datagen_tests PROPERTIES TIMEOUT 300)
 endif()

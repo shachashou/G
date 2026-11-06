@@ -167,6 +167,21 @@ def test_freestyle_mode(tmp):
     check(data["summary"]["anomaly_counts"] == {}, "freestyle games had no anomalies")
 
 
+def test_verify_backend_flag():
+    print("[backend verification flag]")
+    base = ["--games", "2", "--opening-plies", "0"]
+    check(not mr.parse_args(base).verify_backend,
+          "backend verification stays off by default so fake engines still work")
+    check(mr.parse_args([*base, "--verify-backend"]).verify_backend,
+          "--verify-backend reaches MatchConfig for screening matches")
+    formal = mr.parse_args(["--games", "200", "--m5-gate", "--seed", "20261109",
+                            "--openings", "formal_openings.json",
+                            "--engine-a", "gomoku_nnue.exe --depth 2 --nnue candidate.nnue",
+                            "--engine-b", "gomoku_nnue.exe --depth 2"])
+    check(formal.verify_backend,
+          "formal M5 gate always verifies the backend")
+
+
 def test_gate_failure(tmp):
     print("[win-rate gate failure]")
     fake = tmp / "fake_engine.py"
@@ -217,6 +232,7 @@ def test_anomalies(tmp):
 
 def main():
     test_helpers()
+    test_verify_backend_flag()
     with tempfile.TemporaryDirectory() as directory:
         tmp = Path(directory)
         test_strength_gate(tmp)

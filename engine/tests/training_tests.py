@@ -343,6 +343,39 @@ def test_torch(tmp: Path) -> None:
               for row in clip_report["epochs"]),
           "clipped-label training runs without NaNs")
 
+    steps_history = tmp / "history_steps.json"
+    train.main(["--data", str(synthetic), "--output", str(tmp / "steps.pt"),
+                "--history", str(steps_history), "--epochs", "10",
+                "--batch-size", "4", "--limit", "6", "--max-steps", "5",
+                "--checkpoint-policy", "last", "--device", "cpu"])
+    steps_report = json.loads(steps_history.read_text(encoding="utf-8"))
+    check(steps_report["config"]["max_steps"] == 5,
+          "ticket 15 step cap is recorded in the training config")
+    check(steps_report["config"]["checkpoint_policy"] == "last",
+          "checkpoint policy is recorded in the training config")
+    steps_ckpt = torch.load(tmp / "steps.pt", map_location="cpu",
+                            weights_only=False)
+    check(steps_ckpt["epoch"] == len(steps_report["epochs"]),
+          "'last' policy exports the final optimizer step, not a best-val pick")
+    check(steps_report["optimisation"]["optimizer_steps"] == 5 and
+          steps_report["optimisation"]["cap_reached"],
+          "training stops at exactly the requested optimizer updates")
+    check(len(steps_report["epochs"]) < 10,
+          "step cap stops the epoch loop early")
+    check(steps_report["epochs"][-1]["optimizer_steps"] == 5 and
+          steps_report["epochs"][-1]["samples_exposed"] ==
+          steps_report["optimisation"]["samples_exposed"],
+          "per-epoch step/exposure counters agree with the final report")
+    try:
+        train.main(["--data", str(synthetic), "--output", str(tmp / "short.pt"),
+                    "--history", str(tmp / "history_short.json"), "--epochs", "1",
+                    "--batch-size", "4", "--limit", "6", "--max-steps", "100",
+                    "--device", "cpu"])
+    except SystemExit:
+        pass
+    else:
+        check(False, "an unreachable step cap must fail loudly")
+
     weight_file = tmp / "exported.nnue"
     report_file = tmp / "export_report.json"
     export.main(["--checkpoint", str(checkpoint), "--data", str(synthetic),

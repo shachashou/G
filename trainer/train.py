@@ -57,6 +57,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="keep 0 on Windows (mmap + fork)")
     parser.add_argument("--limit", type=int, default=None,
                         help="cap samples per split for a quick smoke run")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="ticket 15: cap TOTAL optimizer updates across "
+                             "epochs so two data-volume arms receive identical "
+                             "compute; history records the actual step count")
+    parser.add_argument("--checkpoint-policy", choices=("best", "last"),
+                        default="best",
+                        help="ticket 15: 'last' saves the model after the final "
+                             "optimizer step so equal-step arms export the same "
+                             "amount of training; default keeps the best-val "
+                             "checkpoint of ticket 08")
     parser.add_argument("--quant-forward", action="store_true",
                         help="QAT mode: integer-equivalent STE forward")
     parser.add_argument("--score-clip", type=float, default=0.0,
@@ -72,7 +82,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "lists from validation_freeze.py check); adds "
                              "training files without touching the frozen "
                              "validation split")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.max_steps is not None and args.max_steps < 1:
+        parser.error("--max-steps must be >= 1")
+    return args
 
 
 def make_optimizer(model: nnue.NNUEModel, lr: float,
@@ -179,6 +192,8 @@ def run_training(args: argparse.Namespace, train_set,
     train_files = ([p["path"] for p in manifest["files"]] if manifest is not None
                    else [str(Path(args.data).resolve())])
     best_val, best_epoch = float("inf"), 0
+    steps = 0
+    samples_exposed = 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.history.parent.mkdir(parents=True, exist_ok=True)
 
@@ -208,6 +223,10 @@ def run_training(args: argparse.Namespace, train_set,
             mse_sum += float(mse) * batch
             ce_sum += float(ce) * batch
             count += batch
+            steps += 1
+            samples_exposed += batch
+            if args.max_steps is not None and steps >= args.max_steps:
+                break
 
         val = evaluate(model, val_loader, device, args)
         row = {
@@ -216,6 +235,8 @@ def run_training(args: argparse.Namespace, train_set,
             "train_mse": mse_sum / max(1, count),
             "train_ce": ce_sum / max(1, count),
             "seconds": round(time.perf_counter() - started, 3),
+            "optimizer_steps": steps,
+            "samples_exposed": samples_exposed,
             **val,
         }
         history.append(row)
@@ -225,13 +246,15 @@ def run_training(args: argparse.Namespace, train_set,
               f"(mse {row['val_mse']:.5f} ce {row['val_ce']:.5f}) | "
               f"{row['seconds']:.1f}s")
 
-        if row["val_loss"] < best_val:
+        improved = row["val_loss"] < best_val
+        if improved:
             best_val, best_epoch = row["val_loss"], epoch
+        if improved or args.checkpoint_policy == "last":
             torch.save({
                 "model_state": model.state_dict(),
                 "config": vars(model.config),
                 "epoch": epoch,
-                "val_loss": best_val,
+                "val_loss": row["val_loss"],
                 "history": history,
                 "train_args": vars(args),
                 "device": info,
@@ -240,12 +263,17 @@ def run_training(args: argparse.Namespace, train_set,
                 "train_manifest_identity": manifest_identity,
             }, args.output)
 
+        if args.max_steps is not None and steps >= args.max_steps:
+            break
+
     report = {
         "data": str(Path(args.data).resolve()),
         "data_identity": data_identity,
         "device": info,
         "config": {
             "epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr,
+            "max_steps": args.max_steps,
+            "checkpoint_policy": args.checkpoint_policy,
             "hidden_lr": args.hidden_lr,
             "wdl_weight": args.wdl_weight,
             "wdl_temperature": args.wdl_temperature,
@@ -266,6 +294,12 @@ def run_training(args: argparse.Namespace, train_set,
             "frozen_validation_identity": frozen_identity,
             "train_manifest_identity": manifest_identity,
         },
+        "optimisation": {
+            "optimizer_steps": steps,
+            "samples_exposed": samples_exposed,
+            "cap_reached": (args.max_steps is not None
+                            and steps >= args.max_steps),
+        },
         "epochs": history,
         "loss_curve": [row["val_loss"] for row in history],
         "best_epoch": best_epoch,
@@ -275,6 +309,10 @@ def run_training(args: argparse.Namespace, train_set,
     }
     args.history.write_text(json.dumps(report, indent=2, ensure_ascii=False),
                             encoding="utf-8")
+    if args.max_steps is not None and steps < args.max_steps:
+        raise SystemExit(
+            f"--max-steps {args.max_steps} not reached ({steps} steps in "
+            f"{len(history)} epochs); increase --epochs or lower the cap")
     print(f"best val loss {best_val:.5f} @ epoch {best_epoch}; "
           f"converged={report['converged']}")
     print(f"checkpoint: {args.output}")

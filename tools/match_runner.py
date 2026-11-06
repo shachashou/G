@@ -97,6 +97,7 @@ class MatchConfig:
     freeze_openings: Path | None = None
     strict_gate: bool = False
     m5_gate: bool = False
+    verify_backend: bool = False
 
 
 class InvalidMatch(Exception):
@@ -354,10 +355,10 @@ def play_game(cfg: MatchConfig, game_index: int, opening=None) -> dict:
         for label, engine in engines.items():
             try:
                 engine.start(cfg.rule, cfg.timeout_turn)
-                if cfg.m5_gate:
+                if cfg.m5_gate or cfg.verify_backend:
                     about[label] = check_backend(engine, engine.spec)
             except EngineFailure as failure:
-                if cfg.m5_gate:
+                if cfg.m5_gate or cfg.verify_backend:
                     raise InvalidMatch(f"{label}: startup verification failed: {failure}") from failure
                 anomaly(failure.kind, failure.detail, label, 0)
                 result = offender_loses(label)
@@ -492,6 +493,7 @@ def run_matches(cfg: MatchConfig) -> dict:
             "min_win_rate": cfg.min_win_rate,
             "paired_openings": cfg.paired_openings,
             "m5_gate": cfg.m5_gate,
+            "verify_backend": cfg.verify_backend,
             "strict_gate": cfg.strict_gate,
         },
         "summary": {
@@ -568,6 +570,10 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
     parser.add_argument("--strict-gate", action="store_true", help="use > instead of >=")
     parser.add_argument("--m5-gate", action="store_true",
                         help="formal 200-game paired strict M5 acceptance")
+    parser.add_argument("--verify-backend", action="store_true",
+                        help="ticket 15: verify ABOUT eval/nnue_backend in "
+                             "non-formal screening matches too; a silent "
+                             "handcrafted fallback invalidates the report")
     args = parser.parse_args(argv)
 
     if args.games < 1:
@@ -576,6 +582,7 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         args.paired_openings = True
         args.strict_gate = True
         args.min_win_rate = 0.65
+        args.verify_backend = True
         if (args.games != 200 or args.rule != 2 or args.timeout_turn != 0 or
                 args.max_plies != 225 or not args.openings):
             parser.error("M5 needs --games 200 --openings FILE, Renju, full games, no clock")
@@ -632,6 +639,7 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         freeze_openings=args.freeze_openings,
         strict_gate=args.strict_gate,
         m5_gate=args.m5_gate,
+        verify_backend=args.verify_backend,
     )
 
 

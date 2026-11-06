@@ -116,11 +116,13 @@ body 从偏移 64 起，全部 little-endian、行主序：`W0 int8[450,1024]`�
 - `--score-clip N`（默认 0 = 关闭）：把 datagen 饱和的 ±32767 搜索分裁剪到 ±N 后再进 `tanh`，属于**可选数据清洗**，损失形式不变。`dataset.clip_score()` 对 train/val 样本与 `iter_samples()` 同时生效，取值记入 history 的 `config.score_clip`。工单 10 实测在 7,208 条基准数据上把 val loss `0.854 → 0.690`，但并未解决评估拟合问题（见下）。
 - `--val-fraction` 按**完整对局**随机抽取（确定性由 `--seed` 控制），`dataset.assert_disjoint()` 会在训练前断言两个 split 无对局交集。
 - `--quant-forward` 可切换成整数等价的 STE 前向做量化感知微调；`--quant-reg` 控制接近整数的正则强度。
+- `--frozen-validation FILE` / `--train-manifest FILE`（工单 13）：冻结验证身份与按 D4 规范形排除泄漏后的训练清单，追加数据不重切验证集；`export.py` 与 `diagnose.py fidelity` 也接受 `--frozen-validation` 并校验 checkpoint 记录的冻结身份与标签变换。
+- `--max-steps N` / `--checkpoint-policy last`（工单 15）：前者把跨 epoch 的**总**优化更新数固定为 N，history 记录 `optimisation.optimizer_steps` / `samples_exposed` / `cap_reached`，epoch 数不足导致上限未命中会直接报错；后者保存完成相同步数的最终模型而不是按验证损失挑最佳 checkpoint。默认 `best` 保持工单 08 行为。两组等算力对照除训练清单外必须共用全部其余参数。
 - 09 的对齐测试可直接用 `weights_format.read_weights()` + `infer_int()` 作为期望值，或 `NNUEModel.from_quantized_weights()` 重建浮点模型。
 
 ### 已知限制：搜索分标签饱和（工单 10 诊断）
 
-`binpack` 的搜索分含大量 mate / 饱和值：本机 `bench-d4` 基准集 17.9% 为 ±32767，只有 19.7% 落在 ±600 内，`tanh(score/400)` 会把它们压成近似常数。裁剪到 ±600 后的目标方差 `0.671`（即「常数预测」的 MSE 基线），而当前 450→1024→15→1 量化架构训练 100 epoch 后 val_mse 仍 `0.564`——只解释了约 16% 的目标方差；导出权重输出集中在 `[-168, 79]`，M5 胜率门控 `0/100`。延长训练、`--score-clip`、调大 lr / 去掉量化正则三组实验均未改善，说明瓶颈在**模型容量或训练目标设计**，不是训练轮数或数据清洗。改动网络维度会改变 `GMNNUE01` 的固定文件布局与工单 09 的跨语言对齐契约，须作为独立设计决策处理。
+`binpack` 的搜索分含大量 mate / 饱和值：本机 `bench-d4` 基准集 17.9% 为 ±32767，只有 19.7% 落在 ±600 内，`tanh(score/400)` 会把它们压成近似常数。裁剪到 ±600 后的目标方差 `0.671`（即「常数预测」的 MSE 基线），而当前 450→1024→15→1 量化架构训练 100 epoch 后 val_mse 仍 `0.564`——只解释了约 16% 的目标方差；导出权重输出集中在 `[-168, 79]`，M5 胜率门控 `0/100`。延长训练、`--score-clip`、调大 lr / 去掉量化正则三组实验均未改善。**这段早期记录曾把瓶颈归因于模型容量或训练目标设计；工单 12 起该推断已被下调为未证实的解释之一**——数据覆盖不足、全数据下的优化/特征/目标尺度限制、训练目标与棋力指标不同步尚未区分，当前以 `spec.md` 与工单 13–16 为准。改动网络维度会改变 `GMNNUE01` 的固定文件布局与工单 09 的跨语言对齐契约，须作为独立设计决策处理。
 
 ## 本机实测（RTX 4080 SUPER，torch 2.6.0+cu124）
 

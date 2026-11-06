@@ -32,7 +32,7 @@ from run_support import file_identity, write_json
 
 CONFIG = {"steps": 1000, "batch_pairs": 256, "initial_seed": 42, "batch_seed": 42,
           "lr": .1, "hidden_lr": .001, "weight_decay": 1e-5, "tie_epsilon": 0,
-          "pointwise_weight": 0.0, "excess_threshold": .75, "disagreement_threshold": .10}
+          "pointwise_weight": 0.0, "quant_reg": 0.0, "excess_threshold": .75, "disagreement_threshold": .10}
 
 
 def read(path):
@@ -109,6 +109,8 @@ def fit(manifest_path, arm, out, requested_device="auto"):
             s = -model(x, stm, quantized=quantized)  # parent-move score = -child eval
             logits = s[a] - s[b]
             loss = torch.nn.functional.softplus(-logits).mean()  # -log sigmoid(logits)
+            if CONFIG["quant_reg"] > 0:
+                loss = loss + CONFIG["quant_reg"] * model.quantization_regularizer()
             if not torch.isfinite(loss):
                 raise ValueError("non-finite ranking loss")
             optimiser.zero_grad(set_to_none=True)
@@ -186,10 +188,12 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--quant-reg", type=float, default=0.0)
     args = parser.parse_args(argv)
     if args.steps < 1:
         parser.error("--steps must be >= 1")
     CONFIG["steps"] = args.steps
+    CONFIG["quant_reg"] = args.quant_reg
     fit(args.manifest.resolve(), args.arm, args.out_dir.resolve(), args.device)
     return 0
 

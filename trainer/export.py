@@ -54,10 +54,59 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--frozen-validation", type=Path, default=None,
                         help="ticket 13: parity/calibration sampling is "
                              "restricted to the frozen train side")
+    parser.add_argument("--float16", action="store_true",
+                        help="ticket 21: export v3 float16 weights (no "
+                             "quantisation/calibration; float weights are the "
+                             "export)")
     args = parser.parse_args(argv)
     if args.samples < 1:
         parser.error("--samples must be positive")
     return args
+
+
+def export_float16(model: nnue.NNUEModel, args: argparse.Namespace) -> int:
+    weights = {
+        "W0": model.W0.detach().flatten().tolist(),
+        "b0": model.b0.detach().flatten().tolist(),
+        "W1": model.W1.detach().flatten().tolist(),
+        "b1": model.b1.detach().flatten().tolist(),
+        "W2": model.W2.detach().flatten().tolist(),
+        "b2": model.b2.detach().flatten().tolist(),
+        "format_version": 3,
+        "output_gain": model.config.output_gain,
+    }
+    blob = wf.pack_weights(weights, qa=model.config.qa, qb=model.config.qb,
+                           score_scale=model.config.score_scale)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(blob)
+    reloaded, meta = wf.read_weights(args.output)
+    samples = sample_positions(args.data, args.samples, None)
+    x = torch.tensor([features.dense_vector(indices) for indices, _, _ in samples],
+                     dtype=torch.float32)
+    stm = torch.tensor([s for _, s, _ in samples], dtype=torch.long)
+    with torch.no_grad():
+        float_eval = model(x, stm, quantized=False).cpu().tolist()
+    ref_eval = [wf.infer_float(reloaded, indices, s)
+                for indices, s, _ in samples]
+    parity = error_stats(float_eval, ref_eval)
+    report = {
+        "complete": True,
+        "checkpoint_identity": file_identity(args.checkpoint),
+        "weights_file": str(args.output.resolve()),
+        "weights_meta": meta,
+        "parity": {"float_vs_float16_ref": parity},
+        "self_check": {"magic": blob[:8].decode("ascii"), "version": meta["version"],
+                       "output_gain": meta["output_gain"], "file_size": len(blob),
+                       "read_back_ok": True},
+    }
+    args.report.parent.mkdir(parents=True, exist_ok=True)
+    args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False),
+                           encoding="utf-8")
+    print(f"weights: {args.output} ({len(blob):,} bytes, v3 float16)")
+    print(f"parity : float vs float16 ref MAE {parity['mae']:.5f}, "
+          f"max {parity['max']:.5f}")
+    print(f"report: {args.report}")
+    return 0
 
 
 def load_model(checkpoint: Path) -> tuple[nnue.NNUEModel, dict]:
@@ -123,6 +172,8 @@ def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     model, payload = load_model(args.checkpoint)
+    if args.float16:
+        return export_float16(model, args)
     linear = payload.get("target_contract") is not None
     calibrate = not args.no_calibrate and (not linear or args.calibrate)
     frozen_identity = None

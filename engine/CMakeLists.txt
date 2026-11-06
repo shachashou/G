@@ -133,6 +133,10 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/move_correlation_tests.py")
   set_tests_properties(move_correlation_tests PROPERTIES TIMEOUT 60)
 
+  add_test(NAME clean_search_ranking_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/clean_search_ranking_tests.py")
+  set_tests_properties(clean_search_ranking_tests PROPERTIES TIMEOUT 60)
+
   add_test(NAME distillation_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/distillation_tests.py"
             "$<TARGET_FILE:nnue_probe>")

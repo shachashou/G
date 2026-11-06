@@ -24,6 +24,7 @@ import export
 import features
 import nnue
 import train
+import validation_freeze as vf
 import weights_format as wf
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,7 +111,21 @@ def fidelity(args, out: Path) -> dict:
     if payload.get("diagnostic_only"):
         raise ValueError("same-set overfit checkpoint has no independent validation split")
     training = payload.get("train_args", {})
-    if "seed" not in training or "val_fraction" not in training:
+    frozen = None
+    frozen_sha = None
+    if getattr(args, "frozen_validation", None) is not None:
+        # Ticket 13: evaluation must reference the very same frozen identity
+        # the checkpoint was trained against, including its label transform.
+        frozen = vf.load_frozen(args.frozen_validation)
+        vf.verify_frozen_data(frozen, args.data)
+        frozen_sha = file_identity(args.frozen_validation)["sha256"]
+        recorded_frozen = payload.get("frozen_validation_identity") or {}
+        if recorded_frozen.get("sha256") != frozen_sha:
+            raise ValueError("checkpoint was not trained with this frozen validation file")
+        if float(training.get("score_clip", 0.0)) != float(
+                frozen["label_transform"]["score_clip"]):
+            raise ValueError("checkpoint score_clip does not match the frozen label transform")
+    if frozen is None and ("seed" not in training or "val_fraction" not in training):
         raise ValueError("checkpoint lacks original seed/val_fraction; cannot reconstruct holdout")
     actual_identity = file_identity(args.data)
     recorded_identity = payload.get("data_identity")
@@ -125,14 +140,19 @@ def fidelity(args, out: Path) -> dict:
             original_path = ROOT / original_path
         if original_path.exists() and file_identity(original_path)["sha256"] != actual_identity["sha256"]:
             raise ValueError("supplied data differs from legacy checkpoint data path")
-    seed = training["seed"]
-    fraction = training["val_fraction"]
+    seed = training.get("seed")
+    fraction = training.get("val_fraction")
     clip = training.get("score_clip", 0.0)
     with binpack.BinpackReader(args.data) as reader:
         game_map = reader.game_index_map()
-        held = dataset.choose_validation_games(reader.header.game_count, fraction, seed)
-        train_ids = [i for i, g in enumerate(game_map) if g not in held]
-        eval_ids = [i for i, g in enumerate(game_map) if g in held]
+        if frozen is not None:
+            held = set(frozen["split"]["validation_games"])
+            train_ids = vf.frozen_train_record_ids(game_map, frozen)
+            eval_ids = vf.frozen_validation_record_ids(game_map, frozen)
+        else:
+            held = dataset.choose_validation_games(reader.header.game_count, fraction, seed)
+            train_ids = [i for i, g in enumerate(game_map) if g not in held]
+            eval_ids = [i for i, g in enumerate(game_map) if g in held]
         limit = training.get("limit")
         if limit is not None:
             if limit < 1:
@@ -152,11 +172,20 @@ def fidelity(args, out: Path) -> dict:
                     "val_fraction": fraction, "score_clip": clip,
                     "baseline_train_records": len(train_ids),
                     "training_limit": limit,
+                    "frozen_validation": ({
+                        "path": str(Path(args.frozen_validation).resolve()),
+                        "sha256": frozen_sha,
+                        "d4_equivalent_positions": frozen["leakage"]["d4_equivalent_positions"],
+                        "excluded_train_games": frozen["leakage"]["excluded_train_games"]}
+                        if frozen is not None else None),
                     "data_identity": {"verified": verified,
-                        "assessment_independence_verified": verified,
-                        "limitation": None if verified else "legacy dataset identity not sealed; held-out membership assumed from split settings"},
+                        "assessment_independence_verified": bool(verified or frozen is not None),
+                        "d4_position_separation_verified": frozen is not None,
+                        "limitation": None if verified or frozen is not None else "legacy dataset identity not sealed; held-out membership assumed from split settings"},
                     "checkpoint_training_data": str(training.get("data", "unknown")),
-                    "split_provenance": "reconstructed from checkpoint train_args; not a new test set"}
+                    "split_provenance": ("frozen validation JSON (ticket 13); D4-equivalent whole train games excluded"
+                        if frozen is not None else
+                        "reconstructed from checkpoint train_args; not a new test set")}
     weights = model.quantized_weights()
     def forwards(samples, quantized=False):
         x, stm, _, _ = tensors(samples)
@@ -282,6 +311,9 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--probe", type=Path)
+    parser.add_argument("--frozen-validation", type=Path, default=None,
+                        help="fidelity only: use the ticket-13 frozen "
+                             "validation games and D4-excluded train side")
     parser.add_argument("--allow-unverified-data", action="store_true",
                         help="legacy checkpoint only: report assumed split, not verified independence")
     parser.add_argument("--samples", type=int, default=64)

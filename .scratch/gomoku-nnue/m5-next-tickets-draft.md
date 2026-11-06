@@ -2,7 +2,7 @@
 
 # M5 后续工单拆分草案
 
-**Status:** draft — 待用户确认粒度与依赖，尚未发布为实施工单。
+**Status:** published — 2026-11-06 用户确认「跟上进度」，已按本地 tracker 约定发布为 `issues/13-frozen-validation-split.md`、`issues/14-fresh-data-200k.md`、`issues/15-controlled-data-comparison.md`、`issues/16-formal-m5-gate.md`。本文件保留为草稿历史，后续以工单文件为准。
 
 本草案整理当前会话和已有实测；不关闭、不修改工单 10、11、12，不把诊断交付或筛选失败记为 M5 完成。
 

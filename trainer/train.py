@@ -26,6 +26,7 @@ from pathlib import Path
 
 import dataset as ds
 import nnue
+import validation_freeze as vf
 import torch
 from torch.utils.data import DataLoader
 
@@ -61,6 +62,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--score-clip", type=float, default=0.0,
                         help="clip saturated +/-32767 search scores to +/-N "
                              "(0 disables; loss stays MSE(tanh(score/400)))")
+    parser.add_argument("--frozen-validation", type=Path, default=None,
+                        help="ticket-13 frozen validation JSON: fixes the "
+                             "validation games and applies the D4-leakage "
+                             "train-game exclusions; --val-fraction/--seed "
+                             "no longer drive the split")
+    parser.add_argument("--train-manifest", type=Path, default=None,
+                        help="ticket-13 train manifest (per-file include "
+                             "lists from validation_freeze.py check); adds "
+                             "training files without touching the frozen "
+                             "validation split")
     return parser.parse_args(argv)
 
 
@@ -134,12 +145,19 @@ def evaluate(model: nnue.NNUEModel, loader: DataLoader, device: torch.device,
             "val_ce": ce_sum / count, "val_records": count}
 
 
-def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
+def run_training(args: argparse.Namespace, train_set,
                  val_set: ds.BinpackDataset, device: torch.device,
-                 info: dict) -> int:
-    n_games = train_set.game_index_map[-1] + 1 if len(train_set.game_index_map) else 0
-    print(f"data: {len(train_set):,} train / {len(val_set):,} val records, "
-          f"{n_games} games ({len(train_set.validation_games)} held out)")
+                 info: dict, frozen: dict | None = None,
+                 manifest: dict | None = None) -> int:
+    if isinstance(train_set, ds.MultiBinpackDataset):
+        n_games = 0
+        print(f"data: {len(train_set):,} train records from "
+              f"{len(train_set.datasets)} manifest file(s) / "
+              f"{len(val_set):,} frozen val records")
+    else:
+        n_games = train_set.game_index_map[-1] + 1 if len(train_set.game_index_map) else 0
+        print(f"data: {len(train_set):,} train / {len(val_set):,} val records, "
+              f"{n_games} games ({len(train_set.validation_games)} held out)")
 
     loader_kwargs = {"num_workers": args.num_workers,
                      "pin_memory": device.type == "cuda",
@@ -154,6 +172,12 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
     optimiser = make_optimizer(model, args.lr, args.hidden_lr)
     history: list[dict] = []
     data_identity = file_identity(args.data)
+    frozen_identity = (file_identity(args.frozen_validation)
+                       if args.frozen_validation is not None else None)
+    manifest_identity = (file_identity(args.train_manifest)
+                         if args.train_manifest is not None else None)
+    train_files = ([p["path"] for p in manifest["files"]] if manifest is not None
+                   else [str(Path(args.data).resolve())])
     best_val, best_epoch = float("inf"), 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.history.parent.mkdir(parents=True, exist_ok=True)
@@ -212,6 +236,8 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
                 "train_args": vars(args),
                 "device": info,
                 "data_identity": data_identity,
+                "frozen_validation_identity": frozen_identity,
+                "train_manifest_identity": manifest_identity,
             }, args.output)
 
     report = {
@@ -227,11 +253,18 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
             "val_fraction": args.val_fraction, "seed": args.seed,
             "quant_forward": args.quant_forward, "limit": args.limit,
             "score_clip": args.score_clip,
+            "frozen_validation": (str(args.frozen_validation)
+                                  if args.frozen_validation else None),
+            "train_manifest": (str(args.train_manifest)
+                               if args.train_manifest else None),
         },
         "dataset": {
             "train_records": len(train_set), "val_records": len(val_set),
             "games": n_games,
-            "validation_games": sorted(train_set.validation_games),
+            "validation_games": sorted(val_set.validation_games),
+            "train_files": train_files,
+            "frozen_validation_identity": frozen_identity,
+            "train_manifest_identity": manifest_identity,
         },
         "epochs": history,
         "loss_curve": [row["val_loss"] for row in history],
@@ -247,6 +280,73 @@ def run_training(args: argparse.Namespace, train_set: ds.BinpackDataset,
     print(f"checkpoint: {args.output}")
     print(f"history:    {args.history}")
     return 0
+
+
+def build_datasets(args: argparse.Namespace):
+    """(train_set, val_set, frozen, manifest) honouring the ticket-13 split."""
+    frozen = manifest = None
+    if args.frozen_validation is not None:
+        frozen = vf.load_frozen(args.frozen_validation)
+        vf.verify_frozen_data(frozen, args.data)
+    if args.train_manifest is not None:
+        if frozen is None:
+            raise SystemExit("--train-manifest requires --frozen-validation")
+        manifest = json.loads(args.train_manifest.read_text(encoding="utf-8"))
+        if manifest.get("schema") != vf.SCHEMA:
+            raise SystemExit(f"train manifest schema "
+                             f"{manifest.get('schema')!r} != {vf.SCHEMA}")
+        frozen_sha = file_identity(args.frozen_validation)["sha256"]
+        if manifest.get("frozen", {}).get("sha256") != frozen_sha:
+            raise SystemExit("train manifest was not generated for this "
+                             "frozen validation file; regenerate it with "
+                             "validation_freeze.py check")
+
+    if manifest is not None:
+        parts = []
+        for entry in manifest["files"]:
+            include = set(entry["games"])
+            if not include:
+                raise SystemExit(f"manifest entry {entry['path']} keeps no "
+                                 f"games; refusing an empty training file")
+            parts.append(ds.BinpackDataset(
+                entry["path"], "train", validation_games=set(),
+                augment=True, max_records=args.limit,
+                score_clip=args.score_clip, include_games=include))
+        train_set: object = ds.MultiBinpackDataset(parts)
+        val_games = set(frozen["split"]["validation_games"])
+    elif frozen is not None:
+        val_games = set(frozen["split"]["validation_games"])
+        train_set = ds.BinpackDataset(
+            args.data, "train", validation_games=val_games,
+            exclude_games=set(frozen["leakage"]["excluded_train_games"]),
+            augment=True, max_records=args.limit, score_clip=args.score_clip)
+    else:
+        train_set = ds.BinpackDataset(
+            args.data, "train", args.val_fraction, args.seed,
+            augment=True, max_records=args.limit, score_clip=args.score_clip)
+        # Without a frozen split the validation games MUST come from the same
+        # draw as the train set, otherwise the two datasets split independently
+        # and can overlap (regression caught by m5_tests).
+        val_games = train_set.validation_games
+
+    val_set = ds.BinpackDataset(
+        args.data, "val", validation_games=val_games,
+        augment=False, max_records=args.limit, score_clip=args.score_clip)
+    return train_set, val_set, frozen, manifest
+
+
+def assert_split_disjoint(train_set, val_set: ds.BinpackDataset) -> None:
+    """Game-id check within one file; cross-file separation is guaranteed by
+    the D4 scan in validation_freeze.py, not by game numbering."""
+    parts = (train_set.datasets if isinstance(train_set, ds.MultiBinpackDataset)
+             else [train_set])
+    for part in parts:
+        if part.path.resolve() == val_set.path.resolve():
+            overlap = part.game_ids & val_set.game_ids
+            if overlap:
+                raise ValueError(
+                    f"game-level leakage: {len(overlap)} game(s) of "
+                    f"{part.path} appear in both splits")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -265,15 +365,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"score_clip: +/-{args.score_clip:g} (saturated search scores "
               f"clipped before the tanh loss)")
 
-    train_set = ds.BinpackDataset(
-        args.data, "train", args.val_fraction, args.seed,
-        augment=True, max_records=args.limit, score_clip=args.score_clip)
-    val_set = ds.BinpackDataset(
-        args.data, "val", args.val_fraction, args.seed,
-        augment=False, max_records=args.limit, score_clip=args.score_clip)
+    train_set, val_set, frozen, manifest = build_datasets(args)
+    if frozen is not None:
+        print(f"frozen validation: {args.frozen_validation} "
+              f"({frozen['split']['validation_records']} records, "
+              f"{len(frozen['split']['validation_games'])} games)")
+    if manifest is not None:
+        print(f"train manifest: {args.train_manifest} "
+              f"({len(manifest['files'])} files)")
     try:
-        ds.assert_disjoint(train_set, val_set)
-        return run_training(args, train_set, val_set, device, info)
+        assert_split_disjoint(train_set, val_set)
+        return run_training(args, train_set, val_set, device, info,
+                            frozen=frozen, manifest=manifest)
     finally:
         # Windows cannot delete a file while an mmap handle is alive.
         train_set.close()

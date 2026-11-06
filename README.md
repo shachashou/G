@@ -73,13 +73,14 @@ py -3.12 -m venv .venv
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-包含 7 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests` / `nnue_tests`）与 8 个 Python/黑盒测试（`m5_tests` / `protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests` / `nnue_parity_tests` / `nnue_backend_tests` / `nnue_blackbox`），共 15 个 CTest；Python 测试都经项目 `.venv` 运行。`m5_tests` 的门控/预算部分以及 `training_tests`、`nnue_parity_tests` 的规范/格式/对齐部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出与 PyTorch 浮点对齐的实测。也可手动执行：
+包含 7 个 C++ 单元测试（`board_tests` / `renju_tests` / `eval_tests` / `search_tests` / `vcf_tests` / `binpack_tests` / `nnue_tests`）与 9 个 Python/黑盒测试（`m5_tests` / `protocol_blackbox` / `match_runner_tests` / `datagen_tests` / `training_tests` / `validation_freeze_tests` / `nnue_parity_tests` / `nnue_backend_tests` / `nnue_blackbox`），共 16 个 CTest；Python 测试都经项目 `.venv` 运行。`m5_tests` 的门控/预算部分以及 `training_tests`、`nnue_parity_tests` 的规范/格式/对齐部分不依赖 torch，装好训练依赖后会自动追加模型、训练、导出与 PyTorch 浮点对齐的实测。也可手动执行：
 
 ```powershell
 .venv\Scripts\python.exe engine\tests\protocol_blackbox.py build\engine\Release\gomoku_nnue.exe
 .venv\Scripts\python.exe engine\tests\match_runner_tests.py build\engine\Release\gomoku_nnue.exe tools\match_runner.py
 .venv\Scripts\python.exe engine\tests\datagen_tests.py build\engine\Release\datagen.exe trainer\binpack.py tools\datagen.py
 .venv\Scripts\python.exe engine\tests\training_tests.py
+.venv\Scripts\python.exe engine\tests\validation_freeze_tests.py
 .venv\Scripts\python.exe engine\tests\nnue_parity_tests.py build\engine\Release\nnue_probe.exe
 .venv\Scripts\python.exe engine\tests\nnue_backend_tests.py build\engine\Release\nnue_probe.exe
 .venv\Scripts\python.exe engine\tests\nnue_blackbox.py build\engine\Release\gomoku_nnue.exe
@@ -102,7 +103,9 @@ VCT（活三威胁算杀）为 M6 之后的可选进阶项。
 
 **最终模型在哪产生**：没有独立的「最终训练」阶段。M4 的 `nnue_v1.nnue` 只验证闭环；M5 门控通过后产生第一个现任权重（incumbent）；M6（工单 11）每轮自举重训并由门控决定是否晋级，至少 3 轮且连续 2 轮未晋级即收敛，把当时的现任权重冻结为 `weights/final.nnue` 并写 `weights/final_manifest.json`。最终模型 = 被门控保留的最后一个晋级版本，而非最后一轮训练产物。详见 `.scratch/gomoku-nnue/spec.md` 与 `issues/11-bootstrap-loop.md`。
 
-**当前进度**：工单 01–09 完成，工单 10 的 AVX2 提速/三档切换/耗时三项已完成，**M4 达成、M5 尚未达成**。自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通，RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`。C++ 端标量推理跨语言对齐实测 PyTorch 浮点 vs C++ `MAE 0.327 / max 0.737`（容差 ≤2），AVX2 后端逐位对齐且单次评估 `1.15 µs`（标量 `3.12 µs`，2.70×），CTest 14/14 全绿。
+**当前进度**：工单 01–09 完成，工单 10 的 AVX2 提速/三档切换/耗时三项已完成，**M4 达成、M5 尚未达成**。自我对弈 datagen「生成→落盘→合并→校验→复盘」闭环 + Python 训练端「加载→D4 增广→GPU 训练→量化导出」闭环均已跑通，RTX 4080 SUPER 上 20 epoch 验证损失 `0.9609 → 0.8542`。C++ 端标量推理跨语言对齐实测 PyTorch 浮点 vs C++ `MAE 0.327 / max 0.737`（容差 ≤2），AVX2 后端逐位对齐且单次评估 `1.15 µs`（标量 `3.12 µs`，2.70×），CTest 16/16 全绿。
+
+**M5 剩余链路（2026-11-06 队列重排）**：工单 13（冻结无泄漏验证集 + 可复核基线，已关闭）→ 14（用户启动 1,800 秒硬限批次，实测 7,840 局 / 199,520 条，已关闭）→ 15（同一冻结集的受控对照 + ≥20 局严格 >65% 筛选，现已解除阻塞）→ 16（正式 200 局门控）。工单 10 / 12 的剩余项由 15 / 16 的产物关闭，工单 11 仍受工单 10 约束；命令与预算账本见 `tools/M5.md`、`.scratch/gomoku-nnue/spec.md`。
 
 **M5 胜率门控未达标**：旧 100 局相同配置（`--depth 2`，NNUE vs 手工评估 + VCF）实测 `0W / 0D / 100L`，退出码 2，无异常（`data/m5_gate.json`）。7,208 条训练标签里 17.9% 是 ±32767 饱和搜索分，v1 模型输出仅 `[-185, 30]`；三组 100-epoch 重训也未明显改善棋力。但这些证据不足以排除数据覆盖、优化或量化问题，先前「网络容量已确认为瓶颈」及「解释 16% 方差」的推断不再作为结论。导出报告中约 0.36 的误差来自导出权重重建模型与整数推理；训练原模型到最终导出的保真度仍待核验。按工单 12 的诊断顺序，再凭证据选择数据或模型调整；单改训练目标且推理契约不变时，不必改变 `GMNNUE01` 布局。
 
@@ -208,7 +211,7 @@ Python 训练端：`binpack.py` 读端之上是 `dataset.py`（mmap + 按完整�
 .\build\engine\Release\gomoku_nnue.exe --nnue weights\nnue_v1.nnue --depth 2
 ```
 
-此前实测：标量 `3,117.55 ns/eval`，AVX2 `1,154.87 ns/eval`（**1.15 µs，2.70×**）；CTest 14/14 全绿。**但旧 M5 门控 100 局 `0W/0D/100L` 未达标**。已测样本中的算术对齐不等于训练到导出的保真度或全部接入行为已获验证；根因与下一步诊断见工单 12。
+此前实测：标量 `3,117.55 ns/eval`，AVX2 `1,154.87 ns/eval`（**1.15 µs，2.70×**）；CTest 16/16 全绿。**但旧 M5 门控 100 局 `0W/0D/100L` 未达标**。已测样本中的算术对齐不等于训练到导出的保真度或全部接入行为已获验证；根因与下一步诊断见工单 12。
 
 ### 后续工单
 

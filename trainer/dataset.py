@@ -59,13 +59,26 @@ def choose_validation_games(n_games: int, val_fraction: float,
 
 
 def split_record_indices(game_index_map: array, val_games: set[int],
-                         split: str, max_records: int | None = None) -> array:
-    """Record indices for one split; game membership is the only criterion."""
+                         split: str, max_records: int | None = None,
+                         exclude_games: set[int] | None = None,
+                         include_games: set[int] | None = None) -> array:
+    """Record indices for one split; game membership is the only criterion.
+
+    ``include_games``/``exclude_games`` (ticket 13) let a frozen validation
+    split and a train manifest restrict the selected games explicitly; both
+    are game-level filters applied before the ``max_records`` cap.
+    """
     if split not in ("train", "val"):
         raise ValueError("split must be 'train' or 'val'")
     want_val = split == "val"
+    exclude = exclude_games or frozenset()
+    include = include_games
     selected = array("I")
     for index, game in enumerate(game_index_map):
+        if include is not None and game not in include:
+            continue
+        if game in exclude:
+            continue
         if (game in val_games) == want_val:
             selected.append(index)
             if max_records is not None and len(selected) >= max_records:
@@ -77,7 +90,10 @@ class BinpackDataset(_DatasetBase):
     def __init__(self, path: str | Path, split: str = "train",
                  val_fraction: float = 0.1, seed: int = 0,
                  augment: bool = True, max_records: int | None = None,
-                 score_clip: float = 0.0):
+                 score_clip: float = 0.0,
+                 validation_games: set[int] | None = None,
+                 exclude_games: set[int] | None = None,
+                 include_games: set[int] | None = None):
         self.path = Path(path)
         self.split = split
         self.augment = augment and split == "train"
@@ -85,9 +101,15 @@ class BinpackDataset(_DatasetBase):
         self.reader = binpack.BinpackReader(self.path)
         self.game_index_map = self.reader.game_index_map()
         n_games = self.game_index_map[-1] + 1 if len(self.game_index_map) else 0
-        self.validation_games = choose_validation_games(n_games, val_fraction, seed)
+        if validation_games is None:
+            validation_games = choose_validation_games(n_games, val_fraction,
+                                                       seed)
+        self.validation_games = set(validation_games)
+        if include_games is not None and include_games & self.validation_games:
+            raise ValueError("include_games must not contain validation games")
         self.indices = split_record_indices(
-            self.game_index_map, self.validation_games, split, max_records)
+            self.game_index_map, self.validation_games, split, max_records,
+            exclude_games=exclude_games, include_games=include_games)
         self.game_ids = {self.game_index_map[i] for i in self.indices}
 
     def __len__(self) -> int:
@@ -118,3 +140,35 @@ def assert_disjoint(train: BinpackDataset, val: BinpackDataset) -> None:
     overlap = train.game_ids & val.game_ids
     if overlap:
         raise ValueError(f"game-level leakage: {len(overlap)} game(s) in both splits")
+
+
+class MultiBinpackDataset(_DatasetBase):
+    """Concatenation of BinpackDatasets (ticket 13 train manifests).
+
+    Validation always comes from the frozen single file; this wrapper only
+    feeds the training side with the manifest's include-lists already applied
+    per file, so extra data can never touch the frozen validation split.
+    """
+
+    def __init__(self, datasets: list[BinpackDataset]):
+        if not datasets:
+            raise ValueError("MultiBinpackDataset needs at least one file")
+        self.datasets = datasets
+
+    def __len__(self) -> int:
+        return sum(len(d) for d in self.datasets)
+
+    def __getitem__(self, item: int):
+        for part in self.datasets:
+            if item < len(part):
+                return part[item]
+            item -= len(part)
+        raise IndexError(item)
+
+    def close(self) -> None:
+        for part in self.datasets:
+            part.close()
+
+    def describe(self) -> dict:
+        return {"files": [str(d.path) for d in self.datasets],
+                "records": len(self)}

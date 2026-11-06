@@ -117,6 +117,12 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_tests.py")
   set_tests_properties(training_tests PROPERTIES TIMEOUT 300)
 
+  # Ticket 13: frozen, D4-leak-free validation split (freeze/check/manifest
+  # and, when torch is available, train.py integration).
+  add_test(NAME validation_freeze_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation_freeze_tests.py")
+  set_tests_properties(validation_freeze_tests PROPERTIES TIMEOUT 300)
+
   # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
   # (when torch is available) the PyTorch float forward.
   add_test(NAME nnue_parity_tests

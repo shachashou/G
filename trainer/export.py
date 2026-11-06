@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 from pathlib import Path
 
 import torch
@@ -28,9 +29,12 @@ import torch
 import binpack
 import features
 import nnue
+import validation_freeze as vf
 import weights_format as wf
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+from run_support import file_identity
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -44,6 +48,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         default=ROOT / "weights" / "export_report.json")
     parser.add_argument("--samples", type=int, default=64)
     parser.add_argument("--no-calibrate", action="store_true")
+    parser.add_argument("--frozen-validation", type=Path, default=None,
+                        help="ticket 13: parity/calibration sampling is "
+                             "restricted to the frozen train side")
     return parser.parse_args(argv)
 
 
@@ -56,18 +63,23 @@ def load_model(checkpoint: Path) -> tuple[nnue.NNUEModel, dict]:
     return model, payload
 
 
-def sample_positions(path: Path, count: int) -> list[tuple[list[int], int, float]]:
+def sample_positions(path: Path, count: int,
+                     allowed_ids: list[int] | None = None
+                     ) -> list[tuple[list[int], int, float]]:
+    """Evenly spaced sample; ``allowed_ids`` (ticket 13) restricts it to the
+    frozen train side so no validation position can calibrate the heads."""
     with binpack.BinpackReader(path) as reader:
-        total = reader.available
-        samples = min(count, total)
+        pool = (list(range(reader.available)) if allowed_ids is None
+                else list(allowed_ids))
+        samples = min(count, len(pool))
         if samples == 0:
             raise SystemExit("binpack file has no records to sample")
-        stride = max(1, total // samples)
+        stride = max(1, len(pool) // samples)
         result = []
-        for index in range(0, total, stride):
+        for offset in range(0, len(pool), stride):
             if len(result) >= samples:
                 break
-            record = reader[index]
+            record = reader[pool[offset]]
             result.append((record.feature_indices(), record.stm,
                            float(record.score)))
         return result
@@ -103,8 +115,21 @@ def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     model, payload = load_model(args.checkpoint)
+    frozen_identity = None
+    allowed_ids = None
+    if args.frozen_validation is not None:
+        frozen = vf.load_frozen(args.frozen_validation)
+        vf.verify_frozen_data(frozen, args.data)
+        frozen_identity = file_identity(args.frozen_validation)
+        recorded = payload.get("frozen_validation_identity") or {}
+        if recorded.get("sha256") != frozen_identity["sha256"]:
+            raise SystemExit("checkpoint was not trained with this frozen "
+                             "validation file")
+        with binpack.BinpackReader(args.data) as reader:
+            allowed_ids = vf.frozen_train_record_ids(reader.game_index_map(),
+                                                     frozen)
     weights = model.quantized_weights()
-    samples = sample_positions(args.data, args.samples)
+    samples = sample_positions(args.data, args.samples, allowed_ids)
 
     x = torch.tensor([features.dense_vector(indices) for indices, _, _ in samples],
                      dtype=torch.float32)
@@ -146,6 +171,11 @@ def main(argv: list[str] | None = None) -> int:
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_epoch": payload.get("epoch"),
         "checkpoint_val_loss": payload.get("val_loss"),
+        "frozen_validation_identity": frozen_identity,
+        "calibration_sampling": ("frozen train side only (validation games "
+                                 "and D4-leaking games excluded)"
+                                 if frozen_identity is not None
+                                 else "whole file (legacy behaviour)"),
         "weights_file": str(args.output.resolve()),
         "weights_meta": meta,
         "weights_summary": wf.weights_summary(reloaded),

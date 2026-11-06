@@ -36,6 +36,7 @@ using namespace gomoku;
 struct Config {
   std::string out;
   std::string verifyPath;
+  std::string nnueWeights;
   int games = 0;
   uint64_t seed = 0;
   uint32_t shardId = 0;
@@ -59,6 +60,7 @@ void printUsage() {
             << "  --seed N             base RNG seed (default 0)\n"
             << "  --shard-id N         shard/worker id (default 0)\n"
             << "  --depth N            fixed search depth (default 6)\n"
+            << "  --nnue PATH          NNUE evaluation from a GMNNUE01 file\n"
             << "  --tt-mb N            transposition table MB (default 16)\n"
             << "  --no-vcf             disable root VCF solver\n"
             << "  --vcf-nodes N        VCF node limit (default 5000)\n"
@@ -187,6 +189,23 @@ GameResult playGame(Board& board, Search& search,
                                                : board.result();
 }
 
+// Load the NNUE network and wire it into `search`. Unlike the protocol
+// engine, datagen must NOT fall back to the handcrafted evaluator: a silent
+// fallback would generate records whose provenance no longer matches the
+// manifest, so a bad weights file is a hard error.
+bool attachNetwork(const Config& cfg, Search& search, NnueNetwork& network,
+                   std::string* error) {
+  if (cfg.nnueWeights.empty()) return true;
+  try {
+    network.load(cfg.nnueWeights);
+    search.setNetwork(&network);
+    return true;
+  } catch (const NnueError& exc) {
+    if (error) *error = exc.what();
+    return false;
+  }
+}
+
 int runGenerate(const Config& cfg) {
   binpack::Header header;
   header.searchDepth = static_cast<uint32_t>(cfg.depth);
@@ -199,8 +218,18 @@ int runGenerate(const Config& cfg) {
   header.openingTempX100 = static_cast<uint16_t>(
       std::llround(std::clamp(cfg.openingTemp, 0.0, 600.0) * 100.0));
 
-  binpack::ShardWriter writer;
+  // The network must outlive the search that borrows it, so declare it first
+  // and fail hard before any output file is created (a silent handcrafted
+  // fallback would mislabel the data's provenance).
+  NnueNetwork network;
+  Search search(static_cast<uint64_t>(cfg.ttMb) * 1024ull * 1024ull);
   std::string error;
+  if (!attachNetwork(cfg, search, network, &error)) {
+    std::cerr << "datagen: " << error << "\n";
+    return 3;
+  }
+
+  binpack::ShardWriter writer;
   if (!writer.open(cfg.out, header, &error)) {
     std::cerr << "datagen: " << error << "\n";
     return 3;
@@ -212,7 +241,6 @@ int runGenerate(const Config& cfg) {
   limits.useVcf = cfg.useVcf;
   limits.vcfNodeLimit = cfg.vcfNodeLimit;
 
-  Search search(static_cast<uint64_t>(cfg.ttMb) * 1024ull * 1024ull);
   Board board(cfg.rule);
   int blackWins = 0;
   int whiteWins = 0;
@@ -270,7 +298,15 @@ int runVerify(const Config& cfg) {
   limits.useVcf = header.useVcf != 0;
   limits.vcfNodeLimit = header.vcfNodeLimit;
 
+  // Replay with the same evaluator that generated the records, otherwise the
+  // stored search scores cannot be reproduced. A bad weights file is a hard
+  // error, never a silent handcrafted fallback.
+  NnueNetwork network;
   Search search(static_cast<uint64_t>(header.ttMb) * 1024ull * 1024ull);
+  if (!attachNetwork(cfg, search, network, &error)) {
+    std::cerr << "datagen: " << error << "\n";
+    return 3;
+  }
   Board board(header.ruleMode == 1 ? RuleMode::Freestyle : RuleMode::Renju);
 
   uint64_t checked = 0;
@@ -356,6 +392,8 @@ int main(int argc, char* argv[]) {
       cfg.shardId = static_cast<uint32_t>(parseU64(v));
     } else if (a == "--depth") {
       cfg.depth = parseInt(v);
+    } else if (a == "--nnue") {
+      cfg.nnueWeights = v;
     } else if (a == "--tt-mb") {
       cfg.ttMb = static_cast<uint16_t>(parseInt(v));
     } else if (a == "--vcf-nodes") {

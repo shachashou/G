@@ -33,6 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "trainer"))
 import binpack  # noqa: E402  (trainer/ is on sys.path by design)
 
+from run_support import file_identity  # noqa: E402  (tools/ is on sys.path)
+
 DEFAULT_EXE = ROOT / "build" / "engine" / "Release" / "datagen.exe"
 DEFAULT_TARGET = 10_000_000
 DEFAULT_BUDGET_HOURS = 12.0
@@ -52,6 +54,8 @@ def common_options(args: argparse.Namespace, depth: int | None = None) -> list[s
     ]
     if args.no_vcf:
         options.append("--no-vcf")
+    if getattr(args, "nnue", None) is not None:
+        options += ["--nnue", str(args.nnue)]
     return options
 
 
@@ -171,6 +175,8 @@ def build_manifest(
             "vcf_nodes": args.vcf_nodes,
             "seed": args.seed,
             "out_dir": str(args.out_dir),
+            "nnue": (file_identity(args.nnue)
+                     if getattr(args, "nnue", None) is not None else None),
         },
         "host": {"cpu_count": cpu, "platform": platform.platform()},
         "totals": {
@@ -342,6 +348,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     argv = [str(args.exe), "--verify", str(args.input),
             "--verify-samples", str(args.samples)]
+    if getattr(args, "nnue", None) is not None:
+        argv += ["--nnue", str(args.nnue)]
     proc = subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True)
     if proc.stdout:
         print(proc.stdout, end="")
@@ -363,6 +371,10 @@ def add_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "data" / "raw")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--depth", type=int, default=6)
+    parser.add_argument("--nnue", type=Path, default=None,
+                        help="GMNNUE01 weights file; the datagen worker loads "
+                             "it and self-plays with NNUE evaluation (a bad "
+                             "file is a hard error, not a fallback)")
     parser.add_argument("--tt-mb", type=int, default=16)
     parser.add_argument("--no-vcf", action="store_true")
     parser.add_argument("--rule", type=int, choices=(1, 2), default=2)
@@ -407,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--exe", type=Path, default=DEFAULT_EXE)
     verify.add_argument("--input", required=True)
     verify.add_argument("--samples", type=int, default=32)
+    verify.add_argument("--nnue", type=Path, default=None,
+                        help="GMNNUE01 weights used to generate the records; "
+                             "required to reproduce NNUE self-play scores")
     verify.set_defaults(func=cmd_verify)
 
     report = sub.add_parser("report", help="print an existing throughput manifest")

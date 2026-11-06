@@ -229,6 +229,38 @@ def main(argv: list[str]) -> int:
         check(body_a == body_b and bool(body_a),
               "identical seed/config reproduces identical records")
 
+        # 8. NNUE self-play: the worker loads a GMNNUE01 file and self-plays
+        #    with NNUE evaluation; replay with the SAME weights reproduces the
+        #    stored scores, while a handcrafted replay reports mismatches.
+        import weights_format  # noqa: E402  (trainer/ is on sys.path by design)
+        nnue_weights = tmp / "test_weights.nnue"
+        weights_format.write_weights(nnue_weights, {
+            "W0": [0] * weights_format.W0_LEN,
+            "b0": [0] * weights_format.B0_LEN,
+            "W1": [0] * weights_format.W1_LEN,
+            "b1": [0] * weights_format.B1_LEN,
+            "W2": [0] * weights_format.W2_LEN,
+            "b2": [0] * weights_format.B2_LEN,
+        })
+        nnue_data = tmp / "nnue.binpack"
+        nnue_out = generate(exe, nnue_data, games=1, shard=5, seed=1212,
+                            depth=2, max_plies=20,
+                            extra=["--nnue", str(nnue_weights)])
+        check("STATS" in nnue_out.stdout, "NNUE worker prints STATS")
+        check(not binpack.validate_file(nnue_data)["errors"],
+              "NNUE self-play shard validates")
+        nnue_verify = run([python, tool, "verify", "--exe", exe,
+                           "--input", nnue_data, "--samples", 8,
+                           "--nnue", nnue_weights])
+        check("mismatches=0" in nnue_verify.stdout,
+              f"NNUE score replay matches stored scores: {nnue_verify.stdout.strip()}")
+        # A missing --nnue on NNUE data must be reported as mismatches, never
+        # silently accepted as a handcrafted replay.
+        nnue_verify_bad = run([python, tool, "verify", "--exe", exe,
+                               "--input", nnue_data, "--samples", 8], expect=None)
+        check("mismatches=0" not in nnue_verify_bad.stdout,
+              "handcrafted replay of NNUE data reports mismatches")
+
     if FAILURES:
         print(f"\n{len(FAILURES)} datagen test(s) failed")
         return 1

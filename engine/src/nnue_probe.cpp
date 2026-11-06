@@ -10,6 +10,7 @@
 // Board chars: '.'/'0' empty, 'x'/'1' black, 'o'/'2' white.
 // NAME is avx2 (default) or scalar. bench prints ns_per_eval for N evaluations.
 #include <chrono>
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -19,6 +20,7 @@
 #include "board.h"
 #include "eval.h"
 #include "nnue.h"
+#include "movegen.h"
 
 namespace {
 
@@ -55,22 +57,35 @@ int main(int argc, char* argv[]) {
   std::string weightsPath;
   std::string backendName = "avx2";
   std::string mode;
+  std::string rule = "renju";
+  int radius = 1;
   for (int i = 1; i < argc; ++i) {
     const std::string a(argv[i]);
     if (a == "--weights" && i + 1 < argc) {
       weightsPath = argv[++i];
     } else if (a == "--backend" && i + 1 < argc) {
       backendName = argv[++i];
-    } else if (mode.empty()) {
+    } else if (a == "--rule" && i + 1 < argc) {
+      rule = argv[++i];
+    } else if (a == "--radius" && i + 1 < argc) {
+      const std::string r = argv[++i];
+      if (r != "1") { std::cerr << "radius must be 1\n"; return 2; }
+      radius = 1;
+    } else if (mode.empty() && !a.starts_with("--")) {
       mode = a;
+    } else {
+      std::cerr << "unknown/incomplete argument: " << a << "\n";
+      return 2;
     }
   }
   const bool handcrafted = mode == "handcrafted";
-  if ((!handcrafted && weightsPath.empty()) ||
+  const bool structured = mode == "labels" || mode == "candidates";
+  if (rule != "renju") { std::cerr << "rule must be renju\n"; return 2; }
+  if ((!handcrafted && !structured && weightsPath.empty()) ||
       (mode != "features" && mode != "infer" && mode != "board" &&
-       mode != "bench" && !handcrafted)) {
+       mode != "bench" && !handcrafted && !structured)) {
     std::cerr << "usage: nnue_probe [--weights PATH] [--backend avx2|scalar] "
-                 "{features|infer|board|bench|handcrafted}\n";
+                 "{features|infer|board|bench|handcrafted|labels|candidates}\n";
     return 2;
   }
   NnueBackend backend = NnueBackend::Avx2;
@@ -80,7 +95,7 @@ int main(int argc, char* argv[]) {
   }
 
   NnueNetwork network;
-  if (!handcrafted) {
+  if (!handcrafted && !structured) {
     try {
       network.setBackend(backend);
       network.load(weightsPath);
@@ -95,6 +110,10 @@ int main(int argc, char* argv[]) {
     if (!line.empty() && line.back() == '\r') line.pop_back();
     if (line.empty()) continue;
     std::istringstream in(line);
+    int recordId = -1;
+    if (structured && (!(in >> recordId) || recordId < 0)) {
+      std::cerr << "bad record id\n"; return 2;
+    }
     int stm = -1;
     if (!(in >> stm) || (stm != 0 && stm != 1)) {
       std::cerr << "bad stm in line: " << line << "\n";
@@ -123,13 +142,47 @@ int main(int argc, char* argv[]) {
         return 2;
       }
     }
-    Board board(RuleMode::Freestyle);
+    Board board(structured ? RuleMode::Renju : RuleMode::Freestyle);
     std::string error;
     if (!parseBoard(text, board, stm, error)) {
       std::cerr << error << "\n";
       return 2;
     }
-    if (mode == "features") {
+    if (structured) {
+      int black = 0, white = 0;
+      for (Cell c : board.rawCells()) {
+        black += c == Cell::Black;
+        white += c == Cell::White;
+      }
+      std::string extra;
+      if ((in >> extra) || (stm == 0 ? black != white : black != white + 1)) {
+        std::cerr << "inconsistent board/side to move\n"; return 2;
+      }
+      Evaluator eval;
+      eval.init(board);
+      std::cout << "{\"record_id\":" << recordId << ",\"result\":"
+                << static_cast<int>(board.result()) << ",\"eval\":"
+                << eval.evaluate(board);
+      if (mode == "candidates") {
+        std::vector<ScoredMove> moves;
+        if (board.result() == GameResult::Ongoing) generateCandidates(board, eval, moves, radius);
+        std::sort(moves.begin(), moves.end(), [](const ScoredMove& a, const ScoredMove& b) {
+          return a.move < b.move;
+        });
+        std::cout << ",\"candidates\":[";
+        bool first = true;
+        for (const auto& move : moves) {
+          board.place(move.move);
+          if (!first) std::cout << ',';
+          first = false;
+          std::cout << "{\"move\":" << move.move << ",\"result\":"
+                    << static_cast<int>(board.result()) << '}';
+          board.undo();
+        }
+        std::cout << ']';
+      }
+      std::cout << "}\n";
+    } else if (mode == "features") {
       const std::vector<int> indices = nnueSparseIndices(board);
       for (size_t i = 0; i < indices.size(); ++i) {
         if (i != 0) std::cout << ' ';

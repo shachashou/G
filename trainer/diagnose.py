@@ -108,6 +108,9 @@ def prediction_comparison(a, b, scale):
 
 def fidelity(args, out: Path) -> dict:
     model, payload = export.load_model(args.checkpoint)
+    if payload.get("target_contract") is not None:
+        from distill18_fidelity import run
+        return run(args, out)
     if payload.get("diagnostic_only"):
         raise ValueError("same-set overfit checkpoint has no independent validation split")
     training = payload.get("train_args", {})
@@ -310,6 +313,9 @@ def main(argv=None):
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--weights", type=Path, help="v2 final exported candidate")
+    parser.add_argument("--export-report", type=Path)
+    parser.add_argument("--all-validation", action="store_true")
     parser.add_argument("--probe", type=Path)
     parser.add_argument("--frozen-validation", type=Path, default=None,
                         help="fidelity only: use the ticket-13 frozen "

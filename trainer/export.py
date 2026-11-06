@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -47,11 +48,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report", type=Path,
                         default=ROOT / "weights" / "export_report.json")
     parser.add_argument("--samples", type=int, default=64)
-    parser.add_argument("--no-calibrate", action="store_true")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--no-calibrate", action="store_true")
+    group.add_argument("--calibrate", action="store_true", help="explicitly enable v2 training-side calibration")
     parser.add_argument("--frozen-validation", type=Path, default=None,
                         help="ticket 13: parity/calibration sampling is "
                              "restricted to the frozen train side")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.samples < 1:
+        parser.error("--samples must be positive")
+    return args
 
 
 def load_model(checkpoint: Path) -> tuple[nnue.NNUEModel, dict]:
@@ -105,7 +111,9 @@ def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
     for head in (0, 1):
         deltas = [float(f) - float(i) for f, i, h in zip(float_eval, integer_eval, heads)
                   if h == head]
-        delta = int(round(statistics.median(deltas))) if deltas else 0
+        gain = weights.get("output_gain", 1)
+        scaled = statistics.median(deltas) / gain if deltas else 0
+        delta = (int(round(statistics.median(deltas))) if deltas else 0) if weights.get("format_version", 1) == 1 else int(math.copysign(math.floor(abs(scaled) + 0.5), scaled))
         original = weights["b2"][head]
         weights["b2"][head] = max(wf.INT16_MIN, min(wf.INT16_MAX, original + delta))
         bias.append(weights["b2"][head] - original)
@@ -115,9 +123,11 @@ def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     model, payload = load_model(args.checkpoint)
+    linear = payload.get("target_contract") is not None
+    calibrate = not args.no_calibrate and (not linear or args.calibrate)
     frozen_identity = None
     allowed_ids = None
-    if args.frozen_validation is not None:
+    if args.frozen_validation is not None and not linear:
         frozen = vf.load_frozen(args.frozen_validation)
         vf.verify_frozen_data(frozen, args.data)
         frozen_identity = file_identity(args.frozen_validation)
@@ -129,7 +139,21 @@ def main(argv: list[str] | None = None) -> int:
             allowed_ids = vf.frozen_train_record_ids(reader.game_index_map(),
                                                      frozen)
     weights = model.quantized_weights()
-    samples = sample_positions(args.data, args.samples, allowed_ids)
+    if linear:
+        import targets
+        train_set, val_set, _, _ = targets.checkpoint_datasets(payload, args.data, args.frozen_validation)
+        try:
+            parts = train_set.datasets if hasattr(train_set, "datasets") else [train_set]
+            import itertools
+            stride = max(1, len(train_set) // args.samples)
+            pool = (sample[:3] for part in parts for sample in part.iter_samples())
+            samples = list(itertools.islice(pool, 0, stride * args.samples, stride))
+            frozen_identity = file_identity(args.frozen_validation)
+        finally:
+            train_set.close()
+            val_set.close()
+    else:
+        samples = sample_positions(args.data, args.samples, allowed_ids)
 
     x = torch.tensor([features.dense_vector(indices) for indices, _, _ in samples],
                      dtype=torch.float32)
@@ -146,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     ste_vs_int = error_stats(quant_eval, raw_int)
 
     head_bias = [0, 0]
-    if not args.no_calibrate:
+    if calibrate:
         head_bias = calibrate_bias(weights, calibration_reference, raw_int, [s[1] for s in samples])
 
     # Parity is measured against a model rebuilt from the FINAL exported
@@ -159,7 +183,10 @@ def main(argv: list[str] | None = None) -> int:
     parity = error_stats(final_float, integer_eval)
     final_ste = error_stats(final_quant, integer_eval)
 
-    blob = wf.pack_weights(weights)
+    if ste_vs_int["max"] != 0:
+        raise ValueError("STE/integer mismatch")
+    blob = wf.pack_weights(weights, qa=model.config.qa, qb=model.config.qb,
+                           score_scale=model.config.score_scale, weight_clamp=model.config.weight_clamp)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(blob)
     reloaded, meta = wf.read_weights(args.output)
@@ -168,6 +195,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("round-trip failed: integer forward differs after read-back")
 
     report = {
+        "complete": True,
+        "checkpoint_identity": file_identity(args.checkpoint),
+        "target_contract_identity": payload.get("target_contract_identity"),
+        "original_vs_final": error_stats(float_eval, integer_eval),
+        "trained_forward_vs_final": error_stats(calibration_reference, integer_eval),
         "checkpoint": str(args.checkpoint.resolve()),
         "checkpoint_epoch": payload.get("epoch"),
         "checkpoint_val_loss": payload.get("val_loss"),
@@ -183,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
             "qa": wf.QA, "qb": wf.QB, "score_scale": wf.SCORE_SCALE,
             "weight_clamp": wf.WEIGHT_CLAMP,
             "head_bias_calibration": head_bias,
-            "calibrated": not args.no_calibrate,
+            "calibrated": calibrate,
             "calibration_reference": "trained_ste" if trained_quantized else "trained_float",
         },
         "parity": {
@@ -194,8 +226,9 @@ def main(argv: list[str] | None = None) -> int:
             "suggested_cpp_tolerance": max(2, int(parity["max"] + 2)),
         },
         "self_check": {
-            "magic": wf.MAGIC.decode("ascii"),
-            "version": wf.VERSION,
+            "magic": blob[:8].decode("ascii"),
+            "version": meta["version"],
+            "output_gain": meta["output_gain"],
             "file_size": len(blob),
             "expected_file_size": wf.FILE_LEN,
             "read_back_replay_matches": True,
@@ -205,7 +238,7 @@ def main(argv: list[str] | None = None) -> int:
     args.report.write_text(json.dumps(report, indent=2, ensure_ascii=False),
                            encoding="utf-8")
 
-    print(f"weights: {args.output} ({len(blob):,} bytes, magic {wf.MAGIC.decode()})")
+    print(f"weights: {args.output} ({len(blob):,} bytes, magic {blob[:8].decode()})")
     print(f"parity : float vs integer MAE {parity['mae']:.4f}, "
           f"max {parity['max']:.4f}; STE vs integer max {ste_vs_int['max']:.4f}")
     print(f"bias calibration: {head_bias}; ticket-09 tolerance suggestion "

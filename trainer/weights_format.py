@@ -57,6 +57,9 @@ from pathlib import Path
 
 MAGIC = b"GMNNUE01"
 VERSION = 1
+MAGIC_V2 = b"GMNNUE02"
+STATIC_LIMIT = 900000
+OUTPUT_GAINS = tuple(1 << i for i in range(11))
 HEADER_SIZE = 64
 
 N_FEATURES = 450
@@ -158,15 +161,21 @@ def body_bytes(weights: dict) -> bytes:
 
 def pack_weights(weights: dict, *, qa: int = QA, qb: int = QB,
                  score_scale: int = SCORE_SCALE,
-                 weight_clamp: int = WEIGHT_CLAMP) -> bytes:
+                 weight_clamp: int = WEIGHT_CLAMP,
+                 version: int | None = None, output_gain: int | None = None) -> bytes:
+    version = weights.get("format_version", 1) if version is None else version
+    output_gain = weights.get("output_gain", 1) if output_gain is None else output_gain
+    if version not in (1, 2) or output_gain not in OUTPUT_GAINS or (version == 1 and output_gain != 1):
+        raise WeightFormatError("invalid format version/output gain")
     body = body_bytes(weights)
     if len(body) != BODY_LEN:
         raise WeightFormatError(f"body length {len(body)} != {BODY_LEN}")
     header = HEADER_STRUCT.pack(
-        MAGIC, VERSION, HEADER_SIZE, N_FEATURES, N_ACC, N_L1, N_HEADS,
+        MAGIC if version == 1 else MAGIC_V2, version, HEADER_SIZE, N_FEATURES, N_ACC, N_L1, N_HEADS,
         qa, qb, score_scale, weight_clamp, fnv1a(body),
     )
-    return header + b"\0" * (HEADER_SIZE - HEADER_STRUCT.size) + body
+    reserved = b"\0" * 12 if version == 1 else struct.pack("<I", output_gain) + b"\0" * 8
+    return header + reserved + body
 
 
 def write_weights(path: str | os.PathLike[str], weights: dict, **kwargs) -> None:
@@ -183,17 +192,21 @@ def unpack_weights(blob: bytes) -> tuple[dict, dict]:
     magic = fields[0]
     (version, header_size, n_features, n_acc, n_l1, n_heads,
      qa, qb, score_scale, weight_clamp, checksum) = fields[1:]
-    if magic != MAGIC:
+    if magic not in (MAGIC, MAGIC_V2):
         raise WeightFormatError(f"bad NNUE weight magic {magic!r}, expected {MAGIC!r}")
-    if version != VERSION:
+    if version not in (1, 2) or magic != (MAGIC if version == 1 else MAGIC_V2):
         raise WeightFormatError(f"unsupported weight version {version}")
     if header_size != HEADER_SIZE:
         raise WeightFormatError(f"bad header size {header_size}")
     if (n_features, n_acc, n_l1, n_heads) != (N_FEATURES, N_ACC, N_L1, N_HEADS):
         raise WeightFormatError("unsupported network dimensions")
-    if qa <= 0 or qb <= 0 or score_scale <= 0 or weight_clamp <= 0:
+    if not 0 < qa <= 0x7fffffff or not 0 < qb <= 0x7fffffff or score_scale <= 0 or not 0 < weight_clamp <= 127:
         raise WeightFormatError("invalid quantisation constants in header")
-    if blob[HEADER_STRUCT.size:HEADER_SIZE] != b"\0" * (HEADER_SIZE - HEADER_STRUCT.size):
+    gain = 1 if version == 1 else struct.unpack_from("<I", blob, 52)[0]
+    if gain not in OUTPUT_GAINS:
+        raise WeightFormatError("invalid output gain")
+    reserved_start = 52 if version == 1 else 56
+    if any(blob[reserved_start:HEADER_SIZE]):
         raise WeightFormatError("non-zero reserved header bytes")
 
     body = blob[HEADER_SIZE:]
@@ -212,8 +225,11 @@ def unpack_weights(blob: bytes) -> tuple[dict, dict]:
         weights[key] = _from_little_endian(body[cursor:cursor + length], typecode)
         cursor += length
     normalise_weights(weights)  # range check after decoding
+    if any(abs(v) > weight_clamp for k in ("W0", "W1", "W2") for v in weights[k]):
+        raise WeightFormatError("weight exceeds header weight_clamp")
+    weights.update(format_version=version, output_gain=gain)
     meta = {
-        "version": version, "qa": qa, "qb": qb,
+        "version": version, "output_gain": gain, "qa": qa, "qb": qb,
         "score_scale": score_scale, "weight_clamp": weight_clamp,
         "checksum": checksum, "file_size": len(blob),
     }
@@ -257,7 +273,7 @@ def _infer_numpy(weights: dict, indices: Sequence[int], stm: int,
     zq = sign * ((2 * _np.abs(z) + qa) // (2 * qa)) + b1
     a2 = _np.clip(zq, 0, qb)
     y = int(a2 @ w2[stm])
-    return round_div(y, qb) + int(b2[stm])
+    return output_score(y, int(b2[stm]), qb, weights)
 
 
 def _infer_python(weights: dict, indices: Sequence[int], stm: int,
@@ -285,7 +301,15 @@ def _infer_python(weights: dict, indices: Sequence[int], stm: int,
 
     base = stm * N_L1
     y = sum(a2[k] * w2[base + k] for k in range(N_L1))
-    return round_div(y, qb) + b2[stm]
+    return output_score(y, int(b2[stm]), qb, weights)
+
+
+def output_score(y: int, bias: int, qb: int, weights: dict) -> int:
+    if weights.get("format_version", 1) == 1:
+        return round_div(y, qb) + bias
+    gain = weights["output_gain"]
+    value = round_div(gain * y, qb) + gain * bias
+    return max(-STATIC_LIMIT, min(STATIC_LIMIT, value))
 
 
 def weights_summary(weights: dict) -> dict:

@@ -93,11 +93,18 @@ class BinpackDataset(_DatasetBase):
                  score_clip: float = 0.0,
                  validation_games: set[int] | None = None,
                  exclude_games: set[int] | None = None,
-                 include_games: set[int] | None = None):
+                 include_games: set[int] | None = None,
+                 target_contract: dict | None = None, label_store=None):
         self.path = Path(path)
         self.split = split
         self.augment = augment and split == "train"
         self.score_clip = score_clip
+        self.target_contract = target_contract
+        self.teacher_values = self.valid_mask = None
+        if target_contract is not None:
+            if label_store is None or score_clip != 0:
+                raise ValueError("linear targets require verified labels and no clipping")
+            self.teacher_values, self.valid_mask, _ = label_store.for_source(path)
         self.reader = binpack.BinpackReader(self.path)
         self.game_index_map = self.reader.game_index_map()
         n_games = self.game_index_map[-1] + 1 if len(self.game_index_map) else 0
@@ -110,6 +117,8 @@ class BinpackDataset(_DatasetBase):
         self.indices = split_record_indices(
             self.game_index_map, self.validation_games, split, max_records,
             exclude_games=exclude_games, include_games=include_games)
+        if self.valid_mask is not None:
+            self.indices = array("I", (i for i in self.indices if self.valid_mask[i]))
         self.game_ids = {self.game_index_map[i] for i in self.indices}
 
     def __len__(self) -> int:
@@ -122,7 +131,12 @@ class BinpackDataset(_DatasetBase):
             indices = features.transform_sparse(
                 indices, random.randrange(features.NUM_SYMMETRIES))
         return (features.dense_vector(indices), record.stm,
-                clip_score(float(record.score), self.score_clip), record.wdl)
+                self.label(record), record.wdl)
+
+    def label(self, record):
+        if self.target_contract and self.target_contract["label_source"] == "handcrafted":
+            return float(self.teacher_values[record.index])
+        return clip_score(float(record.score), self.score_clip)
 
     def close(self) -> None:
         self.reader.close()
@@ -132,7 +146,7 @@ class BinpackDataset(_DatasetBase):
         for i in range(len(self.indices)):
             record = self.reader[self.indices[i]]
             yield (record.feature_indices(), record.stm,
-                   clip_score(float(record.score), self.score_clip), record.wdl)
+                   self.label(record), record.wdl)
 
 
 def assert_disjoint(train: BinpackDataset, val: BinpackDataset) -> None:

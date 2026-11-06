@@ -27,6 +27,7 @@ from pathlib import Path
 import dataset as ds
 import nnue
 import validation_freeze as vf
+import targets
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -83,10 +84,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "lists from validation_freeze.py check); adds "
                              "training files without touching the frozen "
                              "validation split")
+    parser.add_argument("--target-contract", type=Path)
     args = parser.parse_args(argv)
     if args.max_steps is not None and args.max_steps < 1:
         parser.error("--max-steps must be >= 1")
     return args
+
+
+def training_losses(model, prediction, score, wdl, args):
+    contract = getattr(args, "target", None)
+    if contract:
+        huber, mse = targets.losses(prediction, score, contract)
+        return huber, mse, prediction.new_zeros(())
+    mse, ce = nnue.mixed_losses(prediction, score, wdl, model.config.score_scale,
+                                model.config.wdl_temperature, model.wdl_bias)
+    return mse + args.wdl_weight * ce, mse, ce
 
 
 def make_optimizer(model: nnue.NNUEModel, lr: float,
@@ -137,6 +149,7 @@ def evaluate(model: nnue.NNUEModel, loader: DataLoader, device: torch.device,
              args: argparse.Namespace) -> dict:
     model.eval()
     total, mse_sum, ce_sum, count = 0.0, 0.0, 0.0, 0
+    predictions, labels, heads = [], [], []
     with torch.no_grad():
         for x, stm, score, wdl in tqdm(loader, desc="eval", leave=False,
                                        unit="batch"):
@@ -145,19 +158,28 @@ def evaluate(model: nnue.NNUEModel, loader: DataLoader, device: torch.device,
             score = score.float().to(device)
             wdl = wdl.long().to(device)
             eval_score = model(x, stm, quantized=args.quant_forward)
-            mse, ce = nnue.mixed_losses(eval_score, score, wdl,
-                                        model.config.score_scale,
-                                        model.config.wdl_temperature,
-                                        model.wdl_bias)
+            primary, mse, ce = training_losses(model, eval_score, score, wdl, args)
             batch = len(x)
-            total += float(mse + args.wdl_weight * ce) * batch
+            total += float(primary) * batch
             mse_sum += float(mse) * batch
             ce_sum += float(ce) * batch
             count += batch
+            if getattr(args, "target", None):
+                predictions.extend(eval_score.cpu().tolist())
+                labels.extend(score.cpu().tolist())
+                heads.extend(stm.cpu().tolist())
     if count == 0:
         raise SystemExit("validation split is empty; lower --val-fraction or add games")
-    return {"val_loss": total / count, "val_mse": mse_sum / count,
-            "val_ce": ce_sum / count, "val_records": count}
+    result = {"val_loss": total / count, "val_mse": mse_sum / count,
+              "val_ce": ce_sum / count, "val_records": count}
+    if getattr(args, "target", None):
+        c = args.target
+        result["linear_metrics"] = targets.metrics(predictions, labels, c["loss_normalizer"], c["constants"])
+        result["linear_metrics"]["per_head"] = {
+            str(h): targets.metrics([p for p, s in zip(predictions, heads) if s == h],
+                                    [y for y, s in zip(labels, heads) if s == h], c["loss_normalizer"])
+            for h in set(heads)}
+    return result
 
 
 def run_training(args: argparse.Namespace, train_set,
@@ -182,7 +204,10 @@ def run_training(args: argparse.Namespace, train_set,
     val_loader = DataLoader(val_set, batch_size=args.batch_size,
                             shuffle=False, **loader_kwargs)
 
-    config = nnue.ModelConfig(wdl_temperature=args.wdl_temperature)
+    target = getattr(args, "target", None)
+    config = nnue.ModelConfig(wdl_temperature=args.wdl_temperature,
+                              format_version=2 if target else 1,
+                              output_gain=target["output_gain"] if target else 1)
     model = nnue.NNUEModel(seed=args.seed, config=config).to(device)
     optimiser = make_optimizer(model, args.lr, args.hidden_lr)
     history: list[dict] = []
@@ -212,18 +237,17 @@ def run_training(args: argparse.Namespace, train_set,
             wdl = wdl.long().to(device)
 
             eval_score = model(x, stm, quantized=args.quant_forward)
-            mse, ce = nnue.mixed_losses(eval_score, score, wdl,
-                                        model.config.score_scale,
-                                        model.config.wdl_temperature,
-                                        model.wdl_bias)
+            primary, mse, ce = training_losses(model, eval_score, score, wdl, args)
             regularizer = model.quantization_regularizer()
-            loss = mse + args.wdl_weight * ce + args.quant_reg * regularizer
+            loss = primary + args.quant_reg * regularizer
+            if not torch.isfinite(loss):
+                raise ValueError("non-finite training loss")
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             optimiser.step()
 
             batch = len(x)
-            total += float(mse + args.wdl_weight * ce) * batch
+            total += float(primary) * batch
             mse_sum += float(mse) * batch
             ce_sum += float(ce) * batch
             count += batch
@@ -266,12 +290,17 @@ def run_training(args: argparse.Namespace, train_set,
                 "data_identity": data_identity,
                 "frozen_validation_identity": frozen_identity,
                 "train_manifest_identity": manifest_identity,
+                "target_contract": target,
+                "target_contract_identity": file_identity(args.target_contract) if target else None,
             }, args.output)
 
         if args.max_steps is not None and steps >= args.max_steps:
             break
 
     report = {
+        "complete": args.max_steps is None or steps == args.max_steps,
+        "target_contract": target,
+        "target_contract_identity": file_identity(args.target_contract) if target else None,
         "data": str(Path(args.data).resolve()),
         "data_identity": data_identity,
         "device": info,
@@ -335,7 +364,7 @@ def build_datasets(args: argparse.Namespace):
         if frozen is None:
             raise SystemExit("--train-manifest requires --frozen-validation")
         manifest = json.loads(args.train_manifest.read_text(encoding="utf-8"))
-        if manifest.get("schema") != vf.SCHEMA:
+        if manifest.get("schema") not in (1, 2):
             raise SystemExit(f"train manifest schema "
                              f"{manifest.get('schema')!r} != {vf.SCHEMA}")
         frozen_sha = file_identity(args.frozen_validation)["sha256"]
@@ -343,6 +372,21 @@ def build_datasets(args: argparse.Namespace):
             raise SystemExit("train manifest was not generated for this "
                              "frozen validation file; regenerate it with "
                              "validation_freeze.py check")
+
+    contract = getattr(args, "target", None)
+    store = None
+    if contract:
+        from teacher_labels import LabelStore
+        if frozen is None or manifest is None or frozen.get("schema") != 2:
+            raise ValueError("linear targets require derived freeze and train manifest")
+        if file_identity(args.target_contract)["sha256"] not in [v["sha256"] for v in frozen["target_contracts"].values()]:
+            raise ValueError("target contract is not bound to this freeze")
+        store = LabelStore(contract["teacher_manifest"]["path"])
+        if targets.pool_identity(manifest["files"], store) != contract["train_pool_sha256"]:
+            raise ValueError("training pool differs from target contract")
+    elif frozen and frozen.get("schema") == 2:
+        raise ValueError("derived freeze requires --target-contract")
+    extra = {"target_contract": contract, "label_store": store}
 
     if manifest is not None:
         parts = []
@@ -354,7 +398,7 @@ def build_datasets(args: argparse.Namespace):
             parts.append(ds.BinpackDataset(
                 entry["path"], "train", validation_games=set(),
                 augment=True, max_records=args.limit,
-                score_clip=args.score_clip, include_games=include))
+                score_clip=args.score_clip, include_games=include, **extra))
         train_set: object = ds.MultiBinpackDataset(parts)
         val_games = set(frozen["split"]["validation_games"])
     elif frozen is not None:
@@ -374,7 +418,7 @@ def build_datasets(args: argparse.Namespace):
 
     val_set = ds.BinpackDataset(
         args.data, "val", validation_games=val_games,
-        augment=False, max_records=args.limit, score_clip=args.score_clip)
+        augment=False, max_records=args.limit, score_clip=args.score_clip, **extra)
     return train_set, val_set, frozen, manifest
 
 
@@ -394,6 +438,23 @@ def assert_split_disjoint(train_set, val_set: ds.BinpackDataset) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    args.target = targets.load(args.target_contract) if args.target_contract else None
+    if args.target and (args.score_clip != 0 or args.wdl_weight != 0 or args.quant_reg != 0):
+        raise ValueError("linear targets require score_clip/wdl_weight/quant_reg = 0")
+    if args.target and args.max_steps == 1600 and args.limit is None:
+        if args.frozen_validation is None:
+            raise ValueError("linear training requires --frozen-validation")
+        from distill18 import verify_plan, read
+        from teacher_labels import verify_identity
+        directory = args.frozen_validation.parent
+        plan, _ = verify_plan(directory)
+        stage = read(directory / "stage_a.json")
+        if stage.get("passed") is not True or stage["plan"]["sha256"] != file_identity(directory / "experiment_plan.json")["sha256"]:
+            raise ValueError("stage A has not passed; training blocked")
+        verify_identity(stage["baselines"])
+        verify_identity(stage["preflight"])
+        if any(getattr(args, k) != v for k, v in plan["hyperparameters"].items()):
+            raise ValueError("training hyperparameters differ from sealed plan")
     if any(v is not None and (not math.isfinite(v) or v <= 0)
            for v in (args.lr, args.hidden_lr)):
         raise SystemExit("learning rates must be finite and positive")

@@ -127,6 +127,14 @@ body 从偏移 64 起，全部 little-endian、行主序：`W0 int8[450,1024]`�
 
 ## 本机实测（RTX 4080 SUPER，torch 2.6.0+cu124）
 
+工单18新增线性目标与缩放链：`teacher_labels.py` 用 C++ 静态评估生成按原 record index 对齐的 int32 sidecar；`targets.py` 集中管理 D/S Huber契约，`distill18.py` 负责派生冻结/基线/预检。`train.py --target-contract FILE` 要求新freeze及同一训练池，禁用旧tanh/WDL/量化正则；1600步正式实验还检查封存的阶段A。旧CLI默认仍为v1训练。
+
+新 `GMNNUE02/version=2` 沿用478336字节与权重body，header offset52存 `output_gain`（1..1024的二次幂），56..63为零。推理为 `clamp(round_div(G*y,QB)+G*b2,-900000,900000)`，在最终舍入前乘G；offset40的legacy `score_scale`不作输出还原。v1读取和数值行为继续保留。v2 QAT默认不做无必要bias校准，校准如显式开启必须在内部b2单位修正。
+
+`diagnose.py fidelity --all-validation --weights ... --export-report ...` 对v2按checkpoint绑定的目标报告原始分MAE/RMSE、归一化MSE/Huber和完整训练池常数，并验证所有主集候选子局面的Python整数/scalar/AVX2。新排名用合法邻域候选与并列组均匀命中，不把全同分算作Top-1成功。完整启动命令见 [tools/M5.md](../tools/M5.md) 的工单18段。
+
+以下为历史v1训练记录，不代表工单18的新目标或棋力候选。
+
 用 07 生成的 `data/raw/bench-d4/train.binpack`（280 局 / 7208 局面，depth 4）跑默认配置：
 
 ```

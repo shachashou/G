@@ -64,6 +64,8 @@ def quantize(x: Tensor, lo: int, hi: int) -> Tensor:
 
 @dataclass(frozen=True)
 class ModelConfig:
+    format_version: int = 1
+    output_gain: int = 1
     n_features: int = wf.N_FEATURES
     n_acc: int = wf.N_ACC
     n_l1: int = wf.N_L1
@@ -83,6 +85,8 @@ class NNUEModel(nn.Module):
         super().__init__()
         self.config = config or ModelConfig()
         c = self.config
+        if c.format_version not in (1, 2) or c.output_gain not in wf.OUTPUT_GAINS or (c.format_version == 1 and c.output_gain != 1):
+            raise ValueError("invalid format version/output gain")
         self.W0 = nn.Parameter(torch.empty(c.n_features, c.n_acc))
         self.b0 = nn.Parameter(torch.empty(c.n_acc))
         self.W1 = nn.Parameter(torch.empty(c.n_acc, c.n_l1))
@@ -135,8 +139,11 @@ class NNUEModel(nn.Module):
         zq = (RoundDivSte.apply(z, c.qa) if quantized else z / c.qa) + b1
         a2 = zq.clamp(0, c.qb)
         y = (a2 * w2[head]).sum(dim=-1)
-        eval_score = (RoundDivSte.apply(y, c.qb) if quantized
-                      else y / c.qb) + b2[head]
+        gain = c.output_gain
+        eval_score = (RoundDivSte.apply(y * gain, c.qb) if quantized
+                      else y * gain / c.qb) + gain * b2[head]
+        if c.format_version == 2:
+            eval_score = eval_score.clamp(-wf.STATIC_LIMIT, wf.STATIC_LIMIT)
         return eval_score
 
     def quantization_regularizer(self) -> Tensor:
@@ -153,6 +160,8 @@ class NNUEModel(nn.Module):
         Ticket 09 uses this to compare PyTorch against the C++ scalar inference
         on exactly the weights shipped in the .nnue file.
         """
+        config = config or ModelConfig(format_version=weights.get("format_version", 1),
+                                        output_gain=weights.get("output_gain", 1))
         model = cls(config=config)
         c = model.config
         shapes = {
@@ -177,11 +186,14 @@ class NNUEModel(nn.Module):
             ("W2", self.W2, -wc, wc),
             ("b2", self.b2, wf.INT16_MIN, wf.INT16_MAX),
         )
-        return {
+        weights = {
             name: RoundSte.apply(p).clamp(lo, hi).cpu().numpy().astype(int)
                    .reshape(-1).tolist()
             for name, p, lo, hi in specs
         }
+        weights.update(format_version=self.config.format_version,
+                       output_gain=self.config.output_gain)
+        return weights
 
 
 def wdl_logits(eval_score: Tensor, temperature: float = 100.0,

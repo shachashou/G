@@ -110,8 +110,10 @@ void NnueNetwork::load(const std::string& path) {
                     std::to_string(kNnueHeaderSize) + " bytes, got " +
                     std::to_string(blob.size()) + ")");
   }
-  if (std::memcmp(blob.data(), kMagic, kNnueMagicSize) != 0) {
-    throw NnueError(prefix + "bad magic (expected GMNNUE01)");
+  const bool v1Magic = std::memcmp(blob.data(), kMagic, kNnueMagicSize) == 0;
+  const bool v2Magic = std::memcmp(blob.data(), "GMNNUE02", kNnueMagicSize) == 0;
+  if (!v1Magic && !v2Magic) {
+    throw NnueError(prefix + "bad magic (expected GMNNUE01 or GMNNUE02)");
   }
 
   const uint32_t version = readU32(&blob[8]);
@@ -126,7 +128,7 @@ void NnueNetwork::load(const std::string& path) {
   const uint32_t weightClamp = readU32(&blob[44]);
   const uint32_t checksum = readU32(&blob[48]);
 
-  if (version != 1) {
+  if ((version != 1 && version != 2) || (version == 1) != v1Magic) {
     throw NnueError(prefix + "unsupported version " + std::to_string(version));
   }
   if (headerSize != kNnueHeaderSize) {
@@ -142,7 +144,11 @@ void NnueNetwork::load(const std::string& path) {
       qa > 0x7FFFFFFFu || qb > 0x7FFFFFFFu || weightClamp > 127) {
     throw NnueError(prefix + "invalid quantisation constants in header");
   }
-  for (int i = kNnueHeaderPrefix; i < kNnueHeaderSize; ++i) {
+  const uint32_t outputGain = version == 1 ? 1 : readU32(&blob[52]);
+  if (outputGain == 0 || outputGain > 1024 || (outputGain & (outputGain - 1)) != 0) {
+    throw NnueError(prefix + "invalid output gain");
+  }
+  for (int i = version == 1 ? kNnueHeaderPrefix : 56; i < kNnueHeaderSize; ++i) {
     if (blob[i] != 0) {
       throw NnueError(prefix + "non-zero reserved header bytes");
     }
@@ -221,6 +227,8 @@ void NnueNetwork::load(const std::string& path) {
   qa_ = static_cast<int>(qa);
   qb_ = static_cast<int>(qb);
   scoreScale_ = static_cast<int>(scoreScale);
+  formatVersion_ = static_cast<int>(version);
+  outputGain_ = static_cast<int>(outputGain);
   weightClamp_ = clamp;
   path_ = path;
   loaded_ = true;
@@ -335,7 +343,10 @@ int NnueNetwork::inferSum(const int32_t* acc, int stm) const {
   for (int k = 0; k < kNnueL1; ++k) {
     y += static_cast<int64_t>(a2[k]) * head[k];
   }
-  return static_cast<int>(roundDiv(y, qb_) + b2_[stm]);
+  if (formatVersion_ == 1) return static_cast<int>(roundDiv(y, qb_) + b2_[stm]);
+  const int64_t score = roundDiv(y * outputGain_, qb_) +
+                        static_cast<int64_t>(outputGain_) * b2_[stm];
+  return static_cast<int>(std::clamp<int64_t>(score, -900000, 900000));
 }
 
 int NnueNetwork::infer(const std::vector<int>& sparse, int stm) const {

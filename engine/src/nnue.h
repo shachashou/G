@@ -82,6 +82,8 @@ class NnueNetwork {
   int qa() const { return qa_; }
   int qb() const { return qb_; }
   int scoreScale() const { return scoreScale_; }
+  int formatVersion() const { return formatVersion_; }
+  int outputGain() const { return outputGain_; }
 
   // Defaults to AVX2 (the production backend); scalar stays available for
   // bit-exact A/B comparison and as a fallback.
@@ -117,6 +119,8 @@ class NnueNetwork {
   int qa_ = 127;
   int qb_ = 64;
   int scoreScale_ = 400;
+  int formatVersion_ = 1;
+  int outputGain_ = 1;
   int weightClamp_ = 64;
   NnueBackend backend_ = NnueBackend::Avx2;
   std::string path_;

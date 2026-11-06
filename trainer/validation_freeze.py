@@ -95,12 +95,14 @@ def scan_for_leaks(reader: binpack.BinpackReader, game_map, val_keys: dict,
         key = canonical_position(indices, record.stm)
         if key in val_keys:
             val_index = val_keys[key][0]
-            target = tuple(sorted(reader[val_index].feature_indices()))
+            # val_index refers to the frozen SOURCE, not this training file.
+            target = key[1]
             leaks.append({
                 "train_record": index,
                 "train_game": game,
                 "val_record": val_index,
                 "transform": find_transform(indices, target),
+                "transform_target": "canonical D4 representative",
             })
     return leaks
 
@@ -125,7 +127,7 @@ def frozen_train_record_ids(game_map, frozen: dict) -> list[int]:
 
 def load_frozen(path: str | Path) -> dict:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if value.get("schema") != SCHEMA:
+    if value.get("schema") not in (1, 2):
         raise SystemExit(f"frozen validation schema {value.get('schema')!r} "
                          f"!= {SCHEMA}: regenerate with trainer/freeze_validation.py")
     for section in ("data", "split", "leakage", "label_transform", "baseline"):
@@ -331,6 +333,13 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--manifest", default=None,
                        help="also write a train manifest for train.py")
     check.set_defaults(func=cmd_check)
+
+    derive = sub.add_parser("derive", help="ticket 18: keep membership, derive linear targets/metric identity")
+    from distill18 import add_prepare_args, prepare
+    add_prepare_args(derive)
+    derive.add_argument("--out-dir", type=Path, required=True)
+    derive.add_argument("--timeout", type=float, default=120)
+    derive.set_defaults(func=lambda args: (prepare(args), 0)[1])
 
     args = parser.parse_args(argv)
     return args.func(args)

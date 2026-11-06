@@ -133,6 +133,11 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/move_correlation_tests.py")
   set_tests_properties(move_correlation_tests PROPERTIES TIMEOUT 60)
 
+  add_test(NAME distillation_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/distillation_tests.py"
+            "$<TARGET_FILE:nnue_probe>")
+  set_tests_properties(distillation_tests PROPERTIES TIMEOUT 120)
+
   # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
   # (when torch is available) the PyTorch float forward.
   add_test(NAME nnue_parity_tests

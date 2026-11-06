@@ -319,6 +319,40 @@ int main() {
     std::remove(badPath.c_str());
   }
 
+  // v2 retains the accumulator/update contract but restores engine units
+  // BEFORE the final division (11*64/64 + 2*64 = 139, not 128).
+  {
+    auto v2 = blob;
+    std::memcpy(v2.data(), "GMNNUE02", 8);
+    putU32(v2, 8, 2);
+    putU32(v2, 52, 64);
+    CHECK(writeBlob(path, v2));
+    for (NnueBackend backend : {NnueBackend::Scalar, NnueBackend::Avx2}) {
+      NnueNetwork scaled;
+      scaled.setBackend(backend);
+      scaled.load(path);
+      CHECK(scaled.formatVersion() == 2 && scaled.outputGain() == 64);
+      CHECK(scaled.infer({112}, 0) == 139);
+      CHECK(scaled.infer({112}, 1) == 311);
+      Board board;
+      Evaluator eval;
+      eval.setNetwork(&scaled);
+      eval.init(board);
+      for (int move : {112, 113, 97, 98}) {
+        eval.update(board, move, cellOf(board.sideToMove()));
+        board.place(move);
+        CHECK(eval.evaluate(board) == scaled.infer(nnueSparseIndices(board),
+              board.sideToMove() == Color::Black ? 0 : 1));
+      }
+      for (int move : {98, 97, 113, 112}) {
+        eval.update(board, move, Cell::Empty);
+        board.undo();
+        CHECK(eval.evaluate(board) == scaled.infer(nnueSparseIndices(board),
+              board.sideToMove() == Color::Black ? 0 : 1));
+      }
+    }
+  }
+
   std::remove(path.c_str());
   if (g_failures > 0) {
     std::cerr << g_failures << " check(s) failed\n";

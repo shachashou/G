@@ -9,3 +9,4 @@
 # on CPU (slower, but all tests and the export path are identical).
 numpy>=2.0,<3
 torch==2.6.0+cu124
+tqdm>=4.66,<5

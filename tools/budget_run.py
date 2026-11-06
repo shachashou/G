@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from tqdm import tqdm
+
 from run_support import ROOT, source_identity, write_json
 
 BUDGET_SECONDS = 7200
@@ -187,21 +189,41 @@ def main(argv=None):
                     tree = ProcessTree(command, log)
                     run["child_pid"] = tree.process.pid
                     write_json(args.out_dir / "run.json", run)
-                    exit_code = tree.process.wait(timeout=max(.001, args.seconds - (time.monotonic() - started)))
-                    run["status"] = "completed" if exit_code == 0 else "failed"
-                    run["complete"] = exit_code == 0
-                    # Process-exit signalling can precede Windows job accounting
-                    # updates (and the venv launcher briefly outlives Python).
-                    grace = min(time.monotonic() + .2, started + args.seconds)
-                    remaining = tree.remaining_processes()
-                    while remaining and time.monotonic() < grace:
-                        time.sleep(.01)
+                    # Poll instead of one blocking wait so a tqdm bar can show
+                    # the remaining budget. The child's own output (including
+                    # any tqdm bars) is redirected into console.log, so this
+                    # runner must render the progress on the terminal itself.
+                    deadline = started + args.seconds
+                    with tqdm(total=args.seconds, desc="budget", unit="s",
+                              bar_format="{l_bar}{bar}| {n:.1f}/{total:.0f}s") as pbar:
+                        exit_code = None
+                        while exit_code is None:
+                            elapsed = time.monotonic() - started
+                            if elapsed >= args.seconds:
+                                run["status"], exit_code = "timeout", 124
+                                break
+                            pbar.n = min(elapsed, args.seconds)
+                            pbar.refresh()
+                            step = min(.25, max(.001, args.seconds - elapsed))
+                            try:
+                                exit_code = tree.process.wait(timeout=step)
+                            except subprocess.TimeoutExpired:
+                                continue
+                        pbar.n = min(time.monotonic() - started, args.seconds)
+                        pbar.refresh()
+                    if exit_code != 124:
+                        run["status"] = "completed" if exit_code == 0 else "failed"
+                        run["complete"] = exit_code == 0
+                        # Process-exit signalling can precede Windows job accounting
+                        # updates (and the venv launcher briefly outlives Python).
+                        grace = min(time.monotonic() + .2, started + args.seconds)
                         remaining = tree.remaining_processes()
-                    run["surviving_descendants"] = remaining
-                    if exit_code == 0 and run["surviving_descendants"]:
-                        run["status"], run["complete"], exit_code = "incomplete_descendants", False, 3
-            except subprocess.TimeoutExpired:
-                run["status"], exit_code = "timeout", 124
+                        while remaining and time.monotonic() < grace:
+                            time.sleep(.01)
+                            remaining = tree.remaining_processes()
+                        run["surviving_descendants"] = remaining
+                        if exit_code == 0 and run["surviving_descendants"]:
+                            run["status"], run["complete"], exit_code = "incomplete_descendants", False, 3
             except KeyboardInterrupt:
                 run["status"], exit_code = "interrupted", 130
             except Exception as error:

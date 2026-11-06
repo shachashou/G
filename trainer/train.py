@@ -29,6 +29,7 @@ import nnue
 import validation_freeze as vf
 import torch
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -137,7 +138,8 @@ def evaluate(model: nnue.NNUEModel, loader: DataLoader, device: torch.device,
     model.eval()
     total, mse_sum, ce_sum, count = 0.0, 0.0, 0.0, 0
     with torch.no_grad():
-        for x, stm, score, wdl in loader:
+        for x, stm, score, wdl in tqdm(loader, desc="eval", leave=False,
+                                       unit="batch"):
             x = x.float().to(device)
             stm = stm.long().to(device)
             score = score.float().to(device)
@@ -197,11 +199,13 @@ def run_training(args: argparse.Namespace, train_set,
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.history.parent.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in tqdm(range(1, args.epochs + 1), desc="epoch", unit="epoch"):
         model.train()
         started = time.perf_counter()
         total, mse_sum, ce_sum, count = 0.0, 0.0, 0.0, 0
-        for x, stm, score, wdl in train_loader:
+        pbar = tqdm(train_loader, desc=f"train epoch {epoch}", leave=False,
+                    unit="batch")
+        for x, stm, score, wdl in pbar:
             x = x.float().to(device)
             stm = stm.long().to(device)
             score = score.float().to(device)
@@ -225,6 +229,7 @@ def run_training(args: argparse.Namespace, train_set,
             count += batch
             steps += 1
             samples_exposed += batch
+            pbar.set_postfix(loss=f"{total / max(1, count):.4f}", steps=steps)
             if args.max_steps is not None and steps >= args.max_steps:
                 break
 

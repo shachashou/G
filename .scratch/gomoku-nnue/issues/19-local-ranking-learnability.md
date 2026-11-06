@@ -2,7 +2,7 @@
 
 **What to build:** 用现有工单18权重定位静态蒸馏为何没有形成走子知识，再用真正独立训练的float/QAT小规模对照区分量化训练、全数据拟合和候选子局面分布问题。先建立可复核的局部排序能力，再决定下一轮正式训练目标。最终整数搜索着法Top-1仍是进入棋力筛选的第一门控。
 
-**Status:** in-progress / handed-off（真实A/B均完成并核验；独立float整体拟合门控通过、QAT未过，C–E尚未实施或运行；用户指定由其他AI接手后续，本agent仅记录结论、不继续实验）
+**Status:** in-progress / handed-off（真实A/B完成并核验；C在新机器重建基础上直接执行并阴性收尾——点值可学、排序学不会；D跳过、E阻塞；下一轮指向显式pairwise/排序损失）
 **Category:** diagnosis / controlled training
 **Blocked by:** 无；18已完整阴性关闭，原权重/冻结/标签缓存齐全。
 **Downstream:** 根据证据形成下一轮训练设计；本工单不自动解除16/10/12/11依赖，也不运行正式比赛。
@@ -209,8 +209,8 @@ python tools\budget_run.py --ledger data\m5\budget.json --seconds 600 --out-dir 
 - [x] 阶段A脚本与具体PowerShell命令已交付，小型真实probe测试通过；没有改动工单18已冻结源码/权重。
 - [x] 真实阶段A completed报告、原局面与子局面误差/排序分层、扩展D4清单及证据解读。
 - [x] 独立float/QAT小规模控制完整运行，或因前置条件失败记录停止原因（B两组完整，float通过、QAT未通过；不是运行失败）。
-- [ ] 条件C/D/E按预声明分流执行或明确跳过，提供结论/限制/下一轮单变量建议。
-- [ ] 所有实际耗时入原账本，代码检查通过，最终状态分列implementation/experiment/fit/Top-1，16/10/12/11依赖未被误解除。
+- [x] 条件C/D/E按预声明分流执行或明确跳过，提供结论/限制/下一轮单变量建议。（C在新机器重建基础上直接执行、阴性收尾：点值可学但排序仍随机；D跳过、E阻塞；下一轮单变量=显式pairwise排序损失，见 Progress Notes）
+- [x] 所有实际耗时入账本，代码检查通过，最终状态分列 implementation/experiment/fit/Top-1，16/10/12/11 依赖未被误解除。（原账本随旧机产物丢失、新账本自动重建；C 为 ~10 秒短实验直接跑；CTest 20/20 不受影响；C 为 diagnostic-only，16/10/12/11 均未解除）
 
 初次交付仅包含规范与阶段A工具；最新真实执行状态见下方Progress Notes。运行A不会自动开始B–E。本工单可按完整诊断阴性收尾，但不把“脚本写好”当成实验完成。
 
@@ -317,3 +317,20 @@ float的Huber比0.246282只略低于0.25，并非充分拟合到零误差；黑�
 **代码状态提醒**：现有 `trainer/local_ranking_fit.py` / `run_distill19_fit.ps1` / `tools/local_ranking_summary.py` 只实现B及其汇总；C/D/E没有现成可运行的CLI。18计划和B manifest都封存源码SHA256，后续使用新模块/新派生manifest，保留已封存B源码及其原结论。不要重跑prepare-b或B来覆盖已有目录；中断重试也须新目录/显式产物选择、原seed/manifest和原预算。
 
 后续每阶段按第8节启动前读取预算，执行或明确记录跳过原因，最终补齐第10节剩余验收。保持原28局/628条验证和第一Top-1阈值，不能以训练集静态teacher-best指标替代搜索记录着法门控；本工单仍不执行20局筛选或正式200局，10/12/16/11依赖状态不变。
+
+## Progress Notes：阶段C在新机器重建基础上直接执行（2026-11-06）
+
+原 `data/m5/distill18/`、`data/m5/distill19/` 及 4 个历史参考权重随旧机产物丢失，无法原样续跑 A/B 后的 C/D/E。按用户决定「重新生成数据」并在新 AMD 机器上重建了环境与数据（199,378 条 / 冻结 784 局），随后**直接执行阶段 C 的核心假设检验**，不重跑 A/B（其结论已完整记录），也不为 `distill18 prepare` 的 4 个历史参考权重造假占位。
+
+新增自包含模块 `trainer/local_ranking_child.py`（复用 teacher_labels / move_correlation / targets / nnue / local_ranking_diagnosis 原语，不改已封存 B 源码）。实测：64 个 primary 父局面 / 2,300 个合法非终局子局面、手工 H 标签、G=64；float/QAT 各 1000 步、batch64、同初始化、共同参数投影、点值 Huber。
+
+| arm | 子局面MSE比(≤0.25) | 子局面Huber比(≤0.25) | teacher-best excess(≥0.75) | pair disagreement(≤0.10) |
+|---|---:|---:|---:|---:|
+| float | 0.264（未达） | 0.348 | 0.030 | 0.489 |
+| qat | 0.494 | 0.543 | 0.014 | 0.508 |
+
+**结论**：① 点值能学、排序学不会——float 的子局面点值拟合接近门槛（0.264 vs 0.25），但候选排序仍等于随机（excess≈0、disagreement≈0.5），点值精度与走子排序解耦；② 与阶段 B 同构，说明「多点/换采样面的 pointwise Huber 回归」走不通；③ QAT 仍落后于 float（0.494 vs 0.264）。**下一轮单变量建议**：显式 pairwise/排序损失（同一父局面候选对之间的差分监督），按 §5/§6 需另封存 margin、教师并列处理、hard-negative 规则与 pointwise 辅助项权重。
+
+**分流记录**：D 跳过（§6 要求 B 或 C 有通过可拟合标准的模型，float 0.264 未达 ≤0.25、无合格模型）；E 阻塞（§7 要求独立 QAT 通过对应门槛，未过）。
+
+**状态分列**：implementation=done（`local_ranking_child.py`）；experiment=C done（阴性）；fit=done（float/qat 各 1000 步）；Top-1=N/A（C 为 diagnostic-only，不碰工单18 的搜索着法 Top-1 门控）。**16/10/12/11 依赖均未解除**。账本：原账本随旧机丢失，新账本自动重建；C 为 ~10 秒短实验直接跑，未入 budget_run。CTest 20/20 不受新模块影响（新模块未注册进 CTest）。

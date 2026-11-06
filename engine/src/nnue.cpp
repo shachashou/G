@@ -1,6 +1,7 @@
 #include "nnue.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <immintrin.h>
@@ -62,6 +63,46 @@ int32_t clampInt16(int32_t value) {
   return std::clamp(value, kInt16Min, kInt16Max);
 }
 
+uint16_t readU16(const uint8_t* p) {
+  return static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
+}
+
+float readF32(const uint8_t* p) {
+  const uint32_t raw = readU32(p);
+  float out;
+  std::memcpy(&out, &raw, sizeof(out));
+  return out;
+}
+
+// IEEE 754 half -> float (handles subnormals, inf, nan).
+float halfToFloat(uint16_t h) {
+  const uint32_t sign = static_cast<uint32_t>(h & 0x8000u) << 16;
+  const uint32_t exp = (h >> 10) & 0x1fu;
+  const uint32_t mant = h & 0x3ffu;
+  uint32_t f;
+  if (exp == 0) {
+    if (mant == 0) {
+      f = sign;
+    } else {
+      uint32_t e = 127 - 15 + 1;
+      uint32_t m = mant;
+      while ((m & 0x400u) == 0) {
+        m <<= 1;
+        --e;
+      }
+      m &= 0x3ffu;
+      f = sign | (e << 23) | (m << 13);
+    }
+  } else if (exp == 0x1fu) {
+    f = sign | 0x7f800000u | (mant << 13);
+  } else {
+    f = sign | ((exp + 127u - 15u) << 23) | (mant << 13);
+  }
+  float out;
+  std::memcpy(&out, &f, sizeof(out));
+  return out;
+}
+
 }  // namespace
 
 std::vector<int> nnueSparseIndices(const Board& board) {
@@ -112,8 +153,9 @@ void NnueNetwork::load(const std::string& path) {
   }
   const bool v1Magic = std::memcmp(blob.data(), kMagic, kNnueMagicSize) == 0;
   const bool v2Magic = std::memcmp(blob.data(), "GMNNUE02", kNnueMagicSize) == 0;
-  if (!v1Magic && !v2Magic) {
-    throw NnueError(prefix + "bad magic (expected GMNNUE01 or GMNNUE02)");
+  const bool v3Magic = std::memcmp(blob.data(), "GMNNUE03", kNnueMagicSize) == 0;
+  if (!v1Magic && !v2Magic && !v3Magic) {
+    throw NnueError(prefix + "bad magic (expected GMNNUE01/GMNNUE02/GMNNUE03)");
   }
 
   const uint32_t version = readU32(&blob[8]);
@@ -128,7 +170,9 @@ void NnueNetwork::load(const std::string& path) {
   const uint32_t weightClamp = readU32(&blob[44]);
   const uint32_t checksum = readU32(&blob[48]);
 
-  if ((version != 1 && version != 2) || (version == 1) != v1Magic) {
+  if ((version != 1 && version != 2 && version != 3) ||
+      (version == 1) != v1Magic || (version == 2) != v2Magic ||
+      (version == 3) != v3Magic) {
     throw NnueError(prefix + "unsupported version " + std::to_string(version));
   }
   if (headerSize != kNnueHeaderSize) {
@@ -140,8 +184,9 @@ void NnueNetwork::load(const std::string& path) {
                     std::to_string(nFeatures) + "/" + std::to_string(nAcc) +
                     "/" + std::to_string(nL1) + "/" + std::to_string(nHeads));
   }
-  if (qa == 0 || qb == 0 || scoreScale == 0 || weightClamp == 0 ||
-      qa > 0x7FFFFFFFu || qb > 0x7FFFFFFFu || weightClamp > 127) {
+  if (qa == 0 || qb == 0 || scoreScale == 0 || qa > 0x7FFFFFFFu ||
+      qb > 0x7FFFFFFFu ||
+      (version != 3 && (weightClamp == 0 || weightClamp > 127))) {
     throw NnueError(prefix + "invalid quantisation constants in header");
   }
   const uint32_t outputGain = version == 1 ? 1 : readU32(&blob[52]);
@@ -156,12 +201,61 @@ void NnueNetwork::load(const std::string& path) {
 
   const uint8_t* body = blob.data() + kNnueHeaderSize;
   const size_t bodySize = blob.size() - kNnueHeaderSize;
-  if (bodySize != kNnueBodySize) {
+  const size_t expectedBody = version == 3 ? kNnueBodySizeV3 : kNnueBodySize;
+  if (bodySize != expectedBody) {
     throw NnueError(prefix + "body length " + std::to_string(bodySize) +
-                    " != " + std::to_string(kNnueBodySize));
+                    " != " + std::to_string(expectedBody));
   }
   if (fnv1a(body, bodySize) != checksum) {
     throw NnueError(prefix + "checksum mismatch");
+  }
+
+  if (version == 3) {
+    std::vector<float> w0f(kNnueW0Len), w1f(kNnueW1Len), w2f(kNnueW2Len);
+    std::vector<float> b0f(kNnueB0Len), b1f(kNnueB1Len), b2f(kNnueB2Len);
+    size_t cursor = 0;
+    for (size_t i = 0; i < w0f.size(); ++i) {
+      w0f[i] = halfToFloat(readU16(&body[cursor + 2 * i]));
+    }
+    cursor += kNnueW0BytesV3;
+    for (size_t i = 0; i < b0f.size(); ++i) {
+      b0f[i] = readF32(&body[cursor + 4 * i]);
+    }
+    cursor += kNnueB0BytesV3;
+    for (size_t i = 0; i < w1f.size(); ++i) {
+      w1f[i] = halfToFloat(readU16(&body[cursor + 2 * i]));
+    }
+    cursor += kNnueW1BytesV3;
+    for (size_t i = 0; i < b1f.size(); ++i) {
+      b1f[i] = readF32(&body[cursor + 4 * i]);
+    }
+    cursor += kNnueB1BytesV3;
+    for (size_t i = 0; i < w2f.size(); ++i) {
+      w2f[i] = halfToFloat(readU16(&body[cursor + 2 * i]));
+    }
+    cursor += kNnueW2BytesV3;
+    for (size_t i = 0; i < b2f.size(); ++i) {
+      b2f[i] = readF32(&body[cursor + 4 * i]);
+    }
+    cursor += kNnueB2BytesV3;
+    if (cursor != kNnueBodySizeV3) {
+      throw NnueError(prefix + "internal body cursor error");
+    }
+    w0f_ = std::move(w0f);
+    w1f_ = std::move(w1f);
+    w2f_ = std::move(w2f);
+    b0f_ = std::move(b0f);
+    b1f_ = std::move(b1f);
+    b2f_ = std::move(b2f);
+    qa_ = static_cast<int>(qa);
+    qb_ = static_cast<int>(qb);
+    scoreScale_ = static_cast<int>(scoreScale);
+    formatVersion_ = 3;
+    outputGain_ = static_cast<int>(outputGain);
+    weightClamp_ = 0;
+    path_ = path;
+    loaded_ = true;
+    return;
   }
 
   std::vector<int8_t> w0(kNnueW0Len), w1(kNnueW1Len), w2(kNnueW2Len);
@@ -354,6 +448,18 @@ int NnueNetwork::infer(const std::vector<int>& sparse, int stm) const {
   if (stm != 0 && stm != 1) {
     throw NnueError("NNUE inference: stm must be 0 (black) or 1 (white)");
   }
+  if (formatVersion_ == 3) {
+    NnueFloatAccumulator acc{};
+    for (int j = 0; j < kNnueAcc; ++j) acc[j] = b0f_[j];
+    for (int index : sparse) {
+      if (index < 0 || index >= kNnueFeatures) {
+        throw NnueError("NNUE inference: feature index out of range " +
+                        std::to_string(index));
+      }
+      addFeatureFloat(index, 1, acc);
+    }
+    return inferSumFloat(acc.data(), stm);
+  }
   NnueAccumulator acc{};
   for (int j = 0; j < kNnueAcc; ++j) acc[j] = b0_[j];
   for (int index : sparse) {
@@ -372,6 +478,87 @@ int NnueNetwork::inferAccumulator(const NnueAccumulator& acc, int stm) const {
     throw NnueError("NNUE inference: stm must be 0 (black) or 1 (white)");
   }
   return inferSum(acc.data(), stm);
+}
+
+void NnueNetwork::addFeatureFloat(int index, int sign,
+                                  NnueFloatAccumulator& acc) const {
+  const float* row = &w0f_[static_cast<size_t>(index) * kNnueAcc];
+  if (sign > 0) {
+    for (int j = 0; j < kNnueAcc; ++j) acc[j] += row[j];
+  } else {
+    for (int j = 0; j < kNnueAcc; ++j) acc[j] -= row[j];
+  }
+}
+
+void NnueNetwork::initAccumulator(const Board& board,
+                                  NnueFloatAccumulator& acc) const {
+  if (!loaded_) throw NnueError("NNUE accumulator: weights not loaded");
+  for (int j = 0; j < kNnueAcc; ++j) acc[j] = b0f_[j];
+  const auto& cells = board.rawCells();
+  for (int m = 0; m < kCells; ++m) {
+    if (cells[m] != Cell::Empty) {
+      addFeatureFloat(nnueFeatureIndex(m, cells[m]), 1, acc);
+    }
+  }
+}
+
+void NnueNetwork::updateAccumulator(const Board& board, int move, Cell to,
+                                    NnueFloatAccumulator& acc) const {
+  if (!loaded_) throw NnueError("NNUE accumulator: weights not loaded");
+  const Cell before = board.cell(move);
+  if (before != Cell::Empty) {
+    addFeatureFloat(nnueFeatureIndex(move, before), -1, acc);
+  }
+  if (to != Cell::Empty) {
+    addFeatureFloat(nnueFeatureIndex(move, to), 1, acc);
+  }
+}
+
+void NnueNetwork::computeL1Float(const float* acc,
+                                 std::array<float, kNnueL1>& z) const {
+  z.fill(0.0f);
+  for (int j = 0; j < kNnueAcc; ++j) {
+    float a = acc[j];
+    if (a < static_cast<float>(kInt16Min)) a = static_cast<float>(kInt16Min);
+    else if (a > static_cast<float>(kInt16Max)) a = static_cast<float>(kInt16Max);
+    if (a < 0.0f) a = 0.0f;
+    else if (a > qa_) a = static_cast<float>(qa_);
+    if (a == 0.0f) continue;
+    const float* row = &w1f_[static_cast<size_t>(j) * kNnueL1];
+    for (int k = 0; k < kNnueL1; ++k) z[k] += a * row[k];
+  }
+}
+
+int NnueNetwork::inferSumFloat(const float* acc, int stm) const {
+  std::array<float, kNnueL1> z{};
+  computeL1Float(acc, z);
+
+  std::array<float, kNnueL1> a2{};
+  for (int k = 0; k < kNnueL1; ++k) {
+    float zq = z[k] / static_cast<float>(qa_) + b1f_[k];
+    if (zq < 0.0f) zq = 0.0f;
+    else if (zq > qb_) zq = static_cast<float>(qb_);
+    a2[k] = zq;
+  }
+
+  float y = 0.0f;
+  const float* head = &w2f_[static_cast<size_t>(stm) * kNnueL1];
+  for (int k = 0; k < kNnueL1; ++k) y += a2[k] * head[k];
+
+  float score = y * outputGain_ / static_cast<float>(qb_) +
+                outputGain_ * b2f_[stm];
+  if (score < -900000.0f) score = -900000.0f;
+  else if (score > 900000.0f) score = 900000.0f;
+  return static_cast<int>(std::lround(score));
+}
+
+int NnueNetwork::inferAccumulator(const NnueFloatAccumulator& acc,
+                                  int stm) const {
+  if (!loaded_) throw NnueError("NNUE inference: weights not loaded");
+  if (stm != 0 && stm != 1) {
+    throw NnueError("NNUE inference: stm must be 0 (black) or 1 (white)");
+  }
+  return inferSumFloat(acc.data(), stm);
 }
 
 }  // namespace gomoku

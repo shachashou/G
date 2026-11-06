@@ -49,6 +49,7 @@ File layout (little-endian): 64-byte header, then the weight body.
 from __future__ import annotations
 
 import os
+import math
 import struct
 import sys
 from array import array
@@ -58,6 +59,8 @@ from pathlib import Path
 MAGIC = b"GMNNUE01"
 VERSION = 1
 MAGIC_V2 = b"GMNNUE02"
+MAGIC_V3 = b"GMNNUE03"
+VERSION_V3 = 3
 STATIC_LIMIT = 900000
 OUTPUT_GAINS = tuple(1 << i for i in range(11))
 HEADER_SIZE = 64
@@ -81,6 +84,17 @@ W2_LEN = N_HEADS * N_L1
 B2_LEN = N_HEADS
 BODY_LEN = W0_LEN + 2 * B0_LEN + W1_LEN + 2 * B1_LEN + W2_LEN + 2 * B2_LEN
 FILE_LEN = HEADER_SIZE + BODY_LEN
+
+# v3 (float16 weights, float32 biases): W* stored as IEEE 754 half (2 bytes),
+# b* as float32 (4 bytes). Body layout is row-major, same order as v1/v2.
+W0_BYTES_V3 = W0_LEN * 2
+B0_BYTES_V3 = B0_LEN * 4
+W1_BYTES_V3 = W1_LEN * 2
+B1_BYTES_V3 = B1_LEN * 4
+W2_BYTES_V3 = W2_LEN * 2
+B2_BYTES_V3 = B2_LEN * 4
+BODY_LEN_V3 = (W0_BYTES_V3 + B0_BYTES_V3 + W1_BYTES_V3 + B1_BYTES_V3 +
+               W2_BYTES_V3 + B2_BYTES_V3)
 
 HEADER_STRUCT = struct.Struct("<8s11I")
 assert HEADER_STRUCT.size == 52
@@ -159,20 +173,61 @@ def body_bytes(weights: dict) -> bytes:
                     for key in ("W0", "b0", "W1", "b1", "W2", "b2"))
 
 
+def _pack_floats(values, half: bool, name: str, expected: int) -> bytes:
+    numbers = [float(v) for v in values]
+    if len(numbers) != expected:
+        raise WeightFormatError(f"{name}: expected {expected} values, got {len(numbers)}")
+    for value in numbers:
+        if not math.isfinite(value):
+            raise WeightFormatError(f"{name}: non-finite value {value}")
+    if _np is not None:
+        arr = _np.asarray(numbers, dtype=_np.float16 if half else _np.float32)
+        if sys.byteorder == "big":
+            arr = arr.byteswap()
+        return arr.tobytes()
+    return struct.pack(f"<{len(numbers)}{'e' if half else 'f'}", *numbers)
+
+
+def _unpack_floats(raw: bytes, half: bool) -> list:
+    if _np is not None:
+        arr = _np.frombuffer(raw, dtype="<f2" if half else "<f4")
+        return [float(v) for v in arr]
+    return [float(v) for v in struct.unpack(f"<{len(raw) // (2 if half else 4)}{'e' if half else 'f'}", raw)]
+
+
+def normalise_weights_v3(weights: dict) -> dict:
+    """Validate and convert a float weight dict into raw half/float bytes."""
+    return {
+        "W0": _pack_floats(weights["W0"], True, "W0", W0_LEN),
+        "b0": _pack_floats(weights["b0"], False, "b0", B0_LEN),
+        "W1": _pack_floats(weights["W1"], True, "W1", W1_LEN),
+        "b1": _pack_floats(weights["b1"], False, "b1", B1_LEN),
+        "W2": _pack_floats(weights["W2"], True, "W2", W2_LEN),
+        "b2": _pack_floats(weights["b2"], False, "b2", B2_LEN),
+    }
+
+
+def body_bytes_v3(weights: dict) -> bytes:
+    w = normalise_weights_v3(weights)
+    return b"".join(w[key] for key in ("W0", "b0", "W1", "b1", "W2", "b2"))
+
+
 def pack_weights(weights: dict, *, qa: int = QA, qb: int = QB,
                  score_scale: int = SCORE_SCALE,
                  weight_clamp: int = WEIGHT_CLAMP,
                  version: int | None = None, output_gain: int | None = None) -> bytes:
     version = weights.get("format_version", 1) if version is None else version
     output_gain = weights.get("output_gain", 1) if output_gain is None else output_gain
-    if version not in (1, 2) or output_gain not in OUTPUT_GAINS or (version == 1 and output_gain != 1):
+    if version not in (1, 2, 3) or output_gain not in OUTPUT_GAINS or (version == 1 and output_gain != 1):
         raise WeightFormatError("invalid format version/output gain")
-    body = body_bytes(weights)
-    if len(body) != BODY_LEN:
-        raise WeightFormatError(f"body length {len(body)} != {BODY_LEN}")
+    body = body_bytes_v3(weights) if version == 3 else body_bytes(weights)
+    expected = BODY_LEN_V3 if version == 3 else BODY_LEN
+    if len(body) != expected:
+        raise WeightFormatError(f"body length {len(body)} != {expected}")
+    magic = MAGIC if version == 1 else (MAGIC_V2 if version == 2 else MAGIC_V3)
     header = HEADER_STRUCT.pack(
-        MAGIC if version == 1 else MAGIC_V2, version, HEADER_SIZE, N_FEATURES, N_ACC, N_L1, N_HEADS,
-        qa, qb, score_scale, weight_clamp, fnv1a(body),
+        magic, version, HEADER_SIZE, N_FEATURES, N_ACC, N_L1, N_HEADS,
+        qa, qb, score_scale, weight_clamp if version != 3 else 0, fnv1a(body),
     )
     reserved = b"\0" * 12 if version == 1 else struct.pack("<I", output_gain) + b"\0" * 8
     return header + reserved + body
@@ -192,16 +247,18 @@ def unpack_weights(blob: bytes) -> tuple[dict, dict]:
     magic = fields[0]
     (version, header_size, n_features, n_acc, n_l1, n_heads,
      qa, qb, score_scale, weight_clamp, checksum) = fields[1:]
-    if magic not in (MAGIC, MAGIC_V2):
+    if magic not in (MAGIC, MAGIC_V2, MAGIC_V3):
         raise WeightFormatError(f"bad NNUE weight magic {magic!r}, expected {MAGIC!r}")
-    if version not in (1, 2) or magic != (MAGIC if version == 1 else MAGIC_V2):
+    if version not in (1, 2, 3) or magic != (MAGIC if version == 1 else (MAGIC_V2 if version == 2 else MAGIC_V3)):
         raise WeightFormatError(f"unsupported weight version {version}")
     if header_size != HEADER_SIZE:
         raise WeightFormatError(f"bad header size {header_size}")
     if (n_features, n_acc, n_l1, n_heads) != (N_FEATURES, N_ACC, N_L1, N_HEADS):
         raise WeightFormatError("unsupported network dimensions")
-    if not 0 < qa <= 0x7fffffff or not 0 < qb <= 0x7fffffff or score_scale <= 0 or not 0 < weight_clamp <= 127:
+    if not 0 < qa <= 0x7fffffff or not 0 < qb <= 0x7fffffff or score_scale <= 0:
         raise WeightFormatError("invalid quantisation constants in header")
+    if version != 3 and not 0 < weight_clamp <= 127:
+        raise WeightFormatError("invalid weight_clamp in header")
     gain = 1 if version == 1 else struct.unpack_from("<I", blob, 52)[0]
     if gain not in OUTPUT_GAINS:
         raise WeightFormatError("invalid output gain")
@@ -210,23 +267,32 @@ def unpack_weights(blob: bytes) -> tuple[dict, dict]:
         raise WeightFormatError("non-zero reserved header bytes")
 
     body = blob[HEADER_SIZE:]
-    if len(body) != BODY_LEN:
-        raise WeightFormatError(f"body length {len(body)} != {BODY_LEN}")
+    if len(body) != (BODY_LEN_V3 if version == 3 else BODY_LEN):
+        raise WeightFormatError(f"body length {len(body)} != {BODY_LEN_V3 if version == 3 else BODY_LEN}")
     if fnv1a(body) != checksum:
         raise WeightFormatError("NNUE weight checksum mismatch")
 
     cursor = 0
     weights = {}
-    for key, length, typecode in (
-        ("W0", W0_LEN, "b"), ("b0", B0_LEN * 2, "h"),
-        ("W1", W1_LEN, "b"), ("b1", B1_LEN * 2, "h"),
-        ("W2", W2_LEN, "b"), ("b2", B2_LEN * 2, "h"),
-    ):
-        weights[key] = _from_little_endian(body[cursor:cursor + length], typecode)
-        cursor += length
-    normalise_weights(weights)  # range check after decoding
-    if any(abs(v) > weight_clamp for k in ("W0", "W1", "W2") for v in weights[k]):
-        raise WeightFormatError("weight exceeds header weight_clamp")
+    if version == 3:
+        for key, length, half in (
+            ("W0", W0_BYTES_V3, True), ("b0", B0_BYTES_V3, False),
+            ("W1", W1_BYTES_V3, True), ("b1", B1_BYTES_V3, False),
+            ("W2", W2_BYTES_V3, True), ("b2", B2_BYTES_V3, False),
+        ):
+            weights[key] = _unpack_floats(body[cursor:cursor + length], half)
+            cursor += length
+    else:
+        for key, length, typecode in (
+            ("W0", W0_LEN, "b"), ("b0", B0_LEN * 2, "h"),
+            ("W1", W1_LEN, "b"), ("b1", B1_LEN * 2, "h"),
+            ("W2", W2_LEN, "b"), ("b2", B2_LEN * 2, "h"),
+        ):
+            weights[key] = _from_little_endian(body[cursor:cursor + length], typecode)
+            cursor += length
+        normalise_weights(weights)  # range check after decoding
+        if any(abs(v) > weight_clamp for k in ("W0", "W1", "W2") for v in weights[k]):
+            raise WeightFormatError("weight exceeds header weight_clamp")
     weights.update(format_version=version, output_gain=gain)
     meta = {
         "version": version, "output_gain": gain, "qa": qa, "qb": qb,
@@ -310,6 +376,94 @@ def output_score(y: int, bias: int, qb: int, weights: dict) -> int:
     gain = weights["output_gain"]
     value = round_div(gain * y, qb) + gain * bias
     return max(-STATIC_LIMIT, min(STATIC_LIMIT, value))
+
+
+def infer_float(weights: dict, sparse_indices: Sequence[int], stm: int,
+                *, qa: int = QA, qb: int = QB) -> float:
+    """Dependency-free float forward (v3): float32 arithmetic, no round_div /
+    no int16 accumulator clamp is removed (the accumulator is still clipped to
+    the int16 range exactly like the PyTorch float forward)."""
+    if stm not in (0, 1):
+        raise ValueError(f"stm must be 0 (black) or 1 (white), got {stm}")
+    indices = list(sparse_indices)
+    for index in indices:
+        if not 0 <= index < N_FEATURES:
+            raise ValueError(f"feature index out of range: {index}")
+    if _np is not None:
+        value = _infer_float_numpy(weights, indices, stm, qa, qb)
+    else:
+        value = _infer_float_python(weights, indices, stm, qa, qb)
+    if weights.get("format_version", 1) in (2, 3):
+        value = max(float(-STATIC_LIMIT), min(float(STATIC_LIMIT), value))
+    return float(value)
+
+
+def _infer_float_numpy(weights: dict, indices: Sequence[int], stm: int,
+                       qa: int, qb: int) -> float:
+    w0 = _np.asarray(weights["W0"], dtype=_np.float32).reshape(N_FEATURES, N_ACC)
+    b0 = _np.asarray(weights["b0"], dtype=_np.float32)
+    w1 = _np.asarray(weights["W1"], dtype=_np.float32).reshape(N_ACC, N_L1)
+    b1 = _np.asarray(weights["b1"], dtype=_np.float32)
+    w2 = _np.asarray(weights["W2"], dtype=_np.float32).reshape(N_HEADS, N_L1)
+    b2 = _np.asarray(weights["b2"], dtype=_np.float32)
+    gain = weights.get("output_gain", 1)
+
+    acc = b0.copy()
+    if indices:
+        acc += w0[list(indices)].sum(axis=0)
+    acc = _np.clip(acc, INT16_MIN, INT16_MAX)
+    a = _np.clip(acc, 0, qa)
+    zq = (a @ w1) / _np.float32(qa) + b1
+    a2 = _np.clip(zq, 0, qb)
+    y = float(a2 @ w2[stm])
+    return y * gain / qb + gain * float(b2[stm])
+
+
+def _infer_float_python(weights: dict, indices: Sequence[int], stm: int,
+                        qa: int, qb: int) -> float:
+    w0, b0 = weights["W0"], weights["b0"]
+    w1, b1 = weights["W1"], weights["b1"]
+    w2, b2 = weights["W2"], weights["b2"]
+    gain = weights.get("output_gain", 1)
+
+    acc = [float(v) for v in b0]
+    for index in indices:
+        base = index * N_ACC
+        for j in range(N_ACC):
+            acc[j] += float(w0[base + j])
+    a = [0.0] * N_ACC
+    for j in range(N_ACC):
+        v = acc[j]
+        if v < INT16_MIN:
+            v = INT16_MIN
+        elif v > INT16_MAX:
+            v = INT16_MAX
+        if v < 0:
+            v = 0.0
+        elif v > qa:
+            v = float(qa)
+        a[j] = float(v)
+
+    zq = [float(b1[k]) for k in range(N_L1)]
+    for j in range(N_ACC):
+        av = a[j]
+        if av == 0.0:
+            continue
+        base = j * N_L1
+        for k in range(N_L1):
+            zq[k] += av * float(w1[base + k])
+    a2 = [0.0] * N_L1
+    for k in range(N_L1):
+        v = zq[k] / qa
+        if v < 0:
+            v = 0.0
+        elif v > qb:
+            v = float(qb)
+        a2[k] = float(v)
+
+    base = stm * N_L1
+    y = sum(a2[k] * float(w2[base + k]) for k in range(N_L1))
+    return y * gain / qb + gain * float(b2[stm])
 
 
 def weights_summary(weights: dict) -> dict:

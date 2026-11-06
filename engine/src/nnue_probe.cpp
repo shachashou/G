@@ -194,6 +194,29 @@ int main(int argc, char* argv[]) {
       if (!handcrafted) eval.setNetwork(&network);
       eval.init(board);
       std::cout << eval.evaluate(board) << "\n";
+    } else if (network.formatVersion() == 3) {
+      NnueFloatAccumulator acc;
+      network.initAccumulator(board, acc);
+      volatile float jitter = 0.0f;  // stays 0; defeats loop hoisting
+      int64_t sink = 0;
+      for (int i = 0; i < 1000; ++i) {
+        sink += network.inferAccumulator(acc, stm);
+      }
+      const auto start = std::chrono::steady_clock::now();
+      for (int i = 0; i < iterations; ++i) {
+        acc[0] += jitter;
+        sink += network.inferAccumulator(acc, stm);
+      }
+      const auto stop = std::chrono::steady_clock::now();
+      const double totalNs =
+          std::chrono::duration<double, std::nano>(stop - start).count();
+      std::cout << "backend=" << nnueBackendName(network.backend())
+                << " iterations=" << iterations
+                << " total_us=" << std::fixed << std::setprecision(1)
+                << totalNs / 1000.0
+                << " ns_per_eval=" << std::setprecision(2)
+                << totalNs / iterations
+                << " sink=" << sink << "\n";
     } else {
       NnueAccumulator acc;
       network.initAccumulator(board, acc);

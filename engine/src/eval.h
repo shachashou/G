@@ -43,6 +43,8 @@ class Evaluator {
   // Exact (unsaturated) int32 accumulator, incrementally maintained by
   // update() so the NNUE backend stays scalar but cheap during search.
   NnueAccumulator nnueAcc_{};
+  // v3 (float16 weights) maintains a float32 accumulator instead.
+  NnueFloatAccumulator nnueAccF_{};
 };
 
 }  // namespace gomoku

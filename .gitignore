@@ -24,4 +24,5 @@ match_results*.json
 .vs/
 .vscode/
 .idea/
+.codebuddy/
 .scratch/gomoku-nnue/distillation-tests.log

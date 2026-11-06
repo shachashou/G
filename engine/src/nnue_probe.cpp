@@ -65,11 +65,12 @@ int main(int argc, char* argv[]) {
       mode = a;
     }
   }
-  if (weightsPath.empty() ||
+  const bool handcrafted = mode == "handcrafted";
+  if ((!handcrafted && weightsPath.empty()) ||
       (mode != "features" && mode != "infer" && mode != "board" &&
-       mode != "bench")) {
-    std::cerr << "usage: nnue_probe --weights PATH [--backend avx2|scalar] "
-                 "{features|infer|board|bench}\n";
+       mode != "bench" && !handcrafted)) {
+    std::cerr << "usage: nnue_probe [--weights PATH] [--backend avx2|scalar] "
+                 "{features|infer|board|bench|handcrafted}\n";
     return 2;
   }
   NnueBackend backend = NnueBackend::Avx2;
@@ -79,12 +80,14 @@ int main(int argc, char* argv[]) {
   }
 
   NnueNetwork network;
-  try {
-    network.setBackend(backend);
-    network.load(weightsPath);
-  } catch (const NnueError& error) {
-    std::cerr << error.what() << "\n";
-    return 2;
+  if (!handcrafted) {
+    try {
+      network.setBackend(backend);
+      network.load(weightsPath);
+    } catch (const NnueError& error) {
+      std::cerr << error.what() << "\n";
+      return 2;
+    }
   }
 
   std::string line;
@@ -133,9 +136,9 @@ int main(int argc, char* argv[]) {
         std::cout << indices[i];
       }
       std::cout << "\n";
-    } else if (mode == "board") {
+    } else if (mode == "board" || handcrafted) {
       Evaluator eval;
-      eval.setNetwork(&network);
+      if (!handcrafted) eval.setNetwork(&network);
       eval.init(board);
       std::cout << eval.evaluate(board) << "\n";
     } else {

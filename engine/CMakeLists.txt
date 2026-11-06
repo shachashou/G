@@ -128,6 +128,11 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bootstrap_tests.py")
   set_tests_properties(bootstrap_tests PROPERTIES TIMEOUT 60)
 
+  # Ticket 15/17 follow-up: move-correlation diagnostic pure helpers.
+  add_test(NAME move_correlation_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/move_correlation_tests.py")
+  set_tests_properties(move_correlation_tests PROPERTIES TIMEOUT 60)
+
   # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
   # (when torch is available) the PyTorch float forward.
   add_test(NAME nnue_parity_tests

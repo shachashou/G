@@ -2,7 +2,7 @@
 
 Status: in-progress — M1–M4 完成，M5 推理链完成但胜率门控未达标（工单 10 in-progress），M6 未开始（工单 11 循环代码已交付，待 incumbent）
 
-Last updated: 2026-11-06 — 工单13/14/15/17已关闭；[工单18](issues/18-handcrafted-distillation-and-score-scaling.md) in-progress：Release/CTest **19/19**、阶段A通过；D/S两组均完整1600步/1637392样本曝光/last checkpoint、等算力及冻结参数核验通过。共同204674训练/原28局628验证/G=128；D组Huber/常数比0.964153、MSE/常数比1.031833，S组对应0.962499/0.960636，目标不同不按绝对损失选候选。下一步用户运行 `tools/run_distill18.ps1 -Stage assess-d` 与 `-Stage assess-s`，完成导出保真度和最终整数Top-1；训练不重跑。新口径手工Top-1 43.42%，历史NNUE 2.83%–3.11%，随机3.08%。预算 **1859.813/7200秒**；未跑筛选/正式比赛，16继续blocked、10/12未完成、11依赖未解除，M5仍未达标。
+Last updated: 2026-11-06 — 工单13/14/15/17已关闭；[工单18](issues/18-handcrafted-distillation-and-score-scaling.md) 也按**完整阴性关闭**：D/S两组各1600步、等算力/冻结身份及全量导出数值链通过；628验证与21387主集候选子局面的STE/Python整数/scalar/AVX2逐位一致，但最终Top-1仅 **D3.7879% / S3.1987%**（随机3.0812%、教师43.4203%），均未过第一门控，按局95%区间均跨零。`summary.json`为complete negative，未选择候选、未执行20局筛选或正式比赛。Release/CTest **19/19**；预算 **2244.407/7200秒**。16继续blocked，10/12未完成，11依赖未解除，M5仍未达标；后续需区分全数据拟合不足与候选子局面分布/局部排序监督问题，不自动扩网、补数据或改阈值。
 
 ## Problem Statement
 
@@ -119,7 +119,7 @@ Last updated: 2026-11-06 — 工单13/14/15/17已关闭；[工单18](issues/18-h
 | 2 | 14 约 20 万独立新局面 | done（199,520 条已交付） | 用户启动，1,800 秒硬限未触发（实际 522 秒），新 RNG 流、质量报告与泄漏清单 |
 | 3 | 15 受控训练—导出—对打对照 | done（两组 0/20，无合格候选） | `--max-steps 1600 --checkpoint-policy last` 等算力两组 + 同一冻结集保真度 + `--verify-backend` 20 局换色筛选严格 >65% |
 | 已完成诊断 | 17 优化 / 目标尺度低算力对照 | closed（三组均未达阈值） | 隐藏层确实在学；三组1600步均未达 `0.651487`，未执行20局筛选 |
-| 新训练分支 | 18 蒸馏手工评估 / 修正分值缩放 | in-progress（阶段A通过，D/S完成1600步，导出验收待用户） | 两组等算力/样本曝光/last checkpoint/身份核验通过；下一步导出保真度/最终整数Top-1→条件20局筛选 |
+| 已完成训练分支 | 18 蒸馏手工评估 / 修正分值缩放 | closed（完整阴性，第一Top-1门控失败） | 两组1600步/全量导出数值链通过，最终Top-1为3.7879%/3.1987%，不执行20局筛选；16继续blocked |
 | 4 | 16 正式 M5 验收 | blocked（15 未产出合格候选） | 冻结 100 开局逐个换色共 200 局，严格 >65%；无合格候选不启动 |
 | 随 16 | 10 收尾 | in-progress（未被 15 关闭） | 唯一剩余项即 16；通过才勾选并关闭 |
 | 随 16 | 12 收尾 | in-progress（未被 15 关闭） | 补勾 5 项已满足验收，剩余 3 项仍需 16 产物或新诊断闭环 |
@@ -139,13 +139,13 @@ Last updated: 2026-11-06 — 工单13/14/15/17已关闭；[工单18](issues/18-h
 
 ### 工单 18 的设计与实施边界（2026-11-06）
 
-详细规范、逐文件清单和实施记录见 [18-handcrafted-distillation-and-score-scaling.md](issues/18-handcrafted-distillation-and-score-scaling.md)。新接口已交付，旧实验运行契约保留；新训练实验尚未运行。
+详细规范、逐文件清单和收尾记录见 [18-handcrafted-distillation-and-score-scaling.md](issues/18-handcrafted-distillation-and-score-scaling.md)。新接口及实验已完整交付，旧实验契约保留；18按阴性关闭，未产生合格棋力候选。
 
 - 主方案回归同版本 C++ 手工静态评估（int32 sidecar，行棋方视角），配相同线性 Huber 损失/输出缩放的搜索分对照；不扩网、不生成新自我对弈数据。
-- `score_scale` 仅是旧损失分母，不是推理输出还原。新方案显式定义 `output_gain`，改变整数前向语义，拟用 `GMNNUE02/version=2`；旧 `GMNNUE01` 继续兼容，详细舍入/静态上限契约见工单18。
+- `score_scale` 仅是旧损失分母，不是推理输出还原。新方案已显式定义 `output_gain`、使用 `GMNNUE02/version=2`；旧 `GMNNUE01` 继续兼容，详细舍入/静态上限契约见工单18。
 - 原28局/628条验证成员不重抽；派生新冻结身份，绑定标签/训练清单/合法邻域候选/并列规则。旧42.8%是 optimistic Top-1，手工参照不应称为理论上限；常量模型会被旧算法记为100%，须先重测修正后的参照。
 - 第一门控为最终整数 `top1_tie_adjusted ≥20%`、较历史最佳 `≥10` 个百分点、达到同口径手工参照的一半，并有按对局成簇区间及数值/覆盖检查。满足后仅选一个候选做20局严格 `>65%` 筛选；通过才交16。旧损失阈值不沿用，M5正式200局门控不变。
-- 代码Release/CTest19项及真实限时度量审计已完成；审计3.203秒已计账。本轮真实标签/G冻结、过拟合预检、训练与比赛未运行，10/12/16/11的未完成状态不变。用户下一步命令为 `./tools/run_distill18.ps1 -Stage prepare`，其余阶段见 `tools/M5.md`。
+- 代码Release/CTest19项、全量标签/G=128冻结、64条预检、D/S训练与assess及summary均完成，第一门控失败，不执行筛选或正式比赛。浮点旁路Top-1同样偏低，但它复用QAT master权重，不是独立浮点训练控制；只确认此次最终导出保留了训练STE，不能排除QAT训练本身的问题。10/12/16/11的未完成状态不变；本轮无须继续执行命令，完整证据见 `data/m5/distill18/{summary,completion_report}.json` 和工单18。
 
 ## Testing Decisions
 

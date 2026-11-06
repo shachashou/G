@@ -21,6 +21,7 @@
 #include "eval.h"
 #include "nnue.h"
 #include "movegen.h"
+#include "search.h"
 
 namespace {
 
@@ -59,12 +60,18 @@ int main(int argc, char* argv[]) {
   std::string mode;
   std::string rule = "renju";
   int radius = 1;
+  int searchDepth = 2;
+  int ttMb = 16;
   for (int i = 1; i < argc; ++i) {
     const std::string a(argv[i]);
     if (a == "--weights" && i + 1 < argc) {
       weightsPath = argv[++i];
     } else if (a == "--backend" && i + 1 < argc) {
       backendName = argv[++i];
+    } else if (a == "--depth" && i + 1 < argc) {
+      searchDepth = std::stoi(argv[++i]);
+    } else if (a == "--tt-mb" && i + 1 < argc) {
+      ttMb = std::stoi(argv[++i]);
     } else if (a == "--rule" && i + 1 < argc) {
       rule = argv[++i];
     } else if (a == "--radius" && i + 1 < argc) {
@@ -80,12 +87,17 @@ int main(int argc, char* argv[]) {
   }
   const bool handcrafted = mode == "handcrafted";
   const bool structured = mode == "labels" || mode == "candidates";
+  const bool searchscore = mode == "searchscore";
   if (rule != "renju") { std::cerr << "rule must be renju\n"; return 2; }
-  if ((!handcrafted && !structured && weightsPath.empty()) ||
+  if ((!handcrafted && !structured && !searchscore && weightsPath.empty()) ||
       (mode != "features" && mode != "infer" && mode != "board" &&
-       mode != "bench" && !handcrafted && !structured)) {
+       mode != "bench" && mode != "searchscore" && !handcrafted && !structured)) {
     std::cerr << "usage: nnue_probe [--weights PATH] [--backend avx2|scalar] "
-                 "{features|infer|board|bench|handcrafted|labels|candidates}\n";
+                 "{features|infer|board|bench|handcrafted|labels|candidates|searchscore}\n";
+    return 2;
+  }
+  if (searchscore && (searchDepth < 1 || searchDepth > 8 || ttMb < 1 || ttMb > 256)) {
+    std::cerr << "searchscore needs --depth 1..8 and --tt-mb 1..256\n";
     return 2;
   }
   NnueBackend backend = NnueBackend::Avx2;
@@ -95,7 +107,7 @@ int main(int argc, char* argv[]) {
   }
 
   NnueNetwork network;
-  if (!handcrafted && !structured) {
+  if (!handcrafted && !structured && !searchscore) {
     try {
       network.setBackend(backend);
       network.load(weightsPath);
@@ -104,6 +116,14 @@ int main(int argc, char* argv[]) {
       return 2;
     }
   }
+
+  // Ticket 23: one reusable Search for the whole stdin batch. Each line gets
+  // a clean TT (reset) so the score is reproducible, exactly like datagen.
+  Search search(static_cast<uint64_t>(ttMb) * 1024ull * 1024ull);
+  SearchLimits searchLimits;
+  searchLimits.maxDepth = searchDepth;
+  searchLimits.moveTimeMs = 0;  // fixed depth, no clock
+  searchLimits.useVcf = true;
 
   std::string line;
   while (std::getline(std::cin, line)) {
@@ -142,11 +162,17 @@ int main(int argc, char* argv[]) {
         return 2;
       }
     }
-    Board board(structured ? RuleMode::Renju : RuleMode::Freestyle);
+    Board board(structured || searchscore ? RuleMode::Renju : RuleMode::Freestyle);
     std::string error;
     if (!parseBoard(text, board, stm, error)) {
       std::cerr << error << "\n";
       return 2;
+    }
+    if (searchscore) {
+      search.reset();
+      const SearchResult result = search.findBestMove(board, searchLimits);
+      std::cout << result.score << "\n";
+      continue;
     }
     if (structured) {
       int black = 0, white = 0;

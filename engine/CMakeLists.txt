@@ -123,6 +123,11 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation_freeze_tests.py")
   set_tests_properties(validation_freeze_tests PROPERTIES TIMEOUT 300)
 
+  # Ticket 11: bootstrap loop pure helpers and command constructors.
+  add_test(NAME bootstrap_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bootstrap_tests.py")
+  set_tests_properties(bootstrap_tests PROPERTIES TIMEOUT 60)
+
   # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
   # (when torch is available) the PyTorch float forward.
   add_test(NAME nnue_parity_tests

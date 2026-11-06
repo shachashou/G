@@ -16,6 +16,8 @@ import binpack
 import distill18
 import local_ranking_diagnosis as diagnosis
 import move_correlation as mc
+import local_ranking_fit as local_fit
+import local_ranking_summary as local_summary
 import teacher_labels as tl
 import validation_freeze as vf
 import weights_format as wf
@@ -139,6 +141,36 @@ class LocalRankingTests(unittest.TestCase):
             args.out_dir, args.sample_manifest = tmp/"replay", first/"sample_manifest.json"
             replay = diagnosis.analyse(args)
             self.assertEqual(report["splits"], replay["splits"])
+            # Small synthetic control: two independently initialised fits,
+            # identical data/batches/projection, different forward modes.
+            cfg = {**local_fit.FIT_CONFIG, "parents": 4, "per_head": 2, "steps": 2, "batch_size": 2,
+                   "output_gain": options.target["output_gain"], "loss_normalizer": options.target["output_gain"], "smoke_test": True}
+            fit_dir = tmp/"fit_b"
+            sealed = local_fit.prepare(first, fit_dir, cfg)
+            manifest_path = fit_dir/"fit_manifest.json"
+            float_report = local_fit.fit(manifest_path, "float", fit_dir/"float_initial", "cpu")
+            qat_report = local_fit.fit(manifest_path, "qat", fit_dir/"qat_initial", "cpu")
+            self.assertEqual(float_report["initial_master_sha256"], qat_report["initial_master_sha256"])
+            self.assertEqual(float_report["batch_schedule_sha256"], qat_report["batch_schedule_sha256"])
+            self.assertFalse(float_report["trained_quantized"])
+            self.assertTrue(qat_report["trained_quantized"])
+            self.assertNotEqual(float_report["final_master_sha256"], float_report["initial_master_sha256"])
+            self.assertNotEqual(qat_report["final_master_sha256"], qat_report["initial_master_sha256"])
+            self.assertEqual(qat_report["optimizer_steps"], 2)
+            self.assertEqual(qat_report["samples_exposed"], 4)
+            compare = local_summary.summarise(manifest_path, fit_dir/"float_initial/report.json",
+                          fit_dir/"qat_initial/report.json", fit_dir/"summary.json")
+            self.assertTrue(compare["complete"], compare.get("reason"))
+            self.assertFalse(compare["official_stage_b_complete"])
+            self.assertFalse(compare["eligible_for_screening"])
+            altered_report = dict(qat_report)
+            altered_report["batch_schedule_sha256"] = "wrong-schedule"
+            (fit_dir/"qat_initial/report.json").write_text(json.dumps(altered_report), encoding="utf-8")
+            compare = local_summary.summarise(manifest_path, fit_dir/"float_initial/report.json",
+                          fit_dir/"qat_initial/report.json", fit_dir/"summary.json")
+            self.assertFalse(compare["complete"])
+            with self.assertRaisesRegex(ValueError, "overwrite"):
+                local_fit.fit(manifest_path, "qat", fit_dir/"qat_initial", "cpu")
             sample["train_sources"][0]["record_id"] += 1
             bad = tmp/"bad_sample.json"
             bad.write_text(json.dumps(sample), encoding="utf-8")
@@ -148,6 +180,17 @@ class LocalRankingTests(unittest.TestCase):
             self.assertFalse(diagnosis.read(args.out_dir/"report.json")["complete"])
             with self.assertRaises(ValueError):
                 diagnosis.evaluate(PROBE, ["."*225], [], timeout=10)
+
+    def test_common_master_projection(self):
+        import torch
+        import nnue
+        model = nnue.NNUEModel()
+        with torch.no_grad():
+            model.W0[0, 0] = 100
+            model.b2[0] = -40000
+        self.assertEqual(local_fit.project_master(model), 2)
+        self.assertEqual(float(model.W0[0, 0]), 64)
+        self.assertEqual(float(model.b2[0]), -32768)
 
 
 if __name__ == "__main__":

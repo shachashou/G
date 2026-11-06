@@ -2,7 +2,7 @@
 
 **What to build:** 用现有工单18权重定位静态蒸馏为何没有形成走子知识，再用真正独立训练的float/QAT小规模对照区分量化训练、全数据拟合和候选子局面分布问题。先建立可复核的局部排序能力，再决定下一轮正式训练目标。最终整数搜索着法Top-1仍是进入棋力筛选的第一门控。
 
-**Status:** in-progress（完整规范和阶段A只读分析脚本已交付，合成数据检查通过；真实阶段A待用户启动；B–E训练/控制工具尚未实施或运行）
+**Status:** in-progress（真实阶段A完成并核验；阶段B独立float/QAT工具已实现、clean128条及初始化/批次已封存；真实B训练待用户启动，C–E尚未实施或运行）
 **Category:** diagnosis / controlled training
 **Blocked by:** 无；18已完整阴性关闭，原权重/冻结/标签缓存齐全。
 **Downstream:** 根据证据形成下一轮训练设计；本工单不自动解除16/10/12/11依赖，也不运行正式比赛。
@@ -112,6 +112,18 @@ centered_MSE_ratio = mean(centered_error^2) / variance(h)
 
 交付独立 `float.pt/qat.pt`、固定采样/初始化/目标契约、每组1000步曲线、训练/验证前向与排序结果。诊断checkpoint必须带 `diagnostic_only=true`，不覆盖18模型。
 
+**实现入口（本轮prepare-b已完成，不重跑）**：`trainer/local_ranking_fit.py` 与 `tools/run_distill19_fit.ps1`。批次另用独立CPU generator seed42生成固定1000×64索引，封存batch hash；float/QAT从相同master hash分别训练，无warm start。每组输出在 `data/m5/distill19/fit_b/{float,qat}_initial/` 的 `model.pt` / `report.json`，权重均为diagnostic_only。summary只作分流，不启动C/D或比赛。
+
+```powershell
+.\tools\run_distill19_fit.ps1 -Stage fit-float
+# 第一组完整结束后再执行：
+.\tools\run_distill19_fit.ps1 -Stage fit-qat
+# 两组产物齐全后汇总（不训练）：
+.\tools\run_distill19_fit.ps1 -Stage summary-b
+```
+
+各训练300秒硬限、原账本、各1000步/64000样本曝光；报告包括原128条及两头误差、完整验证、同批父局面的局部排序、参数边界/梯度/激活和训练期/评估期静态上限次数。中断时保留原记录，用 `-RunTag retry1` 输出到新目录；使用重试产物汇总时，通过 `tools/local_ranking_summary.py --float-report ... --qat-report ...` 显式选择，不自动挑最好尝试。后续C/D使用新增模块或新派生契约，不修改已封存B源码后冒用旧manifest。
+
 ## 5. 阶段C：按证据做子局面监督控制（条件执行）
 
 前提：至少一个阶段B路径通过小集拟合，而且同一批父局面的候选排序仍弱（该路径的训练侧静态best excess **<0.25** 或pooled centered_MSE_ratio **>0.75**）。阈值是实验前声明的工程分流标准，不是统计因果保证。
@@ -189,21 +201,41 @@ python tools\budget_run.py --ledger data\m5\budget.json --seconds 600 --out-dir 
 | `tools/run_distill19_analysis.ps1` | 本次新增：项目venv、600秒硬限、原账本、默认/重试tag及原manifest参数。 |
 | `engine/tests/local_ranking_diagnosis_tests.py` | 本次新增：整体偏置与排序分离、常量随机基线、教师并列/逆序、子局面泄漏、真实probe小流水线/身份拒绝/重放。 |
 | `engine/CMakeLists.txt` | 本次注册短测试，不修改已有probe或引擎推理语义。 |
-| 后续 `trainer/local_ranking_fit.py` | 待实施B–D：独立float/QAT初始化与训练、clean小集、固定步数/曝光、D4单变量、阶段门槛。 |
-| 后续 `tools/local_ranking_summary.py` | 待实施B–E：统一比较/阶段资格/分流表/完整阴性、诊断权重状态；不自动启动比赛。 |
+| `trainer/local_ranking_fit.py` / `tools/run_distill19_fit.ps1` | 阶段B已实现：clean128条、独立float/QAT、共同参数投影、固定1000步/64000曝光/批次/初始化、完整验证及阶段门槛；C/D控制待新增模块实施。 |
+| `tools/local_ranking_summary.py` | 阶段B已实现：核对独立训练/等算力/输入身份，区分拟合通过/失败与incomplete，输出下一阶段资格；不自动启动后续训练或比赛。 |
 | 工单19、spec、tools/M5.md | 记录本轮设计/执行边界、阶段A真实产物入口与后续状态。 |
 
 - [x] 完整规范包含可证伪假设、采样/数据身份/视角、分层指标、真正独立float/QAT控制、条件子局面/D4实验、预算/停止/门控边界。
 - [x] 阶段A脚本与具体PowerShell命令已交付，小型真实probe测试通过；没有改动工单18已冻结源码/权重。
-- [ ] 真实阶段A completed报告、原局面与子局面误差/排序分层、扩展D4清单及证据解读。
+- [x] 真实阶段A completed报告、原局面与子局面误差/排序分层、扩展D4清单及证据解读。
 - [ ] 独立float/QAT小规模控制完整运行，或因前置条件失败记录停止原因。
 - [ ] 条件C/D/E按预声明分流执行或明确跳过，提供结论/限制/下一轮单变量建议。
 - [ ] 所有实际耗时入原账本，代码检查通过，最终状态分列implementation/experiment/fit/Top-1，16/10/12/11依赖未被误解除。
 
-本次只交付规范与阶段A工具，**未启动真实分析或新训练**；B–E不会因运行第一步自动开始。本工单可按完整诊断阴性收尾，但不把“脚本写好”当成实验完成。
+初次交付仅包含规范与阶段A工具；最新真实执行状态见下方Progress Notes。运行A不会自动开始B–E。本工单可按完整诊断阴性收尾，但不把“脚本写好”当成实验完成。
 
 ## Implementation Notes（2026-11-06）
 
 阶段A工具和重试入口已实现；CMake注册新短测试后，CTest **20/20**通过（43.41秒）。新增测试覆盖整体偏置不影响centered排序、常量预测等于随机、反序惩罚/教师全并列、父子D4扩展重合、实际C++ probe的小数据完整分析、旧Top-1复现、manifest重放与身份错误拒绝；PowerShell语法及CLI检查通过。
 
 工单18的冻结计划/源码/模型身份再次验证仍有效，没有改动其任何受封存源码。真实19阶段A输出目录尚未创建，预算仍 **2244.407/7200秒**；这次没有消耗真实实验预算，也没有新训练或比赛。
+
+## Progress Notes：阶段A完成与阶段B准备（2026-11-06）
+
+用户运行 `run_distill19_analysis.ps1`，实际 **18.593秒**、completed/退出0/无残留进程。全部输入/脚本/逐例产物SHA256核验通过，D/S在 **30697个状态**（256训练父+628验证父+8426训练子+21387验证子）上STE/scalar/AVX2逐位一致，无静态上限命中，验证搜索Top-1复现18。分析记录及审阅结果保存在 `analysis_initial/report.json` / `stage_a_review.json`。
+
+训练256条有235条primary、21条terminal-tactical；扩展D4计数：parent-parent=0、parent-child=0、child-parent=0、child-child=3，涉及3个完整来源对局。后续排除这3局，clean池 **253个父局面（黑127/白126）**，其中232个primary/8293子局面。原验证28局/628条和全部候选身份均不变；原诊断保留全256条与clean253条两种口径，未静默删样本。
+
+| D组整数路径 | 全256训练父局面 | clean253训练父局面 | 628验证父局面 |
+|---|---:|---:|---:|
+| Huber / 完整训练池常数 | 0.959363 | 0.961985 | 0.964153 |
+| MSE / 完整训练池常数 | 1.051258 | 1.051218 | 1.031833 |
+| 预测标准差 / 教师标准差 | 0.126304 | 0.125425 | 0.130339 |
+| primary候选pooled centered MSE比 | 1.001489 | 1.001518 | 1.000549 |
+| primary候选macro逆序率（并列计0.5） | 0.493305 | 0.493199 | 0.494064 |
+
+原训练允许池中的原局面也拟合较弱，且训练侧局部候选差分接近零差分参照；排除3个重合来源后结论没有实质变化。这不支持将失败**仅**归因于候选子局面分布错位。数据桶难度不同、D4随机训练不保证每条原始朝向都被见到，因此仍不作唯一因果解释。现有QAT master的float旁路依然不能当独立float控制，下一步按预声明进入B，而非直接加入排序损失或扩网。
+
+阶段B已从clean池按冻结顺序封存 **128条/128局、stm各64**，G=128、关闭D4、只用原父局面。manifest SHA256为 `dc83d0010e780acc64e19f6b6a566f4a34b3bc80204891a8f78d954aba836966`；两组共同initial master SHA256 `2078ec51ae18f0cc718e1123221a50ad12a04f5d5f8a11d5835903a1fe836c13`、batch schedule SHA256 `b3f60210a19d4da387bce22fc30b65fb9b8015f1b1c829d2d1c84d8cd88603ae`。同128条训练均值常数为-3498.9453125，Huber常数-107.3870968；两种本集基线分别MSE **4036.751122** / Huber **38.241565**，与阶段A完整训练池分母明确分开。
+
+B实现的短集成测试已覆盖两组独立更新、相同初始化/批次、不同前向、共同投影、最后一步checkpoint、样本曝光、summary可比性/错误拒绝；smoke fixture显式标记，不能当正式B完成。CTest **20/20**通过；未修改18冻结源码。实际float/qat输出目录尚不存在，真实B训练未启动；预算 **2263.000/7200秒**、剩余 **4937.000秒**。下一步用户运行 `run_distill19_fit.ps1 -Stage fit-float`，再运行fit-qat；不要重跑A或prepare-b。

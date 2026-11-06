@@ -118,6 +118,7 @@ body 从偏移 64 起，全部 little-endian、行主序：`W0 int8[450,1024]`�
 - `--quant-forward` 可切换成整数等价的 STE 前向做量化感知微调；`--quant-reg` 控制接近整数的正则强度。
 - `--frozen-validation FILE` / `--train-manifest FILE`（工单 13）：冻结验证身份与按 D4 规范形排除泄漏后的训练清单，追加数据不重切验证集；`export.py` 与 `diagnose.py fidelity` 也接受 `--frozen-validation` 并校验 checkpoint 记录的冻结身份与标签变换。
 - `--max-steps N` / `--checkpoint-policy last`（工单 15）：前者把跨 epoch 的**总**优化更新数固定为 N，history 记录 `optimisation.optimizer_steps` / `samples_exposed` / `cap_reached`，epoch 数不足导致上限未命中会直接报错；后者保存完成相同步数的最终模型而不是按验证损失挑最佳 checkpoint。默认 `best` 保持工单 08 行为。两组等算力对照除训练清单外必须共用全部其余参数。
+- `weight_drift.py`（工单 17 阶段 A）：由 checkpoint 的 `config` + 训练 seed 精确重建初始权重（`reset_parameters()` 用独立 `torch.Generator`），逐层与按 accumulator / L1 / output_head / wdl_bias 分组报告 `relative = ||Δ||₂ / ||初始||₂`、`changed_fraction` 等；只读诊断，不修改 checkpoint 或权重文件。
 - 09 的对齐测试可直接用 `weights_format.read_weights()` + `infer_int()` 作为期望值，或 `NNUEModel.from_quantized_weights()` 重建浮点模型。
 
 ### 已知限制：搜索分标签饱和（工单 10 诊断）

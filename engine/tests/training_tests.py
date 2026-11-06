@@ -289,6 +289,7 @@ def test_torch(tmp: Path) -> None:
     import nnue
     import train
     import export
+    import weight_drift as wd
 
     synthetic = tmp / "torch.binpack"
     write_synthetic(synthetic, games=4, per_game=3)
@@ -375,6 +376,25 @@ def test_torch(tmp: Path) -> None:
         pass
     else:
         check(False, "an unreachable step cap must fail loudly")
+
+    drift_seed = 7
+    initial_model = nnue.NNUEModel(seed=drift_seed)
+    drift_state = {k: v.detach().clone()
+                   for k, v in initial_model.state_dict().items()}
+    drift_state["W2"] = drift_state["W2"] + 3.0
+    fake_ckpt = tmp / "drift_fake.pt"
+    torch.save({"config": vars(initial_model.config),
+                "model_state": drift_state, "epoch": 1,
+                "val_loss": 0.5, "train_args": {"lr": 0.1}}, fake_ckpt)
+    drift = wd.drift_report(fake_ckpt, drift_seed)
+    check(drift["layers"]["W2"]["max_abs_delta"] == 3.0,
+          "ticket 17 weight drift detects an exact known parameter change")
+    check(all(drift["layers"][k]["l2_delta"] == 0.0
+              for k in drift["layers"] if k != "W2"),
+          "rebuilt seed matches every untouched initial layer exactly")
+    check(drift["groups"]["output_head"]["l2_delta"] > 0 and
+          drift["groups"]["accumulator"]["l2_delta"] == 0.0,
+          "layer groups aggregate deltas correctly")
 
     weight_file = tmp / "exported.nnue"
     report_file = tmp / "export_report.json"

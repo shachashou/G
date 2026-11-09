@@ -83,12 +83,6 @@ else()
   endif()
 endif()
 if(GOMOKU_PYTHON)
-  # Ticket 12: bounded diagnostic/paired-gate/budget CLI contracts.
-  add_test(NAME m5_tests
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/m5_tests.py"
-            --engine "$<TARGET_FILE:gomoku_nnue>" --probe "$<TARGET_FILE:nnue_probe>")
-  set_tests_properties(m5_tests PROPERTIES TIMEOUT 120)
-
   add_test(NAME protocol_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_blackbox.py"
             "$<TARGET_FILE:gomoku_nnue>")
@@ -122,26 +116,6 @@ if(GOMOKU_PYTHON)
   add_test(NAME validation_freeze_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/validation_freeze_tests.py")
   set_tests_properties(validation_freeze_tests PROPERTIES TIMEOUT 300)
-
-  # Ticket 11: bootstrap loop pure helpers and command constructors.
-  add_test(NAME bootstrap_tests
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/bootstrap_tests.py")
-  set_tests_properties(bootstrap_tests PROPERTIES TIMEOUT 60)
-
-  # Ticket 15/17 follow-up: move-correlation diagnostic pure helpers.
-  add_test(NAME move_correlation_tests
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/move_correlation_tests.py")
-  set_tests_properties(move_correlation_tests PROPERTIES TIMEOUT 60)
-
-  add_test(NAME distillation_tests
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/distillation_tests.py"
-            "$<TARGET_FILE:nnue_probe>")
-  set_tests_properties(distillation_tests PROPERTIES TIMEOUT 120)
-
-  add_test(NAME local_ranking_diagnosis_tests
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_ranking_diagnosis_tests.py"
-            "$<TARGET_FILE:nnue_probe>")
-  set_tests_properties(local_ranking_diagnosis_tests PROPERTIES TIMEOUT 120)
 
   # Ticket 09: C++ scalar inference / feature indices vs the Python spec and
   # (when torch is available) the PyTorch float forward.

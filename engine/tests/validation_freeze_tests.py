@@ -229,7 +229,7 @@ def test_freeze_and_check(tmp: Path) -> None:
 
 
 def test_frozen_record_ids(tmp: Path) -> None:
-    """The shared helpers keep train.py and diagnose.py on one frozen split."""
+    """The shared helpers keep train.py and export.py on one frozen split."""
     main, _ = build_files(tmp)
     frozen_path = tmp / "frozen_ids.json"
     vf.main(["freeze", "--data", str(main), "--val-fraction", "0.5",

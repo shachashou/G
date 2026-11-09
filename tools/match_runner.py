@@ -19,7 +19,7 @@ Example (PowerShell, using the project venv)::
       --output data/match_results.json --min-win-rate 0.65
 
 ``--min-win-rate`` turns the run into a strength gate (exit code 2 on failure),
-which is what M5/M6 iterations use. The gate compares the score rate
+which is what history-evaluation iterations use. The gate compares the score rate
 ``(wins + 0.5 * draws) / games``.
 """
 from __future__ import annotations
@@ -96,7 +96,6 @@ class MatchConfig:
     openings: Path | None = None
     freeze_openings: Path | None = None
     strict_gate: bool = False
-    m5_gate: bool = False
     verify_backend: bool = False
 
 
@@ -137,8 +136,6 @@ def opening_manifest(cfg: MatchConfig) -> dict:
                         for v in p) for p in position) or
                 len({tuple(p) for p in position}) != len(position)):
             raise InvalidMatch("malformed frozen opening")
-    if cfg.m5_gate and len({json.dumps(p) for p in positions}) != count:
-        raise InvalidMatch("formal M5 needs 100 distinct openings")
     return manifest
 
 
@@ -355,10 +352,10 @@ def play_game(cfg: MatchConfig, game_index: int, opening=None) -> dict:
         for label, engine in engines.items():
             try:
                 engine.start(cfg.rule, cfg.timeout_turn)
-                if cfg.m5_gate or cfg.verify_backend:
+                if cfg.verify_backend:
                     about[label] = check_backend(engine, engine.spec)
             except EngineFailure as failure:
-                if cfg.m5_gate or cfg.verify_backend:
+                if cfg.verify_backend:
                     raise InvalidMatch(f"{label}: startup verification failed: {failure}") from failure
                 anomaly(failure.kind, failure.detail, label, 0)
                 result = offender_loses(label)
@@ -492,7 +489,6 @@ def run_matches(cfg: MatchConfig) -> dict:
             "max_plies": cfg.max_plies,
             "min_win_rate": cfg.min_win_rate,
             "paired_openings": cfg.paired_openings,
-            "m5_gate": cfg.m5_gate,
             "verify_backend": cfg.verify_backend,
             "strict_gate": cfg.strict_gate,
         },
@@ -512,13 +508,6 @@ def run_matches(cfg: MatchConfig) -> dict:
         report["gate"] = gate_result(wins, draws, len(games), cfg.min_win_rate,
                                      cfg.strict_gate)
         report["gate"]["passed"] &= report["complete"]
-    if cfg.m5_gate:
-        # Detect changed files as well as backend fallback during the match.
-        if any(engine_identity(spec) != provenance[spec.label]
-               for spec in (cfg.engine_a, cfg.engine_b)):
-            report["complete"] = False
-            report["invalid_reason"] = "engine/weights changed during match"
-            report["gate"]["passed"] = False
     return report
 
 
@@ -568,24 +557,13 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
     parser.add_argument("--freeze-openings", type=Path,
                         help="write opening JSON without running engines")
     parser.add_argument("--strict-gate", action="store_true", help="use > instead of >=")
-    parser.add_argument("--m5-gate", action="store_true",
-                        help="formal 200-game paired strict M5 acceptance")
     parser.add_argument("--verify-backend", action="store_true",
-                        help="ticket 15: verify ABOUT eval/nnue_backend in "
-                             "non-formal screening matches too; a silent "
+                        help="verify ABOUT eval/nnue_backend; a silent "
                              "handcrafted fallback invalidates the report")
     args = parser.parse_args(argv)
 
     if args.games < 1:
         parser.error("--games must be >= 1")
-    if args.m5_gate:
-        args.paired_openings = True
-        args.strict_gate = True
-        args.min_win_rate = 0.65
-        args.verify_backend = True
-        if (args.games != 200 or args.rule != 2 or args.timeout_turn != 0 or
-                args.max_plies != 225 or not args.openings):
-            parser.error("M5 needs --games 200 --openings FILE, Renju, full games, no clock")
     if args.paired_openings and args.games % 2:
         parser.error("paired openings require an even game count")
     if not 0 <= args.opening_plies <= MAX_OPENING_PLIES:
@@ -605,21 +583,6 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         argv_b = split_command(args.engine_b)
     except ValueError as exc:
         parser.error(str(exc))
-    if args.m5_gate:
-        # Only the evaluator may differ. The build's Search default is 64MB TT.
-        def search_args(argv):
-            rest = list(argv[1:])
-            for option in ("--nnue", "--nnue-backend"):
-                if option in rest:
-                    i = rest.index(option)
-                    del rest[i:i + 2]
-            return rest
-        if (search_args(argv_a) != ["--depth", "2"] or argv_b[1:] != ["--depth", "2"]
-                or "--nnue" not in argv_a or
-                Path(argv_a[0]).resolve() != Path(argv_b[0]).resolve() or
-                ("--nnue-backend" in argv_a and
-                 argv_a[argv_a.index("--nnue-backend") + 1] != "avx2")):
-            parser.error("M5: same exe, A --depth 2 --nnue PATH [--nnue-backend avx2], B --depth 2")
 
     return MatchConfig(
         engine_a=EngineSpec("A", args.engine_a, argv_a),
@@ -638,7 +601,6 @@ def parse_args(argv: list[str] | None = None) -> MatchConfig:
         openings=args.openings,
         freeze_openings=args.freeze_openings,
         strict_gate=args.strict_gate,
-        m5_gate=args.m5_gate,
         verify_backend=args.verify_backend,
     )
 

@@ -116,8 +116,8 @@ def frozen_validation_record_ids(game_map, frozen: dict) -> list[int]:
 def frozen_train_record_ids(game_map, frozen: dict) -> list[int]:
     """Train-side records: drop validation games AND D4-leaking whole games.
 
-    Shared by train.py's dataset construction and diagnose.py's fidelity
-    report so both evaluate against the very same frozen identity.
+    Shared by train.py's dataset construction and export.py's calibration
+    sampling so both evaluate against the very same frozen identity.
     """
     val_games = set(frozen["split"]["validation_games"])
     excluded = set(frozen["leakage"]["excluded_train_games"])
@@ -127,9 +127,10 @@ def frozen_train_record_ids(game_map, frozen: dict) -> list[int]:
 
 def load_frozen(path: str | Path) -> dict:
     value = json.loads(Path(path).read_text(encoding="utf-8"))
-    if value.get("schema") not in (1, 2):
+    if value.get("schema") != SCHEMA:
         raise SystemExit(f"frozen validation schema {value.get('schema')!r} "
-                         f"!= {SCHEMA}: regenerate with trainer/freeze_validation.py")
+                         f"!= {SCHEMA}: regenerate with "
+                         f"validation_freeze.py freeze")
     for section in ("data", "split", "leakage", "label_transform", "baseline"):
         if section not in value:
             raise SystemExit(f"frozen validation file misses section {section!r}")
@@ -333,13 +334,6 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--manifest", default=None,
                        help="also write a train manifest for train.py")
     check.set_defaults(func=cmd_check)
-
-    derive = sub.add_parser("derive", help="ticket 18: keep membership, derive linear targets/metric identity")
-    from distill18 import add_prepare_args, prepare
-    add_prepare_args(derive)
-    derive.add_argument("--out-dir", type=Path, required=True)
-    derive.add_argument("--timeout", type=float, default=120)
-    derive.set_defaults(func=lambda args: (prepare(args), 0)[1])
 
     args = parser.parse_args(argv)
     return args.func(args)

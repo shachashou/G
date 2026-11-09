@@ -36,8 +36,8 @@ import binpack  # noqa: E402  (trainer/ is on sys.path by design)
 from run_support import file_identity  # noqa: E402  (tools/ is on sys.path)
 
 DEFAULT_EXE = ROOT / "build" / "engine" / "Release" / "datagen.exe"
-DEFAULT_TARGET = 10_000_000
-DEFAULT_BUDGET_HOURS = 12.0
+DEFAULT_TARGET = 100_000
+DEFAULT_BUDGET_HOURS = 1.0
 STATS_RE = re.compile(r"(\w+)=([^\s]+)")
 
 
@@ -383,8 +383,11 @@ def add_search_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--opening-temp", type=float, default=1.0)
     parser.add_argument("--max-plies", type=int, default=225)
     parser.add_argument("--vcf-nodes", type=int, default=5000)
-    parser.add_argument("--target", type=int, default=DEFAULT_TARGET)
-    parser.add_argument("--budget-hours", type=float, default=DEFAULT_BUDGET_HOURS)
+    parser.add_argument("--target", type=int, default=DEFAULT_TARGET,
+                        help="throughput-calibration reference size; not a "
+                             "training precondition")
+    parser.add_argument("--budget-hours", type=float, default=DEFAULT_BUDGET_HOURS,
+                        help="throughput-calibration reference budget")
 
 
 def main(argv: list[str] | None = None) -> int:

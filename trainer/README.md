@@ -22,11 +22,11 @@
 | 验证 | 冻结验证身份与防泄漏工具 | 保持追加与淘汰数据时验证身份不变 |
 | 导出 | 格式校验、整数参考和数值对拍 | 新架构使用可识别的新格式或版本 |
 
-现有模型、训练器和权重格式仍包含旧结构；现有教师标签工具使用本项目手工评估，并非 Rapfi。旧实验模块存在共享依赖，后续先解除依赖再移除，不能只删除入口文件。
+现有模型、训练器和权重格式仍包含旧结构；旧的手工评估标签与线性目标已移除，教师标签将按新工单接入 Rapfi。
 
 ## 环境与现有命令
 
-Python 使用项目 .venv；依赖列表见[requirements.txt](requirements.txt)。在已安装依赖的项目环境中，可检查当前入口：
+Python 使用项目 .venv；依赖列表见[requirements.txt](../requirements.txt)。在已安装依赖的项目环境中，可检查当前入口：
 
 ~~~powershell
 ./.venv/Scripts/python.exe trainer/train.py --help

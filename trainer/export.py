@@ -48,9 +48,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report", type=Path,
                         default=ROOT / "weights" / "export_report.json")
     parser.add_argument("--samples", type=int, default=64)
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--no-calibrate", action="store_true")
-    group.add_argument("--calibrate", action="store_true", help="explicitly enable v2 training-side calibration")
+    parser.add_argument("--no-calibrate", action="store_true")
     parser.add_argument("--frozen-validation", type=Path, default=None,
                         help="ticket 13: parity/calibration sampling is "
                              "restricted to the frozen train side")
@@ -123,11 +121,10 @@ def calibrate_bias(weights: dict, float_eval, integer_eval, heads) -> list[int]:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     model, payload = load_model(args.checkpoint)
-    linear = payload.get("target_contract") is not None
-    calibrate = not args.no_calibrate and (not linear or args.calibrate)
+    calibrate = not args.no_calibrate
     frozen_identity = None
     allowed_ids = None
-    if args.frozen_validation is not None and not linear:
+    if args.frozen_validation is not None:
         frozen = vf.load_frozen(args.frozen_validation)
         vf.verify_frozen_data(frozen, args.data)
         frozen_identity = file_identity(args.frozen_validation)
@@ -139,21 +136,7 @@ def main(argv: list[str] | None = None) -> int:
             allowed_ids = vf.frozen_train_record_ids(reader.game_index_map(),
                                                      frozen)
     weights = model.quantized_weights()
-    if linear:
-        import targets
-        train_set, val_set, _, _ = targets.checkpoint_datasets(payload, args.data, args.frozen_validation)
-        try:
-            parts = train_set.datasets if hasattr(train_set, "datasets") else [train_set]
-            import itertools
-            stride = max(1, len(train_set) // args.samples)
-            pool = (sample[:3] for part in parts for sample in part.iter_samples())
-            samples = list(itertools.islice(pool, 0, stride * args.samples, stride))
-            frozen_identity = file_identity(args.frozen_validation)
-        finally:
-            train_set.close()
-            val_set.close()
-    else:
-        samples = sample_positions(args.data, args.samples, allowed_ids)
+    samples = sample_positions(args.data, args.samples, allowed_ids)
 
     x = torch.tensor([features.dense_vector(indices) for indices, _, _ in samples],
                      dtype=torch.float32)
@@ -197,7 +180,6 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "complete": True,
         "checkpoint_identity": file_identity(args.checkpoint),
-        "target_contract_identity": payload.get("target_contract_identity"),
         "original_vs_final": error_stats(float_eval, integer_eval),
         "trained_forward_vs_final": error_stats(calibration_reference, integer_eval),
         "checkpoint": str(args.checkpoint.resolve()),

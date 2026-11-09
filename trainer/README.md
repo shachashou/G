@@ -1,149 +1,36 @@
-# trainer — Python 训练端（M4）
+# trainer：训练与导出
 
-| 文件 | 职责 |
-|---|---|
-| `binpack.py` | 工单 07 的二进制记录读端（纯标准库 `mmap`）：魔数/版本校验、64 字节记录解码、按对局切分、全量校验、分片合并 |
-| `features.py` | **450 维特征索引与 D4 八重对称的权威规范**（纯标准库，供 09 对齐） |
-| `weights_format.py` | **量化权重文件格式与整数参考前向**（纯标准库，供 09 对齐） |
-| `dataset.py` | binpack mmap 数据集：按完整对局划分 train/val、DataLoader 内实时 D4 增广 |
-| `nnue.py` | PyTorch 模型：450 → 累加器 1024 → ClippedReLU → L1 15 → ClippedReLU → 双输出头 1 |
-| `train.py` | 训练脚本：`MSE(tanh(score/400)) + CE(WDL)` 混合损失、收敛曲线 JSON、最佳 checkpoint |
-| `export.py` | 量化导出 + 回读自校验 + 输出头偏置校准 + float/int 一致性报告 |
-| `requirements.txt` | `numpy` + CUDA 版 `torch`（本项目 Python 一律走 `.venv`） |
+项目处于重设计阶段，目标以[主规格](../.scratch/gomoku-nnue/spec.md)为准，术语见[术语表](../GLOSSARY.md)。
 
-## 依赖安装
+## 新训练目标
 
-```powershell
-cd e:\G
-py -3.12 -m venv .venv          # 已有则跳过
-.\.venv\Scripts\python.exe -m pip install -r trainer\requirements.txt `
-    --extra-index-url https://download.pytorch.org/whl/cu124
-.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
+- 网络为450 → 1024 → 64 → 32 → 1，单价值输出。
+- 教师启动学习归一化的 Rapfi 评分；自主阶段学习完整对局的实际胜负。
+- 使用 MSE 或 SmoothL1，并记录标签来源、视角、尺度及训练配置。
+- 八种 D4 空间变换在线增广；Renju 不允许把交换黑白作为等价增广。
+- 持续从有容量上限的样本池训练，无需先收集满数百万条。
+- 按对局冻结验证集并排除 D4 等价泄漏。
+- 分别验证训练原模型、量化导出模型与 C++ 推理；模型正式晋级依据历史版本对战。
 
-`torch==2.6.0+cu124` 对应本机 RTX 4080 SUPER；CPU-only 机器可改用 `pip install torch==2.6.0 numpy`，脚本会自动退到 CPU。`engine/tests/training_tests.py` 的规范/格式/划分测试**不需要 torch** 即可运行，装好依赖后会自动追加模型、训练、导出的实测部分。
+## 可复用基础与待替换内容
 
----
+| 能力 | 现有基础 | 实施边界 |
+|---|---|---|
+| 特征与对称 | 450维占位及 D4 变换 | 核验新单输出价值契约 |
+| 数据 | 定长记录、数据集、对局划分 | 补标签来源、版本、战术状态与滚动样本池 |
+| 训练 | PyTorch、checkpoint和训练记录 | 替换旧网络、目标和批处理编排 |
+| 验证 | 冻结验证身份与防泄漏工具 | 保持追加与淘汰数据时验证身份不变 |
+| 导出 | 格式校验、整数参考和数值对拍 | 新架构使用可识别的新格式或版本 |
 
-## 跨语言契约 ①：450 维特征索引（C++ ↔ Python）
+现有模型、训练器和权重格式仍包含旧结构；现有教师标签工具使用本项目手工评估，并非 Rapfi。旧实验模块存在共享依赖，后续先解除依赖再移除，不能只删除入口文件。
 
-权威实现 `features.py`，规范如下（**不做视角翻转**）：
+## 环境与现有命令
 
-- 格子索引 `cell = y * 15 + x`，`x` 向右、`y` 向下，均 `0..14`；
-- 黑子 → 特征 `0..224`，索引 = `cell`；白子 → 特征 `225..449`，索引 = `225 + cell`；
-- 行棋方**不是特征**，而是选择输出头：`stm = 0`（黑走）/ `1`（白走）；
-- 稀疏索引集合 = 所有有子格子的特征索引，升序；`binpack.Record.feature_indices()` 与此完全一致；
-- 增量累加器语义：落子 = 加上对应 `W0` 行，撤子 = 减去，`acc` 存 int16 饱和值。
+Python 使用项目 .venv；依赖列表见[requirements.txt](requirements.txt)。在已安装依赖的项目环境中，可检查当前入口：
 
-### D4 八重对称（`t = 0..7`）
+~~~powershell
+./.venv/Scripts/python.exe trainer/train.py --help
+./.venv/Scripts/python.exe trainer/export.py --help
+~~~
 
-| t | 名称 | `(x, y) → (x', y')` |
-|---:|---|---|
-| 0 | 恒等 | `(x, y)` |
-| 1 | 顺时针 90° | `(14 - y, x)` |
-| 2 | 180° | `(14 - x, 14 - y)` |
-| 3 | 顺时针 270° | `(y, 14 - x)` |
-| 4 | 左右镜像 | `(14 - x, y)` |
-| 5 | 镜像 + 90° | `(14 - y, 14 - x)` |
-| 6 | 上下镜像 | `(x, 14 - y)` |
-| 7 | 主对角转置 | `(y, x)` |
-
-`transform_cell(cell,t)` / `transform_feature(index,t)` / `transform_sparse(indices,t)` 是权威实现；`symmetry_table()` 给出 dense 向量的 gather 置换。Renju 规则（五连/长连/四四/三三）只依赖直线几何，在 D4 下不变，因此增广时**分数与 WDL 标签都不变换**，只置换特征索引。验证集按完整对局划分，避免同一局面的镜像泄漏进验证集。
-
----
-
-## 跨语言契约 ②：量化前向（09 的 C++ 标量实现必须逐位复现）
-
-常量：`QA = 127`（累加器 ClippedReLU 上界）、`QB = 64`（L1 ClippedReLU 上界）、`SCORE_SCALE = 400`、`WEIGHT_CLAMP = 64`（int8 权重绝对值上限）。
-
-```
-acc[j] = clamp_i16( b0[j] + Σ_{i∈sparse} W0[i,j] )     # int16 饱和，C++ 用 int32 累加再饱和
-a[j]   = clamp(acc[j], 0, QA)                          # ClippedReLU
-z[k]   = Σ_j a[j] * W1[j,k]                            # int32
-zq[k]  = round_div(z[k], QA) + b1[k]
-a2[k]  = clamp(zq[k], 0, QB)                           # ClippedReLU
-y      = Σ_k a2[k] * W2[h,k]        h = stm (0 黑 / 1 白，双输出头)
-eval   = round_div(y, QB) + b2[h]                       # 引擎分数单位
-```
-
-- `round_div(n,d) = sign(n) * ((2*|n| + d) // (2*d))`，即四舍五入、**半数远离零**。C++ 不能用普通整数除法（负数向零截断）。
-- 权重全为整数：`W0/W1/W2` int8（限幅 ±64）、`b0/b1/b2` int16。中间整数上界约 `1024*127*64 ≈ 8.3M < 2^24`，float32 也能精确表示，因此 PyTorch 的 `forward(..., quantized=True)`（STE 量化 + STE round_div）与 `weights_format.infer_int()` **逐位一致**。
-- 训练默认用连续权重 + 普通除法的可微前向；整数化权重初始化与量化正则让训练后取整几乎无损；导出时用采样局面的中位数差校准两个输出头的 `b2`。`export_report.json` 记录 float vs 整数推理的 MAE/最大误差，并给出 09 的对齐容差建议。
-
-### 权重文件格式 `GMNNUE01` v1（64 字节头 + body）
-
-| 偏移 | 类型 | 字段 |
-|---:|---|---|
-| 0..7 | `8s` | magic `b"GMNNUE01"` |
-| 8..11 | `u32` | version = 1 |
-| 12..15 | `u32` | header_size = 64 |
-| 16..19 | `u32` | n_features = 450 |
-| 20..23 | `u32` | n_acc = 1024 |
-| 24..27 | `u32` | n_l1 = 15 |
-| 28..31 | `u32` | n_heads = 2 |
-| 32..35 | `u32` | QA = 127 |
-| 36..39 | `u32` | QB = 64 |
-| 40..43 | `u32` | score_scale = 400 |
-| 44..47 | `u32` | weight_clamp = 64 |
-| 48..51 | `u32` | FNV-1a 32 位校验（仅 body）：`h=0x811c9dc5; h=(h^b)*0x01000193 (mod 2^32)` |
-| 52..63 | 12 × `u8` | 保留，必须为 0 |
-
-body 从偏移 64 起，全部 little-endian、行主序：`W0 int8[450,1024]`、`b0 int16[1024]`、`W1 int8[1024,15]`、`b1 int16[15]`、`W2 int8[2,15]`、`b2 int16[2]`，合计 **478,272 字节**，整文件 478,336 字节。`read_weights()` 校验魔数/版本/尺寸/常量/保留位/校验和/权重范围，任一不符都抛 `WeightFormatError`。
-
----
-
-## 用法
-
-```powershell
-# 训练（自动选 CUDA；--history 里逐 epoch 记录 train/val loss 曲线）
-.\.venv\Scripts\python.exe trainer\train.py `
-    --data data\raw\round1\train.binpack `
-    --output weights\nnue_v1.pt --history weights\training_history.json `
-    --epochs 10 --batch-size 1024 --val-fraction 0.1 --seed 42
-
-# 量化导出 + 回读自校验 + float/int 对齐报告
-.\.venv\Scripts\python.exe trainer\export.py `
-    --checkpoint weights\nnue_v1.pt --data data\raw\round1\train.binpack `
-    --output weights\nnue_v1.nnue --report weights\export_report.json --samples 64
-
-# 快速冒烟（小样本 / CPU / 2 epoch）
-.\.venv\Scripts\python.exe trainer\train.py --data data\raw\round1\train.binpack `
-    --epochs 2 --batch-size 256 --limit 4096 --device cpu
-```
-
-- 损失：`MSE(tanh(eval/400), tanh(score/400)) + wdl_weight * CE(WDL) + quant_reg * 量化正则`；WDL 三类 logits 由单一 eval 派生 `[-eval/T, 0, +eval/T] + wdl_bias`，类别顺序 `[行棋方负, 和, 行棋方胜]`，与 binpack 里的 WDL 编码一致。`T = 100`（`--wdl-temperature`）让 CE 项有有效梯度；`wdl_bias` 是**训练专用的三维类别先验参数，不写入权重文件**——没有它，单标量对称 logits 的 CE 下限约 `ln(3)`，损失几乎不下降。推理网络始终只输出 1 个标量。
-- 默认 `--epochs 20 --lr 0.1 --batch-size 1024 --wdl-weight 0.2 --quant-reg 0.05 --val-fraction 0.1`。
-- `--score-clip N`（默认 0 = 关闭）：把 datagen 饱和的 ±32767 搜索分裁剪到 ±N 后再进 `tanh`，属于**可选数据清洗**，损失形式不变。`dataset.clip_score()` 对 train/val 样本与 `iter_samples()` 同时生效，取值记入 history 的 `config.score_clip`。工单 10 实测在 7,208 条基准数据上把 val loss `0.854 → 0.690`，但并未解决评估拟合问题（见下）。
-- `--val-fraction` 按**完整对局**随机抽取（确定性由 `--seed` 控制），`dataset.assert_disjoint()` 会在训练前断言两个 split 无对局交集。
-- `--quant-forward` 可切换成整数等价的 STE 前向做量化感知微调；`--quant-reg` 控制接近整数的正则强度。
-- `--frozen-validation FILE` / `--train-manifest FILE`（工单 13）：冻结验证身份与按 D4 规范形排除泄漏后的训练清单，追加数据不重切验证集；`export.py` 与 `diagnose.py fidelity` 也接受 `--frozen-validation` 并校验 checkpoint 记录的冻结身份与标签变换。
-- `--max-steps N` / `--checkpoint-policy last`（工单 15）：前者把跨 epoch 的**总**优化更新数固定为 N，history 记录 `optimisation.optimizer_steps` / `samples_exposed` / `cap_reached`，epoch 数不足导致上限未命中会直接报错；后者保存完成相同步数的最终模型而不是按验证损失挑最佳 checkpoint。默认 `best` 保持工单 08 行为。两组等算力对照除训练清单外必须共用全部其余参数。
-- `weight_drift.py`（工单 17 阶段 A）：由 checkpoint 的 `config` + 训练 seed 精确重建初始权重（`reset_parameters()` 用独立 `torch.Generator`），逐层与按 accumulator / L1 / output_head / wdl_bias 分组报告 `relative = ||Δ||₂ / ||初始||₂`、`changed_fraction` 等；只读诊断，不修改 checkpoint 或权重文件。
-- 09 的对齐测试可直接用 `weights_format.read_weights()` + `infer_int()` 作为期望值，或 `NNUEModel.from_quantized_weights()` 重建浮点模型。
-
-### 已知限制：搜索分标签饱和（工单 10 诊断）
-
-`binpack` 的搜索分含大量 mate / 饱和值：本机 `bench-d4` 基准集 17.9% 为 ±32767，只有 19.7% 落在 ±600 内，`tanh(score/400)` 会把它们压成近似常数。裁剪到 ±600 后的目标方差 `0.671`（即「常数预测」的 MSE 基线），而当前 450→1024→15→1 量化架构训练 100 epoch 后 val_mse 仍 `0.564`——只解释了约 16% 的目标方差；导出权重输出集中在 `[-168, 79]`，M5 胜率门控 `0/100`。延长训练、`--score-clip`、调大 lr / 去掉量化正则三组实验均未改善。**这段早期记录曾把瓶颈归因于模型容量或训练目标设计；工单 12 起该推断已被下调为未证实的解释之一**——数据覆盖不足、全数据下的优化/特征/目标尺度限制、训练目标与棋力指标不同步尚未区分，当前以 `spec.md` 与工单 13–16 为准。改动网络维度会改变 `GMNNUE01` 的固定文件布局与工单 09 的跨语言对齐契约，须作为独立设计决策处理。
-
-## 本机实测（RTX 4080 SUPER，torch 2.6.0+cu124）
-
-工单18新增线性目标与缩放链：`teacher_labels.py` 用 C++ 静态评估生成按原 record index 对齐的 int32 sidecar；`targets.py` 集中管理 D/S Huber契约，`distill18.py` 负责派生冻结/基线/预检。`train.py --target-contract FILE` 要求新freeze及同一训练池，禁用旧tanh/WDL/量化正则；1600步正式实验还检查封存的阶段A。旧CLI默认仍为v1训练。
-
-新 `GMNNUE02/version=2` 沿用478336字节与权重body，header offset52存 `output_gain`（1..1024的二次幂），56..63为零。推理为 `clamp(round_div(G*y,QB)+G*b2,-900000,900000)`，在最终舍入前乘G；offset40的legacy `score_scale`不作输出还原。v1读取和数值行为继续保留。v2 QAT默认不做无必要bias校准，校准如显式开启必须在内部b2单位修正。
-
-`diagnose.py fidelity --all-validation --weights ... --export-report ...` 对v2按checkpoint绑定的目标报告原始分MAE/RMSE、归一化MSE/Huber和完整训练池常数，并验证所有主集候选子局面的Python整数/scalar/AVX2。新排名用合法邻域候选与并列组均匀命中，不把全同分算作Top-1成功。完整启动命令见 [tools/M5.md](../tools/M5.md) 的工单18段。
-
-以下为历史v1训练记录，不代表工单18的新目标或棋力候选。
-
-用 07 生成的 `data/raw/bench-d4/train.binpack`（280 局 / 7208 局面，depth 4）跑默认配置：
-
-```
-device: cuda | 6,580 train / 628 val records, 280 games (28 held out)
-epoch  1 | train 1.02475 | val 0.96091 (mse 0.77754 ce 0.91686)
-epoch 10 | train 0.89241 | val 0.87141 (mse 0.73043 ce 0.70490)
-epoch 18 | train 0.87198 | val 0.85424 (best)
-epoch 20 | train 0.86661 | val 0.86081
-best val loss 0.85424 @ epoch 18; converged=True
-```
-
-验证损失 `0.96091 → 0.85424`（-11.1%），CE `0.91686 → 0.70970`（-22.6%），逐 epoch 曲线留在 `weights/training_history.json` 的 `loss_curve`。导出 `weights/nnue_v1.nnue`（478,336 字节）：回读魔数/版本/FNV-1a/维度全通过、整数前向重放一致；`export_report.json` 记录 `float vs integer MAE 0.356 / max 0.978`、`STE vs integer max 0.0000`（64/64 逐位一致），输出头偏置校准 `[-3, -45]`，给 09 的建议容差 `≤ 2`。
+这些是当前实现的命令，不是新训练流水线的完成证明。新流程的默认参数和客户端操作随实施工单补充。

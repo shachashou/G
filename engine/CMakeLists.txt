@@ -358,5 +358,16 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(gui_model_smoke PROPERTIES
     TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  add_test(NAME history_evaluation_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/history_evaluation_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(history_evaluation_tests PROPERTIES TIMEOUT 300)
+
+  add_test(NAME gui_history_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_history_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_history_smoke PROPERTIES
+    TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 

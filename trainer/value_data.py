@@ -58,10 +58,23 @@ class DataBundle:
     train: list[Sample]
     validation: list[Sample]
     identity: dict
+    previous_positions: tuple[str, ...] = ()
+    previous_sources: tuple[str, ...] = ()
 
     def summary(self) -> dict:
         return {"train": len(self.train), "validation": len(self.validation),
                 **self.identity}
+
+
+def training_positions(bundle: DataBundle) -> dict:
+    """Conservative exclusion set, including prior resumed training pools."""
+    return {
+        "format": "GMVALUE-TRAINING-POSITIONS1",
+        "d4_keys": sorted(set(bundle.previous_positions) | {
+            canonical_key(s.cells, s.side) for s in bundle.train + bundle.validation}),
+        "source_ids": sorted(set(bundle.previous_sources) | {
+            s.source_id for s in bundle.train + bundle.validation}),
+    }
 
 
 def record_target(record: dict) -> float:

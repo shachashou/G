@@ -31,7 +31,7 @@ import math
 import random
 import sys
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -112,7 +112,7 @@ def evaluate(model: ValueNet, samples, device: str, batch_size: int,
 
 def _save_checkpoint(path: Path, *, model: ValueNet, optimizer,
                      step: int, config: TrainConfig, identity: dict,
-                     history: list[dict], device: str) -> None:
+                     history: list[dict], device: str, training_positions: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "format": CHECKPOINT_FORMAT,
@@ -122,6 +122,7 @@ def _save_checkpoint(path: Path, *, model: ValueNet, optimizer,
         "value_contract": "black-absolute-tanh-v1",
         "config": config.to_dict(),
         "data_identity": identity,
+        "training_positions": training_positions,
         "step": int(step),
         "device": device,
         "model_state": model.state_dict(),
@@ -176,6 +177,12 @@ def export_model(model: ValueNet, bundle: value_data.DataBundle,
     scale = 1 << config.ea
     quantized = vf.quantize_parameters(model.flat_parameters(),
                                        ea=config.ea, act_max=config.act_max)
+    # Freeze the positions actually used by this export, rather than relying
+    # on the mutable pool remaining available when a candidate is evaluated.
+    exclusion_path = out_dir / "training_positions.json"
+    exclusion_path.write_text(json.dumps(value_data.training_positions(bundle),
+                                         sort_keys=True), encoding="utf-8")
+    exclusion_sha = hashlib.sha256(exclusion_path.read_bytes()).hexdigest()
     metadata = {
         "model_id": model_id(model),
         "arch": ARCH,
@@ -192,6 +199,8 @@ def export_model(model: ValueNet, bundle: value_data.DataBundle,
             "smooth_l1_beta": config.smooth_l1_beta,
             "device": config.device,
             "data_identity": bundle.identity,
+            "evaluation_exclusion": {"file": exclusion_path.name,
+                                     "sha256": exclusion_sha},
             "created_at": _now(),
         },
     }
@@ -275,6 +284,11 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
     resumed_from = None
     if config.resume:
         checkpoint = _load_checkpoint(config.resume, config)
+        prior = checkpoint.get("training_positions", {})
+        if prior.get("format") != "GMVALUE-TRAINING-POSITIONS1":
+            raise ValueError("checkpoint lacks frozen training positions; restart from zero")
+        bundle = replace(bundle, previous_positions=tuple(prior["d4_keys"]),
+                         previous_sources=tuple(prior["source_ids"]))
         model.load_state_dict(checkpoint["model_state"])
         model.to(device)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -282,6 +296,7 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
         history = list(checkpoint.get("history", []))
         resumed_from = str(config.resume)
 
+    positions = value_data.training_positions(bundle)
     out_dir = Path(config.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     history_path = out_dir / "train_history.jsonl"
@@ -346,12 +361,12 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
                 _save_checkpoint(best_path, model=model, optimizer=optimizer,
                                  step=step + 1, config=config,
                                  identity=bundle.identity, history=history,
-                                 device=device)
+                                 device=device, training_positions=positions)
         if (step + 1) % max(1, config.checkpoint_every) == 0:
             _save_checkpoint(last_path, model=model, optimizer=optimizer,
                              step=step + 1, config=config,
                              identity=bundle.identity, history=history,
-                             device=device)
+                             device=device, training_positions=positions)
 
     completed_steps = step + 1 if steps > start_step else start_step
     if steps == start_step:
@@ -359,7 +374,7 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
     _save_checkpoint(last_path, model=model, optimizer=optimizer,
                      step=completed_steps, config=config,
                      identity=bundle.identity, history=history,
-                     device=device)
+                     device=device, training_positions=positions)
 
     summary = {
         "format": "GMVALUE-TRAIN1",

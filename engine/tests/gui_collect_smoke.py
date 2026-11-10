@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,7 +26,8 @@ from sample_pool import SamplePool  # noqa: E402
 
 EXE = sys.argv[1] if len(sys.argv) > 1 else str(
     ROOT / "build" / "engine" / "gomoku_nnue.exe")
-POOL = ROOT / "data" / "pool" / "pool.sqlite3"
+TEMP = tempfile.TemporaryDirectory(prefix="gui-collect-")
+POOL = Path(TEMP.name) / "pool.sqlite3"
 
 failures = 0
 
@@ -60,7 +62,9 @@ def main():
         print("  SKIP teacher not installed")
         return 77
     app = QApplication.instance() or QApplication([sys.argv[0]])
-    window = gomoku_gui.MainWindow(EXE, 100)
+    window = gomoku_gui.MainWindow(EXE, 100, pool=POOL,
+                                  registry=Path(TEMP.name) / "registry",
+                                  collection_seed=1)
     window.show()
     pump(app, 0.3)
 

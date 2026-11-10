@@ -23,7 +23,7 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +36,9 @@ import teacher_label  # noqa: E402
 import vcf_tactics  # noqa: E402
 from sample_pool import PoolError, SamplePool  # noqa: E402
 from teacher_store import TeacherStore  # noqa: E402
+from model_registry import ModelRegistry, DEFAULT_REGISTRY  # noqa: E402
+from run_support import file_identity  # noqa: E402
+from history_panel import HistoryPanel  # noqa: E402
 
 SIZE = 15
 CELL = 36
@@ -185,13 +188,28 @@ class BoardWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, exe: str, think_ms: int, model: str | None = None) -> None:
+    def __init__(self, exe: str, think_ms: int, model: str | None = None,
+                 registry: str | Path = DEFAULT_REGISTRY,
+                 evaluations: str | Path = ROOT / "data" / "evaluations",
+                 pool: str | Path = ROOT / "data" / "pool" / "pool.sqlite3",
+                 collection_seed: int | None = None) -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
         self._exe = exe
         self._think_ms = think_ms
+        self._registry = ModelRegistry(registry)
+        self._evaluations = evaluations
+        self._pool_path = Path(pool)
+        self._collection_seed = collection_seed
         self._model = str(model) if model else None
         self._startup_error = ""
+        if model is None:
+            try:
+                current = self._registry.resolve()
+                if current:
+                    self._model = current["path"]
+            except (ValueError, OSError) as exc:
+                self._startup_error = "正式版本不可用：" + str(exc)
         try:
             self._client, self._about = start_executor(exe, self._model)
         except ExecutorError as exc:
@@ -338,7 +356,7 @@ class MainWindow(QMainWindow):
         tv2 = QVBoxLayout(training)
         pool_row = QHBoxLayout()
         pool_row.addWidget(QLabel("样本池"))
-        self.edit_pool = QLineEdit(str(ROOT / "data" / "pool" / "pool.sqlite3"))
+        self.edit_pool = QLineEdit(str(self._pool_path))
         pool_row.addWidget(self.edit_pool)
         tv2.addLayout(pool_row)
         train_row = QHBoxLayout()
@@ -409,6 +427,13 @@ class MainWindow(QMainWindow):
         self._update_eval_label()
         panel.addWidget(model_group)
 
+        self.history_panel = HistoryPanel(self._exe, self._registry.root,
+            self._evaluations, lambda: self._phase in ("idle", "game_over"))
+        self.history_panel.edit_candidate.setText(self._model or "")
+        self.history_panel.busyChanged.connect(self._evaluation_busy)
+        self.history_panel.published.connect(self._apply_model_path)
+        panel.addWidget(self.history_panel)
+
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
         self.turn_label = QLabel("行棋方：-")
@@ -436,9 +461,18 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.moves_list)
         panel.addWidget(record)
 
-        root.addLayout(panel)
+        panel_widget = QWidget()
+        panel_widget.setLayout(panel)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(460)
+        scroll.setWidget(panel_widget)
+        root.addWidget(scroll)
         self.setCentralWidget(central)
-        self.resize(BOARD_PX + 330, BOARD_PX + 40)
+        self.resize(BOARD_PX + 500, BOARD_PX + 100)
+
+    def _evaluation_busy(self, busy: bool) -> None:
+        self._phase = "evaluating" if busy else "idle"
 
     # ---- model selection ----------------------------------------------
 
@@ -465,6 +499,16 @@ class MainWindow(QMainWindow):
         about = self._about or {}
         value = about.get("value_model") or {}
         if about.get("value_model_loaded"):
+            status = "候选试玩（未晋级正式版本）"
+            try:
+                state = self._registry.read()
+                sha = file_identity(value["path"])["sha256"]
+                for entry in state["versions"]:
+                    if entry["sha256"] == sha:
+                        status = (("当前正式版本 " if entry["version"] == state["current"]
+                                   else "冻结历史版本 ") + entry["version"])
+            except (ValueError, OSError, KeyError):
+                pass
             text = (
                 "评估方式：价值网络 GMVALUE1（标量全量参照前向）\n"
                 f"模型：{value.get('model_id', '?')}  "
@@ -473,7 +517,7 @@ class MainWindow(QMainWindow):
                 f"{value.get('feature_spec', '?')} / "
                 f"{value.get('value_contract', '?')}\n"
                 f"文件：{value.get('path', '')}\n"
-                "状态：候选试玩（未晋级正式版本）")
+                "状态：" + status)
         elif about.get("nnue_loaded"):
             text = ("评估方式：旧版 NNUE（" + str(about.get("nnue_backend"))
                     + "）\n文件：" + str(about.get("nnue_path")))
@@ -504,7 +548,7 @@ class MainWindow(QMainWindow):
         ``about`` reply, so a rejected candidate cannot break the current game
         or silently switch the visible evaluation identity.
         """
-        if self._phase in ("thinking", "collecting", "training"):
+        if self._phase in ("thinking", "collecting", "training", "evaluating"):
             self._show_error("当前任务运行中，请先停止后再切换模型")
             return False
         candidate = str(path) if path else None
@@ -517,6 +561,7 @@ class MainWindow(QMainWindow):
         self._client = client
         self._about = about
         self._model = candidate
+        self.history_panel.edit_candidate.setText(candidate or "")
         try:
             old.close()
         except Exception:  # noqa: BLE001 - switching models must not fail
@@ -533,6 +578,9 @@ class MainWindow(QMainWindow):
     # ---- game flow -----------------------------------------------------
 
     def _new_game(self) -> None:
+        if self._phase == "evaluating":
+            self._show_error("测评运行中，请先停止测评")
+            return
         if self._phase == "collecting":
             self._show_error("采集运行中，请先停止采集")
             return
@@ -563,6 +611,9 @@ class MainWindow(QMainWindow):
         self._maybe_engine_move()
 
     def _stop_game(self) -> None:
+        if self._phase == "evaluating":
+            self._show_error("请用「停止测评」结束测评任务")
+            return
         if self._phase == "collecting":
             self._show_error("请用「停止采集」结束采集任务")
             return
@@ -700,7 +751,7 @@ class MainWindow(QMainWindow):
 
     def _check_vcf(self) -> None:
         """Ask the engine's upstream VCF solver about the current position."""
-        if self._state is None or self._phase == "thinking":
+        if self._state is None or self._phase not in ("idle", "game_over"):
             return
         if self._state.get("result") != "ongoing":
             self._show_error("对局已结束，无法进行算杀检查")
@@ -728,7 +779,7 @@ class MainWindow(QMainWindow):
         self.vcf_label.setText("算杀：" + vcf_tactics.describe(report))
 
     def _pool_status_text(self) -> str:
-        path = ROOT / "data" / "pool" / "pool.sqlite3"
+        path = self._pool_path
         if not path.exists():
             return "样本池：未开始"
         try:
@@ -741,7 +792,7 @@ class MainWindow(QMainWindow):
                 f"淘汰局 {stats['evicted_games']}）")
 
     def _start_collection(self) -> None:
-        if self._phase in ("collecting", "thinking", "training"):
+        if self._phase in ("collecting", "thinking", "training", "evaluating"):
             return
         try:
             identity = rapfi_teacher.load_lock()
@@ -758,7 +809,8 @@ class MainWindow(QMainWindow):
         config = collect.CollectConfig(
             games=games, depth=2, max_plies=24, opening_plies=2,
             opening_region=7, sample_every=3, budget_ms=budget,
-            vcf_nodes=5000, vcf_plies=4, seed=int(time.time()) % 100000,
+            vcf_nodes=5000, vcf_plies=4,
+            seed=self._collection_seed if self._collection_seed is not None else int(time.time()) % 100000,
             model_id="handcrafted")
         stop_event = threading.Event()
         self._collect_stop = stop_event
@@ -769,7 +821,7 @@ class MainWindow(QMainWindow):
         self.btn_collect_start.setEnabled(False)
         self.btn_collect_stop.setEnabled(True)
         exe = self._exe
-        pool_path = ROOT / "data" / "pool" / "pool.sqlite3"
+        pool_path = self._pool_path
 
         def worker() -> None:
             pool = None
@@ -922,7 +974,7 @@ class MainWindow(QMainWindow):
 
     def _label_teacher(self) -> None:
         """Labels the current position with the local teacher and saves it."""
-        if self._state is None or self._phase == "thinking":
+        if self._state is None or self._phase not in ("idle", "game_over"):
             return
         try:
             identity = rapfi_teacher.load_lock()
@@ -1100,6 +1152,7 @@ class MainWindow(QMainWindow):
         self.error_label.setText("错误：" + message)
 
     def closeEvent(self, event) -> None:
+        self.history_panel.shutdown()
         self._generation += 1
         if self._collect_stop is not None:
             self._collect_stop.set()
@@ -1139,6 +1192,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="GomokuNNUE 本地人机对弈")
     parser.add_argument("--engine", help="引擎可执行文件路径")
     parser.add_argument("--model", help="启动时加载的 GMVALUE1 价值网络（试玩候选）")
+    parser.add_argument("--pool", default=str(ROOT / "data/pool/pool.sqlite3"),
+                        help="采集与训练的样本池路径")
+    parser.add_argument("--collection-seed", type=int, help="可复现的采集随机种子")
     parser.add_argument("--movetime", type=int, default=1000,
                         help="引擎每步思考毫秒数（界面可调整）")
     args = parser.parse_args()
@@ -1150,7 +1206,8 @@ def main() -> int:
             "未找到引擎可执行文件。请先按 README 用 venv 的 cmake + Ninja 构建，"
             "或通过 --engine / GOMOKU_ENGINE 指定路径。")
         return 1
-    window = MainWindow(exe, args.movetime, model=args.model)
+    window = MainWindow(exe, args.movetime, model=args.model,
+                        pool=args.pool, collection_seed=args.collection_seed)
     window.show()
     return app.exec()
 

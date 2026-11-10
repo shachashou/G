@@ -78,6 +78,12 @@
 .venv\Scripts\python.exe tools\sample_pool.py evict data\pool\pool.sqlite3 --capacity 40
 ~~~
 
+## 历史测评与正式版本（工单 08）
+
+`history_evaluation.py` 提供 `initial` / `challenge` / `list` 命令及同名 GUI 复用的 `evaluate()` 接口。`model_registry.py` 保存冻结历史、当前正式指针与晋级来源，带锁发布并检查测评期间现任版本是否变更。完整操作和统计默认值见[根目录说明](../README.md#历史版本测评与晋级工单-08)。
+
+测评复用 `match_runner.Engine` 的 Gomocup 进程传输，但规则裁判仅使用 `executor.py` 对接的 C++ 权威执行器；旧 runner 的截断和棋与旧胜率门槛不能作为正式版本晋级证据。测评不会写入 `SamplePool`，不需要 Rapfi。
+
 ## 数据格式边界
 
 现有 binpack 是64字节文件头加64字节记录，实际旧格式定义以 C++ 写端和 Python 读端为准。它属于当前实现，不是新数据契约；不能假设能完整表示新标签来源与战术状态。

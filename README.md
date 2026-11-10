@@ -2,14 +2,14 @@
 
 Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"玩一把、收集数据、从0训练、自我训练、历史版本测评"。
 
-**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、可完成一局合法对弈的桌面 GUI、接入开源实现的 VCF 算杀、Rapfi 教师打标与持续样本池，以及可在实际 Alpha-Beta 对弈中加载执行的新价值网络；持续自主训练与正式版本晋级仍待实现。
+**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、可完成一局合法对弈的桌面 GUI、开源 VCF 算杀、Rapfi 教师打标与持续样本池、新价值网络的实际 Alpha-Beta 对弈，以及历史版本测评与正式版本晋级；持续教师训练编排与无教师自主训练仍待实现。
 
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md) 和 [07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md) 和 [08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -99,6 +99,8 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 或 `.venv\Scripts\python.exe gui\gomoku_gui.py --help`。客户端通过 JSON-lines 协议调用权威执行器：完整合法落点、禁手原因、落子结果和终局都由 C++ 执行器给出，界面与 Python 裁判不另写规则。详见 [客户端说明](gui/README.md)。
 
+**直接双击 `gui/play.bat` 默认加载 `weights/registry/state.json` 指向的当前正式模型。** 尚未登记 v0 时，显示手工威胁评估 + Alpha-Beta + VCF；`--model PATH` 可显式试玩候选。登记或晋级后，GUI 显示真实正式版本身份，后续启动沿用该版本。
+
 ## 算杀（VCF）
 
 - **上游**：[quintet](https://github.com/renju-note/quintet)（Rust，MIT，Renju 规则），固定 commit 见 [vendor/quintet/UPSTREAM.md](vendor/quintet/UPSTREAM.md)；源码原样 vendored，适配逻辑只在 `engine/vcf-bridge`（C ABI）与 `engine/src/vcf.cpp`。
@@ -170,6 +172,28 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 - **验证**：`value_net_tests`（加载/拒绝/前向/全量重建/视角/终局与 VCF 优先级）、`value_parity_tests`（C++ 与 `trainer/value_format.infer_int` 逐位一致；本地 demo 模型与训练原模型按冻结容差对拍）、`value_engine_blackbox`（真实完整对局、重放、时间控制、正负视角、严格失败）、`gui_model_smoke`（offscreen 模型选择到落子）。验收记录见[工单 07](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)。
 - **性能**：全量参照推理在 40 子局面实测约 14 µs/次；增量与 AVX2 加速属于工单 11，本工单不以此声称棋力提升。
 
+## 历史版本测评与晋级（工单 08）
+
+客户端的「历史版本测评与晋级」面板可选择候选模型、额外历史对手、开局对数、每步时间和得分率基线；当前正式版本自动加入对手列表。没有正式版本时，先「验证并登记 v0」：数值检查通过且自对弈完成一对换色合法对局后建立初始版本，不宣称战胜历史版本。
+
+- **冻结**：开赛前复制候选、对手、引擎、保真度报告、训练局面清单，记录 SHA-256、规则、开局、搜索预算与方法；双方都核验实际加载的模型身份，拒绝回退。
+- **公平与隔离**：每个开局换色两局，同一引擎、相同时间与单线程。开局不能与候选训练/验证局面 D4 等价，同一测评目录下已用过的开局也不复用。评测对局只写入测评目录，不写训练样本池。
+- **默认统计方案**：64 个开局对（128 局）/对手，至少 32 个完整开局对；对每对两局的平均得分使用 Hoeffding 单侧下界，整体 `alpha=0.05`，多个对手用 Bonferroni 校正。只有每个对手的下界都**严格高于 0.5**才具备晋级资格。这是保守的工程默认值，可在开赛前配置，不继承旧 M5 门槛。
+- **异常与停止**：崩溃、超时、非法落子、身份不符或模型加载失败即终止本次测评；异常判负与有效棋力证据分开，达到手数上限只记未完成，不算和棋。停止保存部分报告并回收子进程。证据不足或任何异常均保持现任版本。
+- **发布**：发布前复核冻结身份、统计和权威执行器重放的终局，带锁原子替换正式版本指针；若现任版本已变更则拒绝过期发布。历史版本保留模型、数值报告及晋级来源。
+- **报告**：`data/evaluations/<run>/manifest.json` 是赛前配置，`report.json` 是封存对局与统计，`result.json` 是发布回执。GUI 显示胜/和/负、严格胜率、得分率、有效局数、配对下界、结论、用时和异常，并可查看已有报告。
+
+候选目录必须有新训练器导出的 `model.gmvalue`、`fidelity.json`、`training_positions.json`。缺少训练清单的旧模型仍可试玩，但不能用于本流程登记或晋级；需要通过新训练链路生成可追溯导出。
+
+~~~powershell
+.venv\Scripts\python.exe tools\history_evaluation.py initial weights\value-run1\model.gmvalue
+.venv\Scripts\python.exe tools\history_evaluation.py challenge weights\candidate\model.gmvalue --pairs 64 --movetime-ms 200
+.venv\Scripts\python.exe tools\history_evaluation.py challenge weights\candidate\model.gmvalue --opponent v0
+.venv\Scripts\python.exe tools\history_evaluation.py list
+~~~
+
+`--registry` 和 `--output-root` 可指定隔离目录。小规模验收结果见[工单 08](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)，不作为棋力提升声明。旧 `match_runner.py --min-win-rate` 仅供旧实验回归，不是本流程的发布入口。
+
 ## 当前代码与目标的差距
 
 | 区域 | 当前情况 | 改造目标 |
@@ -180,7 +204,7 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 | 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
 | 推理 | `GMVALUE1` 标量全量参照前向已接入搜索；旧 NNUE 保留 | 第一层增量累加、AVX2 与实际搜索吞吐（工单 11） |
 | 数据与编排 | 有容量上限的持续样本池与训练闭环 | 持续自主训练、结果标签与任务管理 |
-| GUI | 对弈、采集、教师打标、训练、模型选择已完成 | 自我训练、测评与版本晋级编排 |
+| GUI | 对弈、采集、教师打标、训练、模型选择、历史测评与原子晋级已完成 | 持续教师训练与无教师自主训练编排 |
 
 现有工具可用于检查和迁移基础能力，不能当作新工作台已经交付。旧权重不视为新网络的兼容模型。
 

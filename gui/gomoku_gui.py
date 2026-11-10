@@ -21,13 +21,14 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QMainWindow, QMessageBox, QPushButton, QRadioButton, QSpinBox,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
+    QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "trainer"))
 from executor import ExecutorClient, ExecutorError  # noqa: E402
 import collect  # noqa: E402
 import rapfi_teacher  # noqa: E402
@@ -158,6 +159,9 @@ class MainWindow(QMainWindow):
         self._collect_stop = None
         self._collect_thread = None
         self._collect_generation = 0
+        self._train_stop = None
+        self._train_thread = None
+        self._train_generation = 0
         self._generation = 0
         self._queue: queue.Queue = queue.Queue()
         self._build_ui()
@@ -279,6 +283,57 @@ class MainWindow(QMainWindow):
         cv.addWidget(self.collect_label)
         panel.addWidget(collection)
 
+        training = QGroupBox("价值网络训练")
+        tv2 = QVBoxLayout(training)
+        pool_row = QHBoxLayout()
+        pool_row.addWidget(QLabel("样本池"))
+        self.edit_pool = QLineEdit(str(ROOT / "data" / "pool" / "pool.sqlite3"))
+        pool_row.addWidget(self.edit_pool)
+        tv2.addLayout(pool_row)
+        train_row = QHBoxLayout()
+        train_row.addWidget(QLabel("步数"))
+        self.spin_train_steps = QSpinBox()
+        self.spin_train_steps.setRange(1, 100000)
+        self.spin_train_steps.setValue(100)
+        train_row.addWidget(self.spin_train_steps)
+        train_row.addWidget(QLabel("批"))
+        self.spin_train_batch = QSpinBox()
+        self.spin_train_batch.setRange(1, 512)
+        self.spin_train_batch.setValue(16)
+        train_row.addWidget(self.spin_train_batch)
+        train_row.addWidget(QLabel("lr"))
+        self.spin_train_lr = QDoubleSpinBox()
+        self.spin_train_lr.setDecimals(5)
+        self.spin_train_lr.setRange(0.00001, 1.0)
+        self.spin_train_lr.setSingleStep(0.0005)
+        self.spin_train_lr.setValue(0.001)
+        train_row.addWidget(self.spin_train_lr)
+        self.combo_train_loss = QComboBox()
+        self.combo_train_loss.addItems(["MSE", "SmoothL1"])
+        train_row.addWidget(self.combo_train_loss)
+        tv2.addLayout(train_row)
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("输出"))
+        self.edit_train_output = QLineEdit(str(ROOT / "weights" / "value-run"))
+        out_row.addWidget(self.edit_train_output)
+        tv2.addLayout(out_row)
+        train_buttons = QHBoxLayout()
+        self.btn_train_start = QPushButton("开始训练")
+        self.btn_train_start.clicked.connect(self._start_training)
+        self.btn_train_stop = QPushButton("停止训练")
+        self.btn_train_stop.clicked.connect(self._stop_training)
+        self.btn_train_stop.setEnabled(False)
+        train_buttons.addWidget(self.btn_train_start)
+        train_buttons.addWidget(self.btn_train_stop)
+        tv2.addLayout(train_buttons)
+        self.train_label = QLabel("训练：未开始")
+        self.train_label.setWordWrap(True)
+        tv2.addWidget(self.train_label)
+        self.train_result = QLabel("")
+        self.train_result.setWordWrap(True)
+        tv2.addWidget(self.train_result)
+        panel.addWidget(training)
+
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
         if self._about.get("nnue_loaded"):
@@ -324,6 +379,9 @@ class MainWindow(QMainWindow):
         if self._phase == "collecting":
             self._show_error("采集运行中，请先停止采集")
             return
+        if self._phase == "training":
+            self._show_error("训练运行中，请先停止训练")
+            return
         self._interrupt()
         self._player_color = "black" if self.radio_black.isChecked() else "white"
         self._game_id = uuid.uuid4().hex[:12]
@@ -348,6 +406,9 @@ class MainWindow(QMainWindow):
     def _stop_game(self) -> None:
         if self._phase == "collecting":
             self._show_error("请用「停止采集」结束采集任务")
+            return
+        if self._phase == "training":
+            self._show_error("请用「停止训练」结束训练任务")
             return
         self._interrupt()
         self._phase = "idle"
@@ -416,6 +477,23 @@ class MainWindow(QMainWindow):
                 kind, generation, payload = self._queue.get_nowait()
             except queue.Empty:
                 return
+            if kind in ("train_progress", "train_done", "train_error"):
+                if generation != self._train_generation:
+                    continue
+                if kind == "train_progress":
+                    self._show_training_progress(payload)
+                    continue
+                self._phase = "idle"
+                self._train_thread = None
+                self._train_stop = None
+                self.btn_train_start.setEnabled(True)
+                self.btn_train_stop.setEnabled(False)
+                if kind == "train_done":
+                    self.status_label.setText("训练完成")
+                    self._show_training_result(payload)
+                else:
+                    self._show_error("训练失败：" + str(payload))
+                continue
             if kind in ("collect_progress", "collect_done", "collect_error"):
                 if generation != self._collect_generation:
                     continue
@@ -496,7 +574,7 @@ class MainWindow(QMainWindow):
                 f"淘汰局 {stats['evicted_games']}）")
 
     def _start_collection(self) -> None:
-        if self._phase in ("collecting", "thinking"):
+        if self._phase in ("collecting", "thinking", "training"):
             return
         try:
             identity = rapfi_teacher.load_lock()
@@ -582,6 +660,87 @@ class MainWindow(QMainWindow):
             self.collect_label.setText(self.collect_label.text() + "；过滤 " + top)
         if done:
             self.collect_pool_label.setText(self._pool_status_text())
+
+    def _start_training(self) -> None:
+        if self._phase != "idle":
+            return
+        pool_path = self.edit_pool.text().strip()
+        output_dir = self.edit_train_output.text().strip()
+        if not pool_path or not output_dir:
+            self._show_error("需要样本池路径和输出目录")
+            return
+        steps = self.spin_train_steps.value()
+        batch = self.spin_train_batch.value()
+        lr = self.spin_train_lr.value()
+        loss = "mse" if self.combo_train_loss.currentIndex() == 0 else "smooth_l1"
+        stop_event = threading.Event()
+        self._train_stop = stop_event
+        self._train_generation += 1
+        generation = self._train_generation
+        self._phase = "training"
+        self.status_label.setText("训练运行中…（可点「停止训练」保存当前状态）")
+        self.btn_train_start.setEnabled(False)
+        self.btn_train_stop.setEnabled(True)
+        self.train_label.setText("训练：正在加载数据与初始化…")
+        self.train_result.setText("")
+
+        def worker() -> None:
+            try:
+                import value_train
+                config = value_train.TrainConfig(
+                    pool=pool_path, output_dir=output_dir,
+                    seed=int(time.time()) % 100000, steps=steps,
+                    batch_size=batch, lr=lr, loss=loss, device="auto",
+                    val_every=max(5, steps // 5),
+                    checkpoint_every=max(10, steps // 2),
+                    log_every=max(1, steps // 10))
+                summary = value_train.train_value(
+                    config, stop_event=stop_event,
+                    progress=lambda update: self._queue.put(
+                        ("train_progress", generation, update)))
+                self._queue.put(("train_done", generation, summary))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                self._queue.put(("train_error", generation, str(exc)))
+
+        self._train_thread = threading.Thread(target=worker, daemon=True)
+        self._train_thread.start()
+
+    def _stop_training(self) -> None:
+        if self._train_stop is None:
+            return
+        self._train_stop.set()
+        self.btn_train_stop.setEnabled(False)
+        self.status_label.setText("停止训练中（保存 checkpoint 与导出）…")
+
+    def _show_training_progress(self, update: dict) -> None:
+        parts = [f"step {update.get('step', '?')}"]
+        if update.get("train_loss") is not None:
+            parts.append(f"train {update['train_loss']:.5f}")
+        if update.get("val_loss") is not None:
+            parts.append(f"val {update['val_loss']:.5f}")
+        if update.get("val_mae") is not None:
+            parts.append(f"val MAE {update['val_mae']:.4f}")
+        if update.get("elapsed_s") is not None:
+            parts.append(f"{update['elapsed_s']:.1f}s")
+        self.train_label.setText("训练：" + "，".join(parts))
+
+    def _show_training_result(self, summary: dict) -> None:
+        export = summary.get("export") or {}
+        passed = export.get("passed")
+        validation = summary.get("validation") or {}
+        lines = [
+            f"训练：{summary.get('steps', 0)} 步完成"
+            + ("（已停止）" if summary.get("stopped") else ""),
+            f"val loss {validation.get('loss')}, val MAE {validation.get('mae')}",
+        ]
+        if export:
+            model = export.get("model") or {}
+            lines.append("导出保真度：" + ("通过" if passed else "未通过"))
+            if model.get("path"):
+                lines.append("模型 " + str(model["path"]))
+            if export.get("report"):
+                lines.append("报告 " + str(export["report"]))
+        self.train_result.setText("；".join(lines))
 
     def _teacher_status_text(self) -> str:
         try:
@@ -779,6 +938,10 @@ class MainWindow(QMainWindow):
             self._collect_stop.set()
         if self._collect_thread is not None:
             self._collect_thread.join(timeout=10)
+        if self._train_stop is not None:
+            self._train_stop.set()
+        if self._train_thread is not None:
+            self._train_thread.join(timeout=20)
         teacher = self._active_teacher
         if teacher is not None:
             try:

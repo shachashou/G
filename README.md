@@ -9,7 +9,7 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md) 和 [05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md) 和 [06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -119,6 +119,24 @@ Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -h
 .venv\Scripts\python.exe tools\sample_pool.py validate data\pool\pool.sqlite3
 .venv\Scripts\python.exe tools\sample_pool.py evict data\pool\pool.sqlite3 --capacity 40
 ~~~
+
+## 价值网络训练与导出
+
+- **架构**：450 → 1024 → 64 → 32 → 1，单输出，无行棋方分支。输入是绝对黑白 450 占位特征（`trainer/features.py`），行棋方不作为输入，Renju 黑白角色差异保留。
+- **价值契约**：标签统一为**黑方绝对价值**。教师 `teacher-v1` 的行棋方视角值在训练前按行棋方符号转换；`selfplay_result` 直接使用黑方绝对结果。网络输出 `tanh(z)` ∈ [-1,1]，搜索侧按行棋方取反，属于冻结契约。
+- **训练**：从滚动样本池的已提交对局读取冻结的训练/验证划分；验证按对局隔离并检查 D4 等价泄漏。八种 D4 空间变换在线增广（不交换黑白），验证不增广。损失可选 MSE / SmoothL1；记录随机种子、配置、实际优化步数、样本曝光、标签版本与架构。
+- **checkpoint**：保存模型、优化器、步数、配置、数据身份与历史；可从任意 checkpoint 继续训练。
+- **部署格式**：`GMVALUE1`，包含架构、规则、特征、价值契约、标签版本、训练身份与 FNV 校验；旧 `GMNNUE01` 双头权重会被明确拒绝。整数方案为 int16 权重 + int32 bias + 每层一次移位（默认 `2^9`），Python 整数参考前向与训练模型、量化模型三方对拍。
+- **导出保真度**：容差在测量前冻结（均值 ≤0.01、p95 ≤0.03、最大 ≤0.10；整数参考均值 ≤0.002、最大 ≤0.01），报告记录实测值与是否通过；不把损失下降称为棋力晋级。
+- **GUI**：「价值网络训练」面板选择样本池、步数/批大小/学习率/损失，后台训练并显示进度、训练损失、验证损失与 MAE、导出保真度与输出路径；停止会保存 checkpoint 并导出当前模型。
+- **命令**：
+
+~~~powershell
+.venv\Scripts\python.exe trainer\value_train.py --pool data\pool\pool.sqlite3 \
+    --output-dir weights\value-run1 --steps 200 --batch-size 32 --lr 1e-3 --loss mse
+~~~
+
+C++ 加载新格式与对弈接入在工单 07/11；在那之前引擎仍使用旧手工评估/旧权重。
 
 ## 当前代码与目标的差距
 

@@ -253,6 +253,19 @@ if(GOMOKU_PYTHON)
   set_tests_properties(gui_collect_smoke PROPERTIES
     TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+  # Ticket 06: new value network training/export (architecture, contract, D4,
+  # real small training, checkpoint resume, GMVALUE1 fidelity) and the
+  # offscreen GUI training panel.
+  add_test(NAME value_train_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/value_train_tests.py")
+  set_tests_properties(value_train_tests PROPERTIES TIMEOUT 300)
+
+  add_test(NAME gui_train_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_train_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_train_smoke PROPERTIES
+    TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   # Ticket 09: full self-play game with NNUE evaluation + bad-weight fallback.
   add_test(NAME nnue_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"

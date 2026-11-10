@@ -24,6 +24,24 @@
 
 现有模型、训练器和权重格式仍包含旧结构；旧的手工评估标签与线性目标已移除，教师标签将按新工单接入 Rapfi。
 
+## 价值网络与导出（工单 06）
+
+新训练链路只使用以下模块，旧的 `nnue.py` / `train.py` / `export.py` / `weights_format.py` 属于旧 GMNNUE 双头实现，保留是为了旧 C++ 推理测试在工单 07/11 切换前仍可运行，新流程不使用它们。
+
+| 模块 | 职责 |
+|---|---|
+| value_model.py | 450-1024-64-32-1 单输出网络，黑方绝对价值 `tanh(z)`，隐藏层定上限 ReLU |
+| value_data.py | 从样本池读取已提交数据，教师视角→黑方绝对值转换，D4 在线增广与泄漏检查 |
+| value_format.py | GMVALUE1 文件格式、FNV 校验、int16/int32 整数参考前向、冻结的保真度容差 |
+| value_train.py | 训练循环、checkpoint 保存/恢复、验证指标、量化导出与保真度报告、CLI |
+
+~~~powershell
+.venv\Scripts\python.exe trainer\value_train.py --pool data\pool\pool.sqlite3 ^
+    --output-dir weights\value-run1 --steps 200 --batch-size 32 --lr 1e-3 --loss mse
+~~~
+
+输出目录包含 `last.pt` / `best.pt`（可恢复）、`train_history.jsonl`、`train_summary.json`、`model.gmvalue` 与 `fidelity.json`。`GMVALUE1` 记录架构、规则、特征、价值契约、标签版本和训练数据身份；加载旧 `GMNNUE01` 或架构不符的元数据会被拒绝。C++ 侧的新格式加载与对弈在工单 07/11。
+
 ## 环境与现有命令
 
 Python 使用项目 .venv；依赖列表见[requirements.txt](../requirements.txt)。在已安装依赖的项目环境中，可检查当前入口：

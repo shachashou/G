@@ -65,6 +65,8 @@ class TrainConfig:
     act_max: float = vf.ACT_MAX_DEFAULT
     export: bool = True
     max_minutes: float | None = None
+    initial_model: str | None = None
+    lineage: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -123,6 +125,7 @@ def _save_checkpoint(path: Path, *, model: ValueNet, optimizer,
         "config": config.to_dict(),
         "data_identity": identity,
         "training_positions": training_positions,
+        "lineage": config.lineage,
         "step": int(step),
         "device": device,
         "model_state": model.state_dict(),
@@ -201,6 +204,7 @@ def export_model(model: ValueNet, bundle: value_data.DataBundle,
             "data_identity": bundle.identity,
             "evaluation_exclusion": {"file": exclusion_path.name,
                                      "sha256": exclusion_sha},
+            "lineage": config.lineage,
             "created_at": _now(),
         },
     }
@@ -265,10 +269,11 @@ def export_model(model: ValueNet, bundle: value_data.DataBundle,
             "fidelity": report["fidelity"]}
 
 
-def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
+def train_value(config: TrainConfig, *, stop_event=None, progress=None,
+                data_bundle: value_data.DataBundle | None = None) -> dict:
     """Runs (or resumes) training and exports the deployment model."""
     started = time.monotonic()
-    bundle = value_data.load_pool(config.pool)
+    bundle = data_bundle if data_bundle is not None else value_data.load_pool(config.pool)
     device = resolve_device(config.device)
     torch.manual_seed(config.seed)
     random.seed(config.seed)
@@ -277,6 +282,21 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
     rng = random.Random(config.seed)
     model_config = ValueConfig(ea=config.ea, act_max=config.act_max)
     model = ValueNet(seed=config.seed, config=model_config).to(device)
+    if config.initial_model:
+        if config.resume:
+            raise ValueError("initial_model and resume are mutually exclusive")
+        weights, metadata = vf.read_value_weights(config.initial_model)
+        if (weights["ea"] != config.ea or weights["act_max_int"] != round(config.act_max * (1 << config.ea))):
+            raise ValueError("initial model fixed-point configuration mismatch")
+        manifest = metadata.get("training", {}).get("evaluation_exclusion", {})
+        position_path = Path(config.initial_model).parent / "training_positions.json"
+        if (manifest.get("file") != position_path.name
+                or hashlib.sha256(position_path.read_bytes()).hexdigest() != manifest.get("sha256")):
+            raise ValueError("initial model lacks verified training provenance")
+        prior = json.loads(position_path.read_text(encoding="utf-8"))
+        bundle = replace(bundle, previous_positions=tuple(prior["d4_keys"]),
+                         previous_sources=tuple(prior["source_ids"]))
+        model = ValueNet.from_quantized(weights).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.lr,
                                  weight_decay=config.weight_decay)
     start_step = 0
@@ -316,6 +336,8 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
     stopped = False
     stop_reason = ""
     step = start_step
+    completed_steps = start_step
+    samples_exposed = 0
     for step in range(start_step, steps):
         if stop_event is not None and stop_event.is_set():
             stopped, stop_reason = True, "stopped"
@@ -334,7 +356,9 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
         loss = value_loss(prediction, y, config.loss, config.smooth_l1_beta)
         loss.backward()
         optimizer.step()
-        train_loss = float(loss)
+        completed_steps = step + 1
+        samples_exposed += x.shape[0]
+        train_loss = float(loss.detach())
         if (step + 1) % max(1, config.log_every) == 0 or step + 1 == steps:
             entry = {"step": step + 1, "train_loss": train_loss,
                      "elapsed_s": round(time.monotonic() - started, 3)}
@@ -368,9 +392,6 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
                              identity=bundle.identity, history=history,
                              device=device, training_positions=positions)
 
-    completed_steps = step + 1 if steps > start_step else start_step
-    if steps == start_step:
-        completed_steps = start_step
     _save_checkpoint(last_path, model=model, optimizer=optimizer,
                      step=completed_steps, config=config,
                      identity=bundle.identity, history=history,
@@ -382,7 +403,7 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None) -> dict:
         "stop_reason": stop_reason,
         "steps": completed_steps,
         "start_step": start_step,
-        "samples_exposed": max(0, completed_steps - start_step) * config.batch_size,
+        "samples_exposed": samples_exposed,
         "resumed_from": resumed_from,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "train_loss": train_loss,

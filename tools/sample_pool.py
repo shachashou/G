@@ -375,6 +375,8 @@ class SamplePool:
             "generated": counters.get("generated", 0),
             "valid": counters.get("valid", 0),
             "inserted": counters.get("inserted", 0),
+            "committed_training_samples": counters.get("committed_training_samples", 0),
+            "commit_sequence": counters.get("commit_sequence", 0),
             "duplicate": counters.get("duplicate", 0),
             "d4_duplicate": counters.get("d4_duplicate", 0),
             "d4_leak": counters.get("d4_leak", 0),
@@ -582,6 +584,9 @@ class SamplePool:
                 " WHERE id = ?",
                 (split, _now(), final_result, sample_count, int(game_id)))
             evicted = self._enforce_capacity()
+            self._bump("commit_sequence")
+            if split == "train":
+                self._bump("committed_training_samples", sample_count)
             self._conn.execute("COMMIT")
             return {"game_id": int(game_id), "split": split,
                     "samples": sample_count, "evicted": evicted}
@@ -618,6 +623,20 @@ class SamplePool:
 
     # -- read ------------------------------------------------------------
 
+    def training_snapshot(self, *, train_limit=None, new_ratio=None, seed=0) -> dict:
+        """One coherent WAL snapshot, including split and commit counters."""
+        self._conn.execute("BEGIN")
+        try:
+            problems = self.validate()
+            if problems:
+                raise PoolError("pool failed validation: " + "; ".join(problems))
+            return {"train": self.read_batch(split="train", limit=train_limit,
+                                             new_ratio=new_ratio, seed=seed),
+                    "validation": self.read_batch(split="validation"),
+                    "stats": self.stats()}
+        finally:
+            self._conn.execute("ROLLBACK")
+
     def read_batch(self, *, split: str = "train", limit: int | None = None,
                    seed: int = 0, new_ratio: float | None = None) -> list[dict]:
         """Committed samples from one split; mixed new/old when limited."""
@@ -646,7 +665,9 @@ class SamplePool:
     @staticmethod
     def _mix(rows: list[dict], limit: int, ratio: float, seed: int) -> list[dict]:
         rng = random.Random(seed)
-        ordered = sorted(rows, key=lambda r: (r["source_id"], r["id"]))
+        # AUTOINCREMENT sample ids track insertion order; source names (and
+        # decimal seeds within them) do not encode chronological recency.
+        ordered = sorted(rows, key=lambda r: r["id"])
         newest = ordered[-max(1, len(ordered) // 5):]
         older = [r for r in ordered if r not in newest]
         want_new = min(len(newest), max(0, round(limit * ratio)))

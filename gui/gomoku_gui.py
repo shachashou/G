@@ -39,6 +39,7 @@ from teacher_store import TeacherStore  # noqa: E402
 from model_registry import ModelRegistry, DEFAULT_REGISTRY  # noqa: E402
 from run_support import file_identity  # noqa: E402
 from history_panel import HistoryPanel  # noqa: E402
+from training_task_panel import TrainingTaskPanel  # noqa: E402
 
 SIZE = 15
 CELL = 36
@@ -433,6 +434,12 @@ class MainWindow(QMainWindow):
         self.history_panel.busyChanged.connect(self._evaluation_busy)
         self.history_panel.published.connect(self._apply_model_path)
         panel.addWidget(self.history_panel)
+        self.training_task_panel = TrainingTaskPanel(self._exe, self._pool_path,
+            self._registry.root, self._evaluations, ROOT / "weights/teacher-tasks",
+            lambda: self._phase in ("idle", "game_over"))
+        self.training_task_panel.busyChanged.connect(self._training_task_busy)
+        self.training_task_panel.published.connect(self._apply_model_path)
+        panel.addWidget(self.training_task_panel)
 
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
@@ -473,6 +480,11 @@ class MainWindow(QMainWindow):
 
     def _evaluation_busy(self, busy: bool) -> None:
         self._phase = "evaluating" if busy else "idle"
+
+    def _training_task_busy(self, busy: bool) -> None:
+        self._phase = "continuous" if busy else "idle"
+        if not busy:
+            self.history_panel.refresh()
 
     # ---- model selection ----------------------------------------------
 
@@ -548,7 +560,7 @@ class MainWindow(QMainWindow):
         ``about`` reply, so a rejected candidate cannot break the current game
         or silently switch the visible evaluation identity.
         """
-        if self._phase in ("thinking", "collecting", "training", "evaluating"):
+        if self._phase in ("thinking", "collecting", "training", "evaluating", "continuous"):
             self._show_error("当前任务运行中，请先停止后再切换模型")
             return False
         candidate = str(path) if path else None
@@ -578,8 +590,8 @@ class MainWindow(QMainWindow):
     # ---- game flow -----------------------------------------------------
 
     def _new_game(self) -> None:
-        if self._phase == "evaluating":
-            self._show_error("测评运行中，请先停止测评")
+        if self._phase in ("evaluating", "continuous"):
+            self._show_error("测评运行中或持续训练运行中，请先停止任务")
             return
         if self._phase == "collecting":
             self._show_error("采集运行中，请先停止采集")
@@ -611,8 +623,8 @@ class MainWindow(QMainWindow):
         self._maybe_engine_move()
 
     def _stop_game(self) -> None:
-        if self._phase == "evaluating":
-            self._show_error("请用「停止测评」结束测评任务")
+        if self._phase in ("evaluating", "continuous"):
+            self._show_error("请用对应任务的停止按钮结束当前任务")
             return
         if self._phase == "collecting":
             self._show_error("请用「停止采集」结束采集任务")
@@ -792,7 +804,7 @@ class MainWindow(QMainWindow):
                 f"淘汰局 {stats['evicted_games']}）")
 
     def _start_collection(self) -> None:
-        if self._phase in ("collecting", "thinking", "training", "evaluating"):
+        if self._phase in ("collecting", "thinking", "training", "evaluating", "continuous"):
             return
         try:
             identity = rapfi_teacher.load_lock()
@@ -1152,6 +1164,7 @@ class MainWindow(QMainWindow):
         self.error_label.setText("错误：" + message)
 
     def closeEvent(self, event) -> None:
+        self.training_task_panel.shutdown()
         self.history_panel.shutdown()
         self._generation += 1
         if self._collect_stop is not None:

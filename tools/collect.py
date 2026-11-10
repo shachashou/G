@@ -66,6 +66,9 @@ class CollectConfig:
     model_id: str = "handcrafted"
     strategy_version: str = "collect-v1"
     throttle_ms: int = 0
+    task_id: str | None = None
+    model_sha256: str | None = None
+    parent_version: str | None = None
 
     def snapshot(self) -> dict:
         data = asdict(self)
@@ -119,6 +122,7 @@ def collect(pool: SamplePool, config: CollectConfig,
     inserted = 0
     rejected_games = 0
     filters: dict[str, int] = {}
+    source_ids: list[str] = []
     rng = random.Random(config.seed)
 
     def bump(reason: str) -> None:
@@ -138,6 +142,7 @@ def collect(pool: SamplePool, config: CollectConfig,
         return {**stats, "run_id": run_id, "generated": generated,
                 "valid": valid, "inserted": inserted, "filters": dict(filters),
                 "rejected_games": rejected_games, "stopped": stopped,
+                "source_ids": list(source_ids),
                 **summary}
 
     for index in range(config.games):
@@ -183,9 +188,12 @@ def collect(pool: SamplePool, config: CollectConfig,
                 pool.abort_game(game_id)
                 return report(stopped=True)
             pool.commit_game(game_id, final_result=result)
+            source_ids.append(source_id)
         except Exception:
             pool.abort_game(game_id)
             rejected_games += 1
+            if stop_event is not None and stop_event.is_set():
+                return report(stopped=True)
             raise
         if progress is not None:
             progress({"generated": generated, "valid": valid,

@@ -17,6 +17,7 @@ instead of silently training on validation data.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import sys
@@ -149,18 +150,16 @@ def check_d4_isolation(train: list[Sample], validation: list[Sample]) -> None:
             f"validation split; refusing to train")
 
 
-def load_pool(pool_path: str | Path) -> DataBundle:
+def load_pool(pool_path: str | Path, *, train_limit=None, new_ratio=None, seed=0) -> DataBundle:
     """Reads the frozen train/validation split from a committed sample pool."""
     path = Path(pool_path)
     if not path.is_file():
         raise ValueError(f"sample pool not found: {path}")
     with SamplePool(path, create=False) as pool:
-        problems = pool.validate()
-        if problems:
-            raise ValueError("pool failed validation: " + "; ".join(problems))
-        train_rows = pool.read_batch(split="train")
-        val_rows = pool.read_batch(split="validation")
-        stats = pool.stats()
+        snapshot = pool.training_snapshot(train_limit=train_limit, new_ratio=new_ratio, seed=seed)
+        train_rows = snapshot["train"]
+        val_rows = snapshot["validation"]
+        stats = snapshot["stats"]
     if not train_rows:
         raise ValueError("pool has no committed training samples")
     if not val_rows:
@@ -171,7 +170,8 @@ def load_pool(pool_path: str | Path) -> DataBundle:
     digest = hashlib.sha256()
     for row in sorted(train_rows + val_rows,
                       key=lambda r: (r["source_id"], r["id"])):
-        digest.update(str((row["source_id"], row["id"])).encode())
+        digest.update(json.dumps(row, sort_keys=True, separators=(",", ":"),
+                                 allow_nan=False).encode())
     identity = {
         "pool": str(path),
         "train_samples": len(train),
@@ -181,6 +181,10 @@ def load_pool(pool_path: str | Path) -> DataBundle:
         "label_versions": sorted({s.label_version for s in train + validation}),
         "samples_sha256": digest.hexdigest(),
         "pool_capacity": stats.get("capacity"),
+        "commit_sequence": stats["commit_sequence"],
+        "committed_training_samples": stats["committed_training_samples"],
+        "source_ids": sorted({s.source_id for s in train + validation}),
+        "collection_model_ids": sorted({str(r.get("model_id")) for r in train_rows + val_rows}),
     }
     return DataBundle(train=train, validation=validation, identity=identity)
 

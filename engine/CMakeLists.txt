@@ -369,5 +369,16 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(gui_history_smoke PROPERTIES
     TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  add_test(NAME training_task_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/training_task_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(training_task_tests PROPERTIES TIMEOUT 300)
+
+  add_test(NAME gui_training_task_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_training_task_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_training_task_smoke PROPERTIES
+    TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 

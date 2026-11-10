@@ -84,6 +84,21 @@
 
 测评复用 `match_runner.Engine` 的 Gomocup 进程传输，但规则裁判仅使用 `executor.py` 对接的 C++ 权威执行器；旧 runner 的截断和棋与旧胜率门槛不能作为正式版本晋级证据。测评不会写入 `SamplePool`，不需要 Rapfi。
 
+## 持续教师训练编排（工单 09）
+
+`training_task.py` 提供 GUI / CLI 共用的 `TrainingTask(TaskConfig).run()`、`stop()`、`snapshot()`。`TeacherDataSource` 负责教师依赖及单盘数据生产；调度器只依赖数据源的 `preflight()` / `produce()`，训练与测评分别调用现有 `train_value()` 和 `evaluate()`，为后续替换监督来源保留边界。
+
+- 每盘开始从正式登记表绑定模型，核验实际加载身份；采集运行配置记录 task id、正式版本与模型哈希，提交事件关联 source ids 和 pool run id。
+- `SamplePool.training_snapshot()` 在同一 WAL 读事务中读取分组、提交计数和数据；`value_data.load_pool()` 冻结为内存数据。指纹覆盖完整记录，不再只哈希行号；`commit_sequence` 与 `committed_training_samples` 区分已提交数据和暂存写入。
+- 调度器要求启动阈值、后续新提交样本与变化的数据指纹，支持新旧抽样、积压背压、容量限速、候选保留及次数/时间/空转上限；不会无限重复训练未变化的数据。
+- 任务持有样本池专属 lease，GUI 禁止与手工任务并行抢占。停止会回收本任务拥有的引擎/教师进程、丢弃暂存对局，保留已提交数据与有效模型；完整任务恢复留给工单 12。
+
+默认值与操作见[根目录说明](../README.md#持续教师训练工单-09)，所有可配置字段见[示例 JSON](teacher-task.example.json)：
+
+~~~powershell
+.venv\Scripts\python.exe tools\training_task.py --config tools\teacher-task.example.json
+~~~
+
 ## 数据格式边界
 
 现有 binpack 是64字节文件头加64字节记录，实际旧格式定义以 C++ 写端和 Python 读端为准。它属于当前实现，不是新数据契约；不能假设能完整表示新标签来源与战术状态。
@@ -97,4 +112,4 @@
 ./.venv/Scripts/python.exe tools/match_runner.py --help
 ~~~
 
-现有选项只描述当前实现。新样本池、无教师训练和 GUI 任务管理需按新工单交付。
+现有选项只描述当前实现。完全无教师训练与完整暂停恢复仍按工单 10 / 12 交付。

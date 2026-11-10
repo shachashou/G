@@ -55,6 +55,11 @@ class HistoryPanel(QGroupBox):
         self.spin_ms.setRange(10, 60000)
         self.spin_ms.setValue(200)
         row.addWidget(self.spin_ms)
+        row.addWidget(QLabel("并发对局"))
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, 256)
+        self.spin_workers.setValue(1)
+        row.addWidget(self.spin_workers)
         row.addWidget(QLabel("得分率基线"))
         self.spin_threshold = QDoubleSpinBox()
         self.spin_threshold.setRange(0.5, 0.99)
@@ -137,6 +142,7 @@ class HistoryPanel(QGroupBox):
             return
         # Capture widget values on the GUI thread, before starting the worker.
         settings = {"pairs": 1 if initial else self.spin_pairs.value(),
+                    "workers": self.spin_workers.value(),
                     "movetime_ms": self.spin_ms.value(),
                     "score_threshold": self.spin_threshold.value(),
                     "seed": random.SystemRandom().randrange(2**31)}

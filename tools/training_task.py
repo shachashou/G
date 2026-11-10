@@ -45,6 +45,9 @@ class TaskConfig:
     loss: str = "mse"
     device: str = "auto"
     cpu_threads: int = 2
+    collector_workers: int = 1
+    state_write_interval_s: float = 2.0
+    checkpoint_min_interval_s: float = 60.0
     min_round_interval_s: float = 10.0
     collection_delay_ms: int = 100
     full_pool_delay_ms: int = 500
@@ -76,16 +79,19 @@ class TaskConfig:
             raise ValueError("invalid training mode or teacher history weight")
         positive = ("capacity", "validation_games", "min_train_samples", "min_validation_samples", "min_train_games",
                     "min_new_samples", "max_pending_samples", "training_sample_limit", "train_steps",
-                    "batch_size", "cpu_threads", "max_rounds", "max_games", "max_empty_games", "keep_candidates")
+                    "batch_size", "cpu_threads", "collector_workers", "max_rounds", "max_games", "max_empty_games", "keep_candidates")
         if any(type(getattr(self, name)) is not int or getattr(self, name) < 1 for name in positive):
             raise ValueError("task count/resource limits must be positive integers")
-        if (self.capacity < self.min_train_samples + self.min_validation_samples
+        if (self.collector_workers > 256 or self.cpu_threads > 256
+                or self.capacity < self.min_train_samples + self.min_validation_samples
                 or self.max_pending_samples < self.min_new_samples
                 or self.training_sample_limit < self.min_train_samples
                 or (self.mode != "teacher" and self.training_sample_limit < self.min_train_games)
                 or not 0 <= self.new_ratio <= 1 or not 0 < self.lr <= 1
                 or not 0 < self.max_minutes < float("inf") or not 0 < self.max_idle_s < float("inf")
                 or not 0 <= self.min_round_interval_s < float("inf")
+                or not 0 <= self.state_write_interval_s <= 3600
+                or not 0 <= self.checkpoint_min_interval_s <= 3600
                 or self.collection_delay_ms < 0 or self.full_pool_delay_ms < 0
                 or self.device not in ("auto", "cpu", "cuda") or self.loss not in ("mse", "smooth_l1")):
             raise ValueError("invalid task capacity, freshness, training or time limits")
@@ -206,10 +212,12 @@ class TeacherDataSource:
 
 
 class TrainingTask:
-    """Public task boundary: one data producer, trainer and evaluator.
+    """Public task boundary: bounded data workers, one trainer and evaluator.
 
     A replacement data source supplies preflight()/produce() and label_source;
-    it need not construct a teacher. Training/evaluation retain their existing
+    produce() may be called concurrently with separate pool connections and
+    unique game indices; adapters keep each game's state local. It need not
+    construct a teacher. Training/evaluation retain their existing
     independent public APIs. Full pause/restart recovery belongs to ticket 12.
     """
     def __init__(self, config: TaskConfig, *, source_factory=None,
@@ -226,11 +234,19 @@ class TrainingTask:
             "directory": str(self.directory), "status": "created", "reason": None,
             "data": {}, "trainer": {}, "evaluation": {}, "rounds": [], "games": 0,
             "consumed_training_samples": 0, "resources": {"cpu_threads": config.cpu_threads,
-                "device": config.device, "collector_workers": 1,
+                "device": config.device, "collector_workers": config.collector_workers,
+                "evaluation_workers": config.evaluation.get("workers", 1),
+                "state_write_interval_s": config.state_write_interval_s,
+                "checkpoint_min_interval_s": config.checkpoint_min_interval_s,
                 "teacher_threads": 1 if config.mode == "teacher" else 0}, "mode": config.mode}
         self.producer_done = threading.Event()
         self.producer_error = None
         self.started = None
+        self.next_game = 0
+        self.empty_games = 0
+        self.production_halted = threading.Event()
+        self.last_backpressure_report = -float("inf")
+        self.last_state_write = -float("inf")
 
     def snapshot(self):
         with self.lock:
@@ -244,13 +260,19 @@ class TrainingTask:
 
     def update(self, actor=None, **values):
         with self.lock:
+            old_phase = self.state.get(actor, {}).get("phase") if actor else None
             if actor:
                 self.state[actor].update(values)
             else:
                 self.state.update(values)
             self.state["elapsed_s"] = round(time.monotonic() - self.started, 3)
-            write_json(self.directory / "state.json", self.state)
-            self.event("state", actor=actor, **values)
+            if actor and "phase" in values and values["phase"] != old_phase:
+                self.event("phase", actor=actor, phase=values["phase"])
+            if ("status" in values or values.get("cleanup_complete") is not None
+                    or time.monotonic() - self.last_state_write >= self.config.state_write_interval_s):
+                write_json(self.directory / "state.json", self.state)
+                self.last_state_write = time.monotonic()
+                self.event("state", actor=actor, status=self.state["status"], phase=values.get("phase"))
             value = self.snapshot()
         if self.progress:
             self.progress(value)
@@ -264,26 +286,46 @@ class TrainingTask:
                 and (self.config.mode == "teacher" or stats["train_games"] >= self.config.min_train_games))
 
     def _producer(self, source):
+        workers = [threading.Thread(target=self._producer_worker, args=(source, i),
+                    name=f"collector-{i}", daemon=True) for i in range(self.config.collector_workers)]
+        try:
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join()
+            self.update("data", phase="stopped" if self.stop_event.is_set() else "finished")
+        finally:
+            self.producer_done.set()
+
+    def _producer_worker(self, source, worker):
         cfg = self.config
-        empty = 0
         try:
             with SamplePool(cfg.pool, create=False) as pool:
-                for index in range(cfg.max_games):
-                    while not self.stop_event.is_set():
+                while not self.stop_event.is_set() and not self.production_halted.is_set():
+                    while not self.stop_event.is_set() and not self.production_halted.is_set():
                         stats = pool.stats(cfg.label_sources())
                         with self.lock:
                             consumed = self.state["consumed_training_samples"]
                         if (self.data_ready(stats)
                                 and stats["committed_training_samples"] - consumed >= cfg.max_pending_samples):
-                            self.update("data", phase="backpressure", metrics=stats)
-                            self.stop_event.wait(0.1)
+                            with self.lock:
+                                if time.monotonic() - self.last_backpressure_report >= .5:
+                                    self.last_backpressure_report = time.monotonic()
+                                    self.update("data", phase="backpressure", metrics=stats)
+                            self.stop_event.wait(0.5)
                             continue
                         break
-                    if self.stop_event.is_set():
+                    if self.stop_event.is_set() or self.production_halted.is_set():
                         break
+                    with self.lock:
+                        if self.next_game >= cfg.max_games:
+                            break
+                        index = self.next_game
+                        self.next_game += 1
+                    self.event("game_started", worker=worker, game=index + 1)
                     result = source.produce(pool, index)
                     with self.lock:
-                        self.state["games"] = index + 1
+                        self.state["games"] += 1
                     if result.get("stopped"):
                         self.event("data_interrupted", game=index + 1, run_id=result.get("run_id"))
                         self.update("data", phase="stopped", metrics=result, totals=pool.stats())
@@ -297,8 +339,11 @@ class TrainingTask:
                                 metrics=result, totals=pool.stats(cfg.label_sources()))
                     if result.get("total_validation_samples", result["validation_samples"]) + cfg.min_train_samples > cfg.capacity:
                         raise ValueError("frozen validation data leaves insufficient training capacity")
-                    empty = empty + 1 if not result.get("inserted") else 0
-                    if empty >= cfg.max_empty_games:
+                    with self.lock:
+                        self.empty_games = self.empty_games + 1 if not result.get("inserted") else 0
+                        stalled = self.empty_games >= cfg.max_empty_games
+                    if stalled:
+                        self.production_halted.set()
                         self.update("data", phase="stalled", reason="no_effective_samples")
                         break
                     delay = cfg.collection_delay_ms
@@ -306,16 +351,14 @@ class TrainingTask:
                         delay = max(delay, cfg.full_pool_delay_ms)
                     if self.stop_event.wait(delay / 1000):
                         break
-                self.update("data", phase="stopped" if self.stop_event.is_set() else "finished")
         except Exception as exc:
             if not self.stop_event.is_set():
-                self.producer_error = str(exc)
+                with self.lock:
+                    self.producer_error = self.producer_error or str(exc)
                 self.update("data", phase="failed", error=str(exc))
                 self.stop_event.set()
             else:
                 self.update("data", phase="stopped")
-        finally:
-            self.producer_done.set()
 
     def _watchdog(self, finished):
         while not finished.wait(0.1):
@@ -457,6 +500,7 @@ class TrainingTask:
                     loss=cfg.loss, device=cfg.device, resume=checkpoint,
                     initial_model=incumbent["path"] if incumbent and not checkpoint else None,
                     lineage=lineage, val_every=max(1, cfg.train_steps // 5),
+                    checkpoint_min_interval_s=cfg.checkpoint_min_interval_s,
                     checkpoint_every=max(1, cfg.train_steps // 2), log_every=max(1, cfg.train_steps // 10))
                 record = {"round": index, "output": str(output), "lineage": lineage,
                           "data_identity": bundle.identity, "training": None, "evaluation": None}

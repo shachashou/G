@@ -15,7 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / p) for p in ("tools", "trainer", "engine/tests")]
 from training_task import TaskConfig, TrainingTask, TeacherDataSource
-from sample_pool import SamplePool
+from sample_pool import SamplePool, PoolError
 from value_fixture import build_pool, make_board, record
 from value_train import TrainConfig, train_value
 from collect_tests import StubTeacher
@@ -95,7 +95,7 @@ class TaskTests(unittest.TestCase):
             observed.append(new_seq > seq)
             self.assertEqual(cells, tuple(s.cells for s in data_bundle.train))
             return train_value(config, data_bundle=data_bundle, **kw)
-        task = self.task(trainer=trainer)
+        task = self.task(replace(self.cfg, collector_workers=3), trainer=trainer)
         result = task.run()
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertEqual(len(result["rounds"]), 2)
@@ -119,6 +119,102 @@ class TaskTests(unittest.TestCase):
             self.assertTrue(all(r["label_source"] == "teacher" for r in pool.read_batch()))
         model = ModelRegistry(self.cfg.registry).resolve()
         self.assertEqual(model["version"], "v0")
+
+    def test_concurrent_collectors_share_global_game_budget(self):
+        barrier = threading.Barrier(3)
+        seen = []
+        seen_lock = threading.Lock()
+
+        class ConcurrentSource(EmptySource):
+            def produce(self, pool, index):
+                with seen_lock:
+                    seen.append(index)
+                if index < 3:
+                    barrier.wait(timeout=10)
+                game = pool.begin_game(f"parallel-{index}")
+                cells, side = make_board(random.Random(200 + index), 8)
+                pool.add_sample(game, record(cells, side))
+                pool.commit_game(game)
+                return {**pool.stats(), "inserted": 1, "source_ids": [f"parallel-{index}"]}
+
+        cfg = replace(self.cfg, collector_workers=3, max_games=7,
+                      min_train_samples=100, max_pending_samples=100)
+        result = TrainingTask(cfg, source_factory=ConcurrentSource).run()
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(sorted(seen), list(range(7)))
+        self.assertEqual(result["games"], 7)
+        self.assertEqual(result["resources"]["collector_workers"], 3)
+        self.assertTrue(result["cleanup_complete"])
+        with SamplePool(cfg.pool, create=False) as pool:
+            self.assertEqual(pool.stats()["committed_games"], 7)
+            self.assertEqual(pool.stats()["staged_games"], 0)
+            self.assertFalse(pool.validate())
+
+    def test_progress_writes_are_coalesced_and_terminal_is_immediate(self):
+        task = self.task(replace(self.cfg, state_write_interval_s=3600))
+        task.started = time.monotonic()
+        task.directory.mkdir(parents=True)
+        with patch.object(training_task, 'write_json', wraps=training_task.write_json) as writes:
+            for step in range(100):
+                task.update('trainer', phase='training', progress={'step':step})
+            self.assertEqual(writes.call_count, 1)
+            task.update(status='stopped', reason='user_stop')
+            self.assertEqual(writes.call_count, 2)
+        stored = json.loads((task.directory/'state.json').read_text('utf-8'))
+        self.assertEqual(stored['trainer']['progress']['step'], 99)
+        self.assertEqual(stored['status'], 'stopped')
+
+    def test_checkpoint_rate_limit_preserves_best_and_final_steps(self):
+        import torch
+        build_pool(self.cfg.pool)
+        with patch.object(torch, 'save', wraps=torch.save) as saves:
+            result = train_value(TrainConfig(pool=self.cfg.pool,
+                output_dir=str(self.root/'limited-writes'), steps=8, batch_size=8,
+                val_every=1, checkpoint_every=1, checkpoint_min_interval_s=3600,
+                log_every=1, device='cpu', export=False))
+            self.assertEqual(saves.call_count, 2)  # Best and last, only at completion.
+        last = torch.load(result['checkpoint']['last'], weights_only=False)
+        best = torch.load(result['checkpoint']['best'], weights_only=False)
+        history = [json.loads(line) for line in Path(result['history']).read_text().splitlines()]
+        lowest = min((h for h in history if 'val_loss' in h), key=lambda h:h['val_loss'])
+        self.assertEqual(best['step'], lowest['step'])
+        self.assertEqual(last['step'], 8)
+
+    def test_batch_staging_uses_one_transaction_and_rolls_back_errors(self):
+        with SamplePool(self.cfg.pool) as pool:
+            game = pool.begin_game('batch-staging')
+            records = [record(*make_board(random.Random(i + 400), 8)) for i in range(8)]
+            statements = []
+            pool._conn.set_trace_callback(statements.append)
+            self.assertEqual(pool.add_samples(game, records), ['inserted'] * 8)
+            self.assertEqual(sum(s == 'COMMIT' for s in statements), 1)
+            self.assertFalse(pool.read_batch())  # Staged is still invisible.
+            fresh = record(*make_board(random.Random(900), 10))
+            with self.assertRaises(PoolError):
+                pool.add_samples(game, [fresh, {**fresh, 'board':b'bad'}])
+            count = pool._conn.execute('SELECT COUNT(*) FROM samples WHERE game_id=?', (game,)).fetchone()[0]
+            self.assertEqual(count, 8)
+            pool.abort_game(game)
+
+    def test_cached_batches_preserve_rng_d4_targets_and_weights(self):
+        import torch
+        from value_data import load_pool, tensors, CachedTrainingBatches
+        build_pool(self.cfg.pool)
+        samples = load_pool(self.cfg.pool).train
+        samples = [replace(s, weight=.25 if i % 2 else 1.) for i, s in enumerate(samples)]
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            cached = CachedTrainingBatches(samples, device)
+            reference_rng, cached_rng = random.Random(91), random.Random(91)
+            for batch_size in (1, 8, len(samples) + 1):
+                chosen = [samples[reference_rng.randrange(len(samples))]
+                          for _ in range(min(batch_size, len(samples)))]
+                x, y = tensors(chosen, augment=True, rng=reference_rng)
+                actual_x, actual_y, actual_weights = cached.sample(batch_size, cached_rng)
+                self.assertTrue(torch.equal(x, actual_x.cpu()))
+                self.assertTrue(torch.equal(y, actual_y.cpu()))
+                self.assertTrue(torch.equal(torch.tensor([s.weight for s in chosen]), actual_weights.cpu()))
+                self.assertEqual(reference_rng.getstate(), cached_rng.getstate())
 
     def test_no_unbounded_training_without_new_commits(self):
         build_pool(self.cfg.pool)
@@ -176,7 +272,7 @@ class TaskTests(unittest.TestCase):
             value = ExecutorClient(*args, **kw)
             processes.append(value._proc)
             return value
-        task = self.task(replace(self.cfg, min_train_samples=100, max_pending_samples=100))
+        task = self.task(replace(self.cfg, collector_workers=4, min_train_samples=100, max_pending_samples=100))
         result = []
         with patch.object(training_task, "ExecutorClient", client):
             thread = threading.Thread(target=lambda: result.append(task.run()))

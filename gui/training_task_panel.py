@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import queue
 import random
 import threading
@@ -44,6 +45,14 @@ class TrainingTaskPanel(QGroupBox):
         self.spin_new = self._spin(1, 100000, 32)
         self.spin_steps = self._spin(1, 100000, 200)
         self.spin_batch = self._spin(1, 2048, 32)
+        self.spin_workers = self._spin(1, 256, 1)
+        self.spin_eval_workers = self._spin(1, 256, 1)
+        self.spin_cpu_threads = self._spin(1, 256, 2)
+        self.spin_sample_limit = self._spin(1, 1000000, 512)
+        self.spin_pending = self._spin(1, 1000000, 128)
+        self.spin_validation_games = self._spin(1, 10000, 2)
+        self.spin_state_seconds = self._spin(1, 60, 2)
+        self.spin_checkpoint_seconds = self._spin(1, 3600, 60)
         self.spin_rounds = self._spin(1, 10000, 10)
         self.spin_games = self._spin(1, 100000, 1000)
         self.spin_minutes = self._spin(1, 1440, 60)
@@ -53,12 +62,23 @@ class TrainingTaskPanel(QGroupBox):
             (("池容量", self.spin_capacity), ("启动训练样本", self.spin_min_train), ("新增样本/轮", self.spin_new)),
             (("优化步/轮", self.spin_steps), ("批", self.spin_batch), ("最多候选", self.spin_rounds)),
             (("最多采集局", self.spin_games), ("最长分钟", self.spin_minutes)),
+            (("采集并发", self.spin_workers), ("测评并发", self.spin_eval_workers), ("训练 CPU 线程", self.spin_cpu_threads)),
+            (("训练快照上限", self.spin_sample_limit), ("待训练积压", self.spin_pending), ("验证对局", self.spin_validation_games)),
+            (("状态写入间隔秒", self.spin_state_seconds), ("检查点最小间隔秒", self.spin_checkpoint_seconds)),
             (("测评开局对", self.spin_pairs), ("每步 ms", self.spin_ms))):
             row = QHBoxLayout()
             for label, widget in fields:
                 row.addWidget(QLabel(label))
                 row.addWidget(widget)
             layout.addLayout(row)
+        row = QHBoxLayout()
+        self.btn_throughput = QPushButton("高吞吐预设（本机）")
+        self.btn_throughput.clicked.connect(self._high_throughput)
+        self.btn_quick = QPushButton("少量数据快速启动")
+        self.btn_quick.clicked.connect(self._quick_start)
+        row.addWidget(self.btn_throughput)
+        row.addWidget(self.btn_quick)
+        layout.addLayout(row)
         row = QHBoxLayout()
         row.addWidget(QLabel("训练设备"))
         self.combo_device = QComboBox()
@@ -110,7 +130,29 @@ class TrainingTaskPanel(QGroupBox):
         self.timer.timeout.connect(self.poll)
         self.timer.start(50)
         self.combo_mode.currentIndexChanged.connect(self._mode_changed)
+        self._high_throughput()
         self._mode_changed()
+
+    def _high_throughput(self):
+        cpus = os.cpu_count() or 1
+        evaluation = max(1, min(8, cpus // 4))
+        self.spin_workers.setValue(max(1, min(64, cpus - evaluation)))
+        self.spin_eval_workers.setValue(evaluation)
+        self.spin_cpu_threads.setValue(max(1, min(4, cpus // 8)))
+        self.spin_capacity.setValue(100000)
+        self.spin_min_train.setValue(2048)
+        self.spin_new.setValue(2048)
+        self.spin_batch.setValue(2048)
+        self.spin_sample_limit.setValue(32768)
+        self.spin_pending.setValue(8192)
+        self.spin_validation_games.setValue(8)
+
+    def _quick_start(self):
+        for widget, value in ((self.spin_workers, 1), (self.spin_eval_workers, 1),
+                (self.spin_cpu_threads, 2), (self.spin_capacity, 1000),
+                (self.spin_min_train, 32), (self.spin_new, 32), (self.spin_batch, 32),
+                (self.spin_sample_limit, 512), (self.spin_pending, 128), (self.spin_validation_games, 2)):
+            widget.setValue(value)
 
     def _mode_changed(self):
         mode = self.combo_mode.currentData()
@@ -162,17 +204,26 @@ class TrainingTaskPanel(QGroupBox):
         from training_task import TaskConfig
         return TaskConfig(engine=str(self.exe), pool=str(self.pool), registry=str(self.registry),
             mode=self.combo_mode.currentData(), teacher_weight=self.spin_teacher_weight.value(),
-            selfplay={"movetime_ms": self.spin_selfplay_ms.value(), "epsilon": self.spin_epsilon.value()},
+            selfplay={"movetime_ms": self.spin_selfplay_ms.value(), "epsilon": self.spin_epsilon.value(),
+                      "game_timeout_s": 180.0 if self.spin_workers.value() > 1 else 60.0},
             evaluations=str(self.evaluations), output_root=self.edit_output.text().strip(),
             capacity=self.spin_capacity.value(), min_train_samples=self.spin_min_train.value(),
-            min_new_samples=self.spin_new.value(), max_pending_samples=max(128, self.spin_new.value()),
-            training_sample_limit=max(512, self.spin_min_train.value()),
+            min_new_samples=self.spin_new.value(), max_pending_samples=max(self.spin_pending.value(), self.spin_new.value()),
+            training_sample_limit=max(self.spin_sample_limit.value(), self.spin_min_train.value()),
+            validation_games=self.spin_validation_games.value(), collector_workers=self.spin_workers.value(),
+            cpu_threads=self.spin_cpu_threads.value(),
+            state_write_interval_s=self.spin_state_seconds.value(),
+            checkpoint_min_interval_s=self.spin_checkpoint_seconds.value(),
+            collection_delay_ms=0 if self.spin_workers.value() > 1 else 100,
+            full_pool_delay_ms=50 if self.spin_workers.value() > 1 else 500,
+            min_round_interval_s=0 if self.spin_workers.value() > 1 else 10,
             train_steps=self.spin_steps.value(), batch_size=self.spin_batch.value(),
             lr=self.spin_lr.value(), device=self.combo_device.currentText(),
             max_rounds=self.spin_rounds.value(), max_games=self.spin_games.value(),
             max_minutes=self.spin_minutes.value(),
             seed=random.SystemRandom().randrange(2**31),
-            evaluation={"pairs": self.spin_pairs.value(), "movetime_ms": self.spin_ms.value()})
+            evaluation={"pairs": self.spin_pairs.value(), "movetime_ms": self.spin_ms.value(),
+                        "workers": self.spin_eval_workers.value()})
 
     def start(self):
         if self.thread is not None or not self.can_start():
@@ -201,6 +252,8 @@ class TrainingTaskPanel(QGroupBox):
         self.thread.start()
 
     def _enable_settings(self, enabled):
+        self.btn_throughput.setEnabled(enabled)
+        self.btn_quick.setEnabled(enabled)
         for widget in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox) + self.findChildren(QComboBox) + self.findChildren(QLineEdit):
             widget.setEnabled(enabled)
 
@@ -221,7 +274,7 @@ class TrainingTaskPanel(QGroupBox):
             f"池累计生成 {metrics.get('generated', 0)}，有效 {metrics.get('valid', 0)}，入池 {metrics.get('inserted', 0)}",
             f"池容量 {metrics.get('total_pool_samples', metrics.get('pool_samples', 0))}/{metrics.get('capacity', '?')}，可用 {metrics.get('pool_samples', 0)}，有效/秒 {metrics.get('effective_per_second', 0):.2f}",
             f"采集模型 {data.get('version') or data.get('model_id', 'handcrafted')}",
-            f"训练 step {progress.get('step', '-')}，loss {progress.get('train_loss', '-')}，val MAE {progress.get('val_mae', '-')}",
+            f"训练 step {progress.get('step', '-')}，loss {progress.get('train_loss', '-')}，val MAE {progress.get('val_mae', '-')}，设备 {train.get('summary', {}).get('device', state['resources'].get('device'))}",
             f"正式版本 {current.get('version', '尚未建立')}；资源 {state['resources']}",
             f"测评结果 {evaluation.get('result', {}).get('statistics', {})}",
             f"结束原因 {state.get('reason')}；任务记录 {state['directory']}"]

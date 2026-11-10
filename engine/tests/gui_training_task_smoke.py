@@ -36,6 +36,7 @@ def main():
             pool=root / "pool.sqlite3", registry=root / "registry", evaluations=root / "evaluations")
         window.show()
         panel = window.training_task_panel
+        panel.btn_quick.click()
         panel.edit_output.setText(str(root / "tasks"))
         panel.spin_min_train.setValue(1)
         panel.spin_new.setValue(1)

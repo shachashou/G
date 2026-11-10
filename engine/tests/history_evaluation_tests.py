@@ -128,9 +128,11 @@ class HistoryTests(unittest.TestCase):
 
     def test_pass_failure_and_historical_challenge(self):
         self.initial()
-        config = replace(self.cfg, pairs=32)
-        with patch.object(he, "MatchEngine", ScriptedEngine):
+        config = replace(self.cfg, pairs=32, workers=4, report_interval_s=3600)
+        with patch.object(he, "MatchEngine", ScriptedEngine), patch.object(he, 'write_json', wraps=he.write_json) as writes:
             passed = self.run_eval(model=1, config=config)
+        report_writes = [c for c in writes.call_args_list if Path(c.args[0]).name == 'report.json']
+        self.assertEqual(len(report_writes), 2)  # Initial and sealed; no per-game rewrite.
         self.assertEqual(passed["publication"]["version"], "v1", passed.get("publication_error"))
         self.assertEqual(passed["statistics"]["v0"]["wins"], 64)
         self.assertGreater(passed["statistics"]["v0"]["one_sided_lower"], 0.5)
@@ -149,6 +151,40 @@ class HistoryTests(unittest.TestCase):
         self.assertFalse(failed["eligible"])
         self.assertEqual(failed["statistics"]["v1"]["conclusion"], "below_threshold")
         self.assertEqual(before, self.pointer())
+
+    def test_parallel_games_overlap_and_stop_preserves_incumbent(self):
+        self.initial()
+        before = self.pointer()
+        original = he.play_pair_game
+        barrier = threading.Barrier(4)
+        lock = threading.Lock()
+        active = peak = entered = 0
+
+        def controlled(*args):
+            nonlocal active, peak, entered
+            with lock:
+                active += 1
+                entered += 1
+                ordinal = entered
+                peak = max(peak, active)
+            try:
+                if ordinal <= 4:
+                    barrier.wait(timeout=10)
+                return original(*args)
+            finally:
+                with lock:
+                    active -= 1
+
+        stop = threading.Event()
+        with patch.object(he, "MatchEngine", ScriptedEngine), patch.object(he, "play_pair_game", controlled):
+            result = self.run_eval(model=1, config=replace(self.cfg, pairs=32, workers=4),
+                                   stop_event=stop, progress=lambda _: stop.set())
+        self.assertEqual(peak, 4)
+        self.assertEqual(active, 0)
+        self.assertEqual(result["status"], "interrupted")
+        self.assertIsNone(result["publication"])
+        self.assertEqual(before, self.pointer())
+        self.assertLess(len(result["matches"]["v0"]), 64)
 
     def test_anomalies_never_promote(self):
         self.initial()

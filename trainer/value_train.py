@@ -25,6 +25,7 @@ promotion claim.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -59,6 +60,7 @@ class TrainConfig:
     device: str = "auto"
     val_every: int = 20
     checkpoint_every: int = 50
+    checkpoint_min_interval_s: float = 60.0
     log_every: int = 10
     resume: str | None = None
     ea: int = vf.EA_DEFAULT
@@ -118,11 +120,10 @@ def evaluate(model: ValueNet, samples, device: str, batch_size: int,
             "samples": count}
 
 
-def _save_checkpoint(path: Path, *, model: ValueNet, optimizer,
+def _checkpoint_payload(*, model: ValueNet, optimizer,
                      step: int, config: TrainConfig, identity: dict,
-                     history: list[dict], device: str, training_positions: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({
+                     history: list[dict], device: str, training_positions: dict) -> dict:
+    return {
         "format": CHECKPOINT_FORMAT,
         "arch": ARCH,
         "rule": "renju",
@@ -138,7 +139,12 @@ def _save_checkpoint(path: Path, *, model: ValueNet, optimizer,
         "optimizer_state": optimizer.state_dict(),
         "history": history[-500:],
         "created_at": _now(),
-    }, path)
+    }
+
+
+def _save_checkpoint(path: Path, **values) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(_checkpoint_payload(**values), path)
 
 
 def _load_checkpoint(path: str | Path, config: TrainConfig) -> dict:
@@ -344,6 +350,23 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
     step = start_step
     completed_steps = start_step
     samples_exposed = 0
+    pending_best = None
+    last_checkpoint_write = last_best_write = time.monotonic()
+    pending_history = []
+    last_history_write = time.monotonic()
+
+    def append_history(entry):
+        nonlocal last_history_write
+        pending_history.append(json.dumps(entry, ensure_ascii=False) + "\n")
+        if time.monotonic() - last_history_write >= 2.0:
+            with history_path.open("a", encoding="utf-8") as handle:
+                handle.writelines(pending_history)
+            pending_history.clear()
+            last_history_write = time.monotonic()
+    # Bound the cache for unrestricted CLI datasets; autonomous snapshots are
+    # bounded separately. Avoid encoding 450 features in Python every step.
+    cached = (value_data.CachedTrainingBatches(bundle.train, device)
+              if len(bundle.train) * vf.N_FEATURES * 4 <= 256 * 1024 * 1024 else None)
     for step in range(start_step, steps):
         if stop_event is not None and stop_event.is_set():
             stopped, stop_reason = True, "stopped"
@@ -352,20 +375,25 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
                 and (time.monotonic() - started) / 60.0 >= config.max_minutes:
             stopped, stop_reason = True, "time_limit"
             break
-        chosen = [bundle.train[rng.randrange(len(bundle.train))]
-                  for _ in range(min(config.batch_size, len(bundle.train)))]
-        x, y = value_data.tensors(chosen, augment=True, rng=rng)
-        x, y = x.to(device), y.to(device)
+        if cached is not None:
+            x, y, weights = cached.sample(config.batch_size, rng)
+        else:
+            chosen = [bundle.train[rng.randrange(len(bundle.train))]
+                      for _ in range(min(config.batch_size, len(bundle.train)))]
+            x, y = value_data.tensors(chosen, augment=True, rng=rng)
+            x, y = x.to(device), y.to(device)
+            weights = torch.tensor([s.weight for s in chosen], device=device)
         model.train()
         optimizer.zero_grad()
         prediction = model(x)
-        weights = torch.tensor([s.weight for s in chosen], device=device)
         loss = value_loss(prediction, y, config.loss, config.smooth_l1_beta, weights)
         loss.backward()
         optimizer.step()
         completed_steps = step + 1
         samples_exposed += x.shape[0]
-        train_loss = float(loss.detach())
+        if ((step + 1) % max(1, config.log_every) == 0
+                or (step + 1) % max(1, config.val_every) == 0 or step + 1 == steps):
+            train_loss = float(loss.detach())
         if (step + 1) % max(1, config.log_every) == 0 or step + 1 == steps:
             entry = {"step": step + 1, "train_loss": train_loss,
                      "elapsed_s": round(time.monotonic() - started, 3)}
@@ -373,8 +401,7 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
                 progress(dict(entry, val_loss=val_metrics["loss"],
                               val_mae=val_metrics["mae"], stopped=stopped))
             history.append(entry)
-            with history_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            append_history(entry)
         if (step + 1) % max(1, config.val_every) == 0 or step + 1 == steps:
             val_metrics = evaluate(model, bundle.validation, device,
                                    config.batch_size, config.loss,
@@ -383,22 +410,33 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
                      "val_mae": val_metrics["mae"],
                      "elapsed_s": round(time.monotonic() - started, 3)}
             history.append(entry)
-            with history_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            append_history(entry)
             if progress is not None:
                 progress(dict(entry, train_loss=train_loss, stopped=stopped))
             if val_metrics["loss"] < best_val:
                 best_val = val_metrics["loss"]
-                _save_checkpoint(best_path, model=model, optimizer=optimizer,
+                pending_best = copy.deepcopy(_checkpoint_payload(model=model, optimizer=optimizer,
                                  step=step + 1, config=config,
                                  identity=bundle.identity, history=history,
-                                 device=device, training_positions=positions)
-        if (step + 1) % max(1, config.checkpoint_every) == 0:
+                                 device=device, training_positions=positions))
+            if (pending_best is not None
+                    and time.monotonic() - last_best_write >= config.checkpoint_min_interval_s):
+                torch.save(pending_best, best_path)
+                pending_best = None
+                last_best_write = time.monotonic()
+        if ((step + 1) % max(1, config.checkpoint_every) == 0 and step + 1 < steps
+                and time.monotonic() - last_checkpoint_write >= config.checkpoint_min_interval_s):
             _save_checkpoint(last_path, model=model, optimizer=optimizer,
                              step=step + 1, config=config,
                              identity=bundle.identity, history=history,
                              device=device, training_positions=positions)
+            last_checkpoint_write = time.monotonic()
 
+    if pending_history:
+        with history_path.open("a", encoding="utf-8") as handle:
+            handle.writelines(pending_history)
+    if pending_best is not None:
+        torch.save(pending_best, best_path)
     _save_checkpoint(last_path, model=model, optimizer=optimizer,
                      step=completed_steps, config=config,
                      identity=bundle.identity, history=history,

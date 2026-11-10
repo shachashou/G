@@ -123,12 +123,21 @@ def collect(pool: SamplePool, config: CollectConfig,
     rejected_games = 0
     filters: dict[str, int] = {}
     source_ids: list[str] = []
+    pending_generated = 0
+    pending_filters = {}
     rng = random.Random(config.seed)
 
     def bump(reason: str) -> None:
         filters[reason] = filters.get(reason, 0) + 1
 
+    def flush_observations():
+        nonlocal pending_generated
+        pool.record_observations(pending_generated, pending_filters)
+        pending_generated = 0
+        pending_filters.clear()
+
     def report(stopped: bool = False) -> dict:
+        flush_observations()
         elapsed = time.monotonic() - started
         summary = pool.finish_run(
             run_id, generated=generated, valid=valid, inserted=inserted,
@@ -154,9 +163,10 @@ def collect(pool: SamplePool, config: CollectConfig,
                                   model_id=config.model_id, rule="renju")
         try:
             positions, result = play_game(game_client, config, rng, stop_event)
+            accepted = []
             for cells, side, ply in positions:
                 generated += 1
-                pool.record_generated(1)
+                pending_generated += 1
                 if stop_event is not None and stop_event.is_set():
                     break
                 report_label = label_position(
@@ -169,13 +179,17 @@ def collect(pool: SamplePool, config: CollectConfig,
                 if not report_label.get("accepted"):
                     reason = str(report_label.get("filter_reason", "rejected"))
                     bump(reason)
-                    pool.record_filter(reason)
+                    pending_filters[reason] = pending_filters.get(reason, 0) + 1
                     continue
                 valid += 1
                 pool_record = dict(report_label["record"])
                 pool_record["label_source"] = "teacher"
                 pool_record["result_value"] = None
-                status = pool.add_sample(game_id, pool_record)
+                accepted.append(pool_record)
+            if stop_event is not None and stop_event.is_set():
+                pool.abort_game(game_id)
+                return report(stopped=True)
+            for status in pool.add_samples(game_id, accepted):
                 if status == "inserted":
                     inserted += 1
                 elif status == "duplicate":
@@ -188,8 +202,10 @@ def collect(pool: SamplePool, config: CollectConfig,
                 pool.abort_game(game_id)
                 return report(stopped=True)
             pool.commit_game(game_id, final_result=result)
+            flush_observations()
             source_ids.append(source_id)
         except Exception:
+            flush_observations()
             pool.abort_game(game_id)
             rejected_games += 1
             if stop_event is not None and stop_event.is_set():

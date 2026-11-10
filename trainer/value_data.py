@@ -229,6 +229,25 @@ def tensors(samples: list[Sample], *, augment: bool = False,
     return x, y
 
 
+class CachedTrainingBatches:
+    """Encode a frozen snapshot once; gather and augment on its training device."""
+
+    def __init__(self, samples: list[Sample], device: str):
+        self.x, self.y = (t.to(device) for t in tensors(samples))
+        self.weights = torch.tensor([s.weight for s in samples], dtype=torch.float32, device=device)
+        self.transforms = torch.tensor(D4_TABLES, dtype=torch.long, device=device)
+
+    def sample(self, batch_size: int, rng: random.Random):
+        count = min(batch_size, len(self.x))
+        # Preserve the original sampling / D4 RNG order and per-step exposure.
+        indices = [rng.randrange(len(self.x)) for _ in range(count)]
+        transforms = [rng.randrange(features.NUM_SYMMETRIES) for _ in range(count)]
+        ids = torch.tensor(indices, dtype=torch.long, device=self.x.device)
+        ts = torch.tensor(transforms, dtype=torch.long, device=self.x.device)
+        x = self.x.index_select(0, ids).gather(1, self.transforms.index_select(0, ts))
+        return x, self.y.index_select(0, ids), self.weights.index_select(0, ids)
+
+
 def batches(samples: list[Sample], batch_size: int, *,
             augment: bool = False, rng: random.Random | None = None,
             device: str = "cpu"):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
@@ -44,6 +45,8 @@ class EvaluationConfig:
     movetime_ms: int = 200
     timeout_grace_ms: int = 1000
     threads: int = 1
+    workers: int = 1
+    report_interval_s: float = 2.0
     max_plies: int = 225
     opening_plies: int = 6
     opening_region: int = 7
@@ -55,7 +58,9 @@ class EvaluationConfig:
         for name in ("pairs", "min_pairs", "movetime_ms", "max_plies"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise EvaluationError(f"{name} must be a positive integer")
-        if (self.threads != 1 or not 0 <= self.timeout_grace_ms <= 60000
+        if (self.threads != 1 or type(self.workers) is not int or not 1 <= self.workers <= 256
+                or not 0 <= self.report_interval_s <= 3600
+                or not 0 <= self.timeout_grace_ms <= 60000
                 or not 0 < self.alpha < 1 or not 0.5 <= self.score_threshold < 1
                 or not 1 <= self.opening_plies <= 8
                 or self.opening_region not in range(1, 16, 2)
@@ -348,6 +353,55 @@ def verify_publication(run: Path, manifest_sha: str, report_sha: str, stop_event
     return manifest, report
 
 
+def parallel_games(engine, candidate, opponent, openings, config, stop):
+    """Bounded independent games; callers alone write the report.
+
+    An abnormal game cancels in-flight siblings without setting the caller's
+    stop event (which would incorrectly classify an engine failure as a user stop).
+    """
+    halted = threading.Event()
+
+    class MatchStop:
+        def is_set(self):
+            return stop.is_set() or halted.is_set()
+
+    cancelled = MatchStop()
+    jobs = iter((pair, opening, black) for pair, opening in enumerate(openings)
+                for black in (True, False))
+    pending = set()
+    with ThreadPoolExecutor(max_workers=config.workers, thread_name_prefix="evaluation") as executor:
+        def submit():
+            if cancelled.is_set():
+                return
+            job = next(jobs, None)
+            if job is not None:
+                pair, opening, black = job
+                pending.add(executor.submit(play_pair_game, engine, candidate, opponent,
+                                            opening, config, pair, black, cancelled))
+        try:
+            for _ in range(config.workers):
+                submit()
+            while pending:
+                done, pending = wait(pending, timeout=.1, return_when=FIRST_COMPLETED)
+                for future in done:
+                    if future.cancelled():
+                        continue
+                    game = future.result()
+                    if not game["valid"]:
+                        halted.set()
+                    yield game
+                if cancelled.is_set():
+                    for future in pending:
+                        future.cancel()
+                else:
+                    for _ in done:
+                        submit()
+        finally:
+            halted.set()
+            for future in pending:
+                future.cancel()
+
+
 def evaluate(candidate: str | Path, engine: str | Path, *,
              registry: str | Path = DEFAULT_REGISTRY,
              output_root: str | Path = ROOT / "data" / "evaluations",
@@ -429,29 +483,25 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
               "matches": {}, "statistics": {}, "publication": None}
     write_json(run / "report.json", report)
     started = time.monotonic()
+    last_report_write = started
     aborted = False
     matches = {"initial": frozen_candidate} if bootstrap else frozen_opponents
     for name, opponent in matches.items():
         games = report["matches"][name] = []
-        for pair, opening in enumerate(openings):
-            for a_black in (True, False):
-                if stop.is_set():
-                    aborted = True
-                    break
-                game = play_pair_game(engine_path, frozen_candidate, opponent,
-                                      opening, config, pair, a_black, stop)
-                games.append(game)
-                report["statistics"][name] = pair_statistics(games, config, len(matches))
+        for game in parallel_games(engine_path, frozen_candidate, opponent, openings, config, stop):
+            games.append(game)
+            games.sort(key=lambda g: (g["pair"], g["a_color"] != "black"))
+            report["statistics"][name] = pair_statistics(games, config, len(matches))
+            if time.monotonic() - last_report_write >= config.report_interval_s:
                 write_json(run / "report.json", report)
-                if progress:
-                    progress({"opponent": name, "games": len(games), "total": config.pairs * 2,
-                              "statistics": report["statistics"][name], "run": str(run)})
-                if not game["valid"]:
-                    aborted = True
-                    break
-            if aborted:
-                break
-        if aborted:
+                last_report_write = time.monotonic()
+            if progress:
+                progress({"opponent": name, "games": len(games), "total": config.pairs * 2,
+                          "statistics": report["statistics"][name], "run": str(run)})
+            if not game["valid"]:
+                aborted = True
+        if aborted or stop.is_set():
+            aborted = True
             break
     intact = (file_identity(run / "manifest.json")["sha256"] == manifest_sha
               and frozen_files(run) == manifest["files"])
@@ -496,6 +546,7 @@ def main(argv=None):
         p.add_argument("--score-threshold", type=float, default=0.5)
         p.add_argument("--alpha", type=float, default=0.05)
         p.add_argument("--movetime-ms", type=int, default=200)
+        p.add_argument("--workers", type=int, default=1, help="independent games in parallel; each engine remains single-threaded")
         p.add_argument("--timeout-grace-ms", type=int, default=1000)
         p.add_argument("--max-plies", type=int, default=225)
         p.add_argument("--vcf-policy", choices=("off", "root", "root_and_children"), default="root_and_children")
@@ -514,7 +565,7 @@ def main(argv=None):
             result = evaluate(args.candidate, args.engine, registry=args.registry,
                 output_root=args.output_root, bootstrap=args.command == "initial",
                 opponents=args.opponent, stop_event=stop,
-                config=EvaluationConfig(pairs=args.pairs, movetime_ms=args.movetime_ms,
+                config=EvaluationConfig(pairs=args.pairs, movetime_ms=args.movetime_ms, workers=args.workers,
                     min_pairs=args.min_pairs, score_threshold=args.score_threshold, alpha=args.alpha,
                     timeout_grace_ms=args.timeout_grace_ms, max_plies=args.max_plies,
                     vcf_policy=args.vcf_policy, vcf_nodes=args.vcf_nodes,

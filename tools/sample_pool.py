@@ -344,6 +344,13 @@ class SamplePool:
         with self._conn:
             self._bump("generated", amount)
 
+    def record_observations(self, generated: int, filters: dict) -> None:
+        """Flush one game's observation counters in a single durable transaction."""
+        with self._conn:
+            self._bump("generated", generated)
+            for reason, count in filters.items():
+                self._bump(f"{FILTER_COUNTER}{reason}", count)
+
     def counters(self) -> dict:
         return {row[0]: int(row[1]) for row in
                 self._conn.execute("SELECT name, value FROM counters")}
@@ -454,6 +461,20 @@ class SamplePool:
                 (int(game_id),))
             return cursor.rowcount > 0
 
+    @contextmanager
+    def _sample_transaction(self):
+        if self._conn.in_transaction:
+            yield
+        else:
+            with self._conn:
+                self._conn.execute("BEGIN IMMEDIATE")
+                yield
+
+    def add_samples(self, game_id: int, records) -> list[str]:
+        """Stage a whole game's labels atomically; commit_game still publishes it."""
+        with self._sample_transaction():
+            return [self.add_sample(game_id, record) for record in records]
+
     def add_sample(self, game_id: int, record: dict) -> str:
         """Stages one sample; returns inserted|duplicate|d4_duplicate."""
         now = _now()
@@ -480,7 +501,9 @@ class SamplePool:
             raise PoolError("result samples require a result value")
         dedup = exact_key(cells, side)
         canonical = d4_key(cells, side)
-        with self._conn:
+        with self._sample_transaction():
+            # Dedup check and insert must share the same writer reservation:
+            # different collectors can stage symmetric positions concurrently.
             game = self._conn.execute(
                 "SELECT status FROM games WHERE id = ?", (int(game_id),)).fetchone()
             if game is None:

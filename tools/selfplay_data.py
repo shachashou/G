@@ -84,6 +84,7 @@ class SelfPlayDataSource:
         filters = {}
         generated = inserted = 0
         game_id = None
+        record_written = False
         task.event("game_snapshot", game=index + 1, model_id=incumbent["model_id"],
                    version=incumbent["version"], sha256=incumbent["sha256"], teacher_calls=0)
         task.update("data", phase="selfplay", game=index + 1,
@@ -91,7 +92,6 @@ class SelfPlayDataSource:
 
         def discard(reason):
             filters[reason] = filters.get(reason, 0) + 1
-            pool.record_filter(reason)
 
         def stopped():
             if task.stop_event.is_set():
@@ -142,7 +142,6 @@ class SelfPlayDataSource:
                         break
                     if ply >= cfg.opening_plies and (ply - cfg.opening_plies) % cfg.sample_every == 0:
                         generated += 1
-                        pool.record_generated()
                         status = "not_filtered"
                         if cfg.filter_vcf:
                             tactical = referee.vcf(max_nodes=cfg.filter_nodes, max_attack_plies=cfg.filter_plies)
@@ -164,18 +163,23 @@ class SelfPlayDataSource:
                         raise ValueError("self-play terminal replay mismatch")
                     stopped()
                     game_id = pool.begin_game(source_id, kind="selfplay", model_id=incumbent["model_id"])
+                    records = []
                     for cells, side, ply, tactical in positions:
-                        stopped()
-                        status = pool.add_sample(game_id, {
+                        records.append({
                             "board": bytes(cells), "side_to_move": side, "rule": "renju",
                             "label_source": self.label_source, "label_version": "selfplay-result-v1",
                             "tactical_status": tactical, "result_value": record["result_value"],
                             "value": None, "raw_eval": None, "raw_score": None,
                             "raw_perspective": "black_absolute", "normalization": "terminal-result",
                             "normalization_param": 1.0})
+                    stopped()
+                    statuses = pool.add_samples(game_id, records)
+                    for (_, _, ply, _), status in zip(positions, statuses):
                         record["sampled_plies"].append({"ply": ply, "status": status})
                         inserted += status == "inserted"
+                    record["elapsed_s"] = round(time.monotonic() - started, 4)
                     write_json(path, record)
+                    record_written = True
                     stopped()
                     pool.commit_game(game_id, final_result=record["final_result"], validation_group=self.label_source)
                     game_id = None
@@ -191,8 +195,10 @@ class SelfPlayDataSource:
         finally:
             if game_id is not None:
                 pool.abort_game(game_id)
-            record["elapsed_s"] = round(time.monotonic() - started, 4)
-            write_json(path, record)
+            if not record_written or record["status"] != "completed":
+                record["elapsed_s"] = round(time.monotonic() - started, 4)
+                write_json(path, record)
+            pool.record_observations(generated, filters)
             pool.finish_run(run_id, generated=generated, valid=len(positions),
                 inserted=inserted if record["status"] == "completed" else 0, filters=filters,
                 elapsed_seconds=record["elapsed_s"],

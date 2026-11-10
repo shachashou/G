@@ -34,6 +34,11 @@ def main():
         root = Path(raw)
         panel = TrainingTaskPanel(exe, root/'empty.sqlite3', root/'missing-registry',
             root/'empty-evaluations', root/'empty-tasks', lambda: True)
+        assert panel.spin_batch.value() == 2048
+        assert panel.spin_pending.value() == 8192
+        assert panel.make_config().training_sample_limit == 32768
+        panel.btn_quick.click()
+        assert panel.make_config().collector_workers == 1
         busy = []
         panel.busyChanged.connect(busy.append)
         with patch('training_task.TrainingTask', side_effect=AssertionError('unready task created')):
@@ -67,6 +72,7 @@ def main():
             window = gomoku_gui.MainWindow(exe,20,pool=pool,registry=registry,evaluations=root/'evaluations')
             window.show()
             panel = window.training_task_panel
+            panel.btn_quick.click()
             assert '不可用' in window.teacher_label.text()
             panel.combo_mode.setCurrentIndex(panel.combo_mode.findData('transition'))
             assert '还不是完全无教师' in panel.hint.text()

@@ -66,6 +66,8 @@ Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -h
 
 `CMakeLists.txt` 不再强制 MSVC；Linux / macOS 上用系统 C++ 编译器直接执行上面三条 cmake / ctest 命令即可。改了 CMakeLists.txt 后先重新执行 `cmake -S . -B build -G Ninja`。
 
+技能目录 `.agents/skills/` 由根目录 `skills-lock.json` 记录的来源安装，属于安装物而非项目源码，因此不纳入版本控制；新克隆后按该锁文件重装技能即可，版本仍由锁文件固定。
+
 ## 启动对弈
 
 ~~~powershell

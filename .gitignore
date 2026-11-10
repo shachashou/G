@@ -61,3 +61,7 @@ desktop.ini
 *.tmp
 *.orig
 *.rej
+
+# Installed skills: content is fetched from the sources pinned in
+# skills-lock.json, so it is installed material, not project source.
+.agents/skills/

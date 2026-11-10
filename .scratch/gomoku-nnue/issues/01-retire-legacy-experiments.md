@@ -23,4 +23,5 @@
 
 - **实际执行**：删除 23 个旧实验文件（trainer 9 个：diagnose/distill18/distill18_fidelity/local_ranking_diagnosis/local_ranking_fit/move_correlation/weight_drift/teacher_labels/targets；tools 9 个：bootstrap/budget_run/distill18_screen/distill18_summary/local_ranking_summary + 4 个 ps1；engine/tests 5 个）。解耦 train.py/export.py 的 `--target-contract` 线性路径、validation_freeze.py 的 `derive` 子命令、dataset.py 的 `target_contract`/`label_store`、match_runner.py 的 `--m5-gate`；清理 CMakeLists 5 个测试注册与 README 引用。cmake 重新生成 + 构建成功，ctest 15/15 全绿。小闭环：datagen（20 局 depth-2，491 局面）→ train（2 epoch CPU，val loss 收敛）→ export 回读 `read_back_replay_matches=true`、magic `GMNNUE01`、parity MAE 0.37。
 - **缺少依赖**：无（torch/numpy 已装，MSVC 工具链可用）。
+- **环境变更（工单 07）**：Windows 构建已完全收敛到 `.venv`（pip 的 ziglang + venv 内 Rust/rust-lld），不再使用 MSVC/Visual Studio；本工单涉及的训练与测试在工单 07 的全量回归中仍通过。
 - **未运行**：未启动大规模采集或棋力实验（按工单要求，清理不以棋力实验为前置）。

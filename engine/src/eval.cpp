@@ -77,6 +77,9 @@ void forEachWindowOnBoard(F&& f) {
 void Evaluator::init(const Board& board) {
   blackScore_ = 0;
   whiteScore_ = 0;
+  // The GMVALUE1 reference path recomputes the whole position in evaluate();
+  // handcrafted window scores would never be read while it is active.
+  if (valueNetwork_) return;
   const auto& cells = board.rawCells();
   forEachWindowOnBoard([&](const Window& w) {
     blackScore_ += windowValue(cells, w, Color::Black, -1, Cell::Empty);
@@ -86,6 +89,7 @@ void Evaluator::init(const Board& board) {
 }
 
 void Evaluator::update(const Board& board, int move, Cell to) {
+  if (valueNetwork_) return;  // no incremental state on the reference path
   const auto& cells = board.rawCells();
   forEachWindowThrough(move, [&](const Window& w) {
     const int b0 = windowValue(cells, w, Color::Black, -1, Cell::Empty);
@@ -113,6 +117,15 @@ int Evaluator::moveHeuristic(const Board& board, int move, Color c) const {
 }
 
 int Evaluator::evaluate(const Board& board) const {
+  if (valueNetwork_) {
+    // GMVALUE1 contract: the network emits a BLACK-absolute pre-tanh z
+    // (fixed point). Negamax needs the side-to-move view, so the sign is
+    // flipped here; terminal and proven-VCF scores are decided by Search
+    // before this function is reached and are never replaced by a network
+    // number.
+    const int64_t z = valueNetwork_->evaluateBoard(board);
+    return valueNetwork_->sideToMoveScore(z, board.sideToMove());
+  }
   if (network_) {
     // The network's head is selected by the side to move and its output is
     // already in the side-to-move/negamax convention used by the search.

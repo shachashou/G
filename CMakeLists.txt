@@ -6,11 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 if(MSVC)
-  # AVX2 only, no runtime SIMD dispatch (single target machine).
-  add_compile_options(/arch:AVX2 /W4 /utf-8 /permissive-)
+  # Windows builds are venv-contained (ziglang clang/libc++/mingw-w64). MSVC
+  # would need Visual Studio files outside the venv and a different Rust ABI.
+  message(FATAL_ERROR
+    "MSVC is not supported: build with "
+    ".venv\\Scripts\\python.exe tools\\build\\build.py")
 else()
-  # Cross-platform toolchains (clang/gcc) enable the same AVX2 intrinsics
-  # nnue.cpp uses. The build no longer hard-requires MSVC.
+  # Cross-platform toolchains (clang/gcc/zig) enable the same AVX2 intrinsics
+  # nnue.cpp uses.
   add_compile_options(-mavx2)
 endif()
 

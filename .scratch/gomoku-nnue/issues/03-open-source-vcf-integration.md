@@ -26,6 +26,7 @@
 - [quintet](https://github.com/renju-note/quintet)：Rust 的 Renju 杀棋求解器（VCF/VCT），MIT 许可，明确实现黑方禁手（含真假活三递归规则）与"禁手杀"防守。固定 commit `8219b71be2e12e77b735a4ef1462b3dd804f7b97`（2026-11-03）源码原样 vendored 到 `vendor/quintet/`，`vendor/quintet/UPSTREAM.md` 记录来源、date、许可证和"不要改 src/"。
 - 上游依赖：`lru 0.18.5`、`wasm-bindgen 0.2.130`（后者是上游无条件依赖，native 构建不使用）。`engine/vcf-bridge/Cargo.lock` 已提交；首次构建需要 crates.io 网络（之后走 CARGO_HOME 缓存）。构建工具为 Rust 稳定 1.99.1（rustup，msvc toolchain）。
 - 接入方式：`engine/vcf-bridge`（本仓库新增的小 crate，`crate-type = staticlib`）把引擎的 225 格棋盘翻译成上游 `Board::from_stones`，调用 `solve_with_stats(SolveMode::VCFDFS, …)`，再把状态、结束证据、完整变化、节点数译回 C ABI。CMake 用 `cargo build --release` 生成 `vcf_bridge.lib` 并链接到所有包含 `vcf.cpp` 的目标；`cargo test` 也注册进 ctest。
+  - **环境变更（工单 07）**：Windows 构建已改为 `.venv` 内 Rust 工具链（`stable-x86_64-pc-windows-gnu`，链接器 venv `rust-lld`），产物名为 `libvcf_bridge.a`，与 Zig 构建的 C++（mingw-w64 ABI）一致；上游 vendored 源码、commit、C ABI 与全部 VCF 测试未变，并在工单 07 的全量回归中通过。
 - 未采用 Rapfi：GPL-3.0 会传染整个仓库，且其 VCF 与自身搜索/评估耦合，没有独立库接口；旧 MIT 分支同样没有可分离的 VCF 模块。quintet 的 MIT + 独立 `solve` 边界与本工单要求最贴合。
 
 **适配层与结果语义**（`engine/src/vcf.h` / `vcf.cpp`）

@@ -9,6 +9,7 @@
 #include "nnue.h"
 #include "protocol.h"  // EngineConfig
 #include "search.h"
+#include "value_net.h"
 
 namespace gomoku {
 
@@ -26,6 +27,8 @@ class ExecutorProtocol {
   json::Value errorValue(const std::string& message) const;
   void addState(json::Value& target, const PositionState& state) const;
   json::Value think(const json::Value& request) const;
+  // Ticket 07: identity of the actually loaded GMVALUE1 model.
+  json::Value valueModelValue() const;
   // Ticket 03: one standalone VCF query on the current position.
   json::Value vcfCommand(const json::Value& request) const;
   json::Value vcfValue(const VcfResult& result) const;
@@ -35,6 +38,8 @@ class ExecutorProtocol {
   Executor executor_;
   std::unique_ptr<NnueNetwork> nnue_;
   bool nnueActive_ = false;
+  // Ticket 07: loaded GMVALUE1 model; takes precedence over nnue_.
+  std::unique_ptr<ValueNetwork> valueNet_;
   std::unique_ptr<Search> search_;
 };
 

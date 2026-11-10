@@ -71,10 +71,30 @@ int parseInt(const std::string& s) {
   }
 }
 
+// ABOUT is a comma-separated key="value" line; model identity strings come
+// from a metadata JSON file and must not be able to break the line.
+std::string aboutValue(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (unsigned char c : text) {
+    out.push_back(c < 0x20 || c == '"' || c == '\\' || c == ','
+                      ? '_'
+                      : static_cast<char>(c));
+  }
+  return out;
+}
+
 }  // namespace
 
 Protocol::Protocol(const EngineConfig& cfg) : cfg_(cfg) {
   if (!cfg_.random) search_ = std::make_unique<Search>();
+  if (!cfg_.valueModel.empty()) {
+    // Ticket 07: strict. A rejected model propagates to main() and the process
+    // exits; it never degrades to a different evaluator while reporting NNUE.
+    valueNet_ = std::make_unique<ValueNetwork>();
+    valueNet_->load(cfg_.valueModel);
+    if (search_) search_->setValueNetwork(valueNet_.get());
+  }
   if (!cfg_.nnueWeights.empty()) {
     // Weights are loaded once, not once per search. A bad file must never
     // write to stdout (Gomocup protocol stream): report on stderr and keep
@@ -160,12 +180,32 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
   } else if (cmd == "INFO") {
     handleInfo(arg);
   } else if (cmd == "ABOUT") {
+    const bool value_loaded = valueNet_ != nullptr;
     out << "name=\"" << kEngineName << "\", version=\"" << kEngineVersion
         << "\", author=\"G\", country=\"CN\", eval=\""
-        << (nnueActive_ ? "nnue" : "handcrafted")
+        << (value_loaded || nnueActive_ ? "nnue" : "handcrafted")
+        << "\", eval_engine=\""
+        << (value_loaded ? "gmvalue1-scalar-full"
+                         : (nnueActive_ ? "gmnnue-legacy" : "handcrafted"))
         << "\", nnue_backend=\""
         << (nnueActive_ ? nnueBackendName(nnue_->backend()) : "none")
-        << "\"\n";
+        << "\"";
+    if (value_loaded) {
+      const ValueModelInfo& info = valueNet_->info();
+      out << ", value_model_id=\"" << aboutValue(info.model_id) << "\""
+          << ", value_model_path=\"" << aboutValue(info.path) << "\""
+          << ", value_model_arch=\"" << aboutValue(info.arch()) << "\""
+          << ", value_model_rule=\"" << aboutValue(info.rule) << "\""
+          << ", value_model_feature_spec=\"" << aboutValue(info.feature_spec)
+          << "\""
+          << ", value_model_contract=\"" << aboutValue(info.value_contract)
+          << "\""
+          << ", value_model_ea=" << info.ea
+          << ", value_model_act_max_int=" << info.act_max_int
+          << ", value_model_backend=\"scalar-full-rebuild\""
+          << ", value_model_promoted=\"false\"";
+    }
+    out << "\n";
   } else {
     out << "UNKNOWN\n";
   }

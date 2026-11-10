@@ -21,9 +21,9 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow, QMessageBox,
-    QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
+    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
+    QMessageBox, QPushButton, QRadioButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +58,47 @@ REASON_TEXT = {
     "forbidden_double_three": "禁手：三三",
     "game_over": "对局已结束",
 }
+NO_MODEL_TEXT = "手工威胁评估（无模型）"
+
+
+def discover_models() -> list[Path]:
+    """Local GMVALUE1 candidates found under weights/ for the model picker."""
+    root = ROOT / "weights"
+    if not root.is_dir():
+        return []
+    return sorted(root.rglob("*.gmvalue"))
+
+
+def model_args(model: str | None) -> list[str]:
+    return ["--value-model", str(model)] if model else []
+
+
+def start_executor(exe: str, model: str | None) -> tuple[ExecutorClient, dict]:
+    """Start the engine and return (client, about).
+
+    Ticket 07: an explicitly selected model must either load or fail loudly.
+    The engine exits with a diagnostic on stderr; surface that text instead of
+    silently pretending the model is in use.
+    """
+    client = ExecutorClient(exe, *model_args(model))
+    try:
+        about = client.about()
+    except ExecutorError as exc:
+        # Let the stderr drain thread collect the engine's explanation.
+        deadline = time.monotonic() + 2.0
+        diagnostics = ""
+        while time.monotonic() < deadline:
+            diagnostics = client.diagnostics().strip()
+            if diagnostics:
+                break
+            time.sleep(0.05)
+        client.close()
+        detail = diagnostics or str(exc)
+        raise ExecutorError(f"模型加载失败：{detail}") from exc
+    if not about.get("ok", True):
+        client.close()
+        raise ExecutorError(f"模型加载失败：{about}")
+    return client, about
 
 
 def px(x: int) -> int:
@@ -144,13 +185,21 @@ class BoardWidget(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, exe: str, think_ms: int) -> None:
+    def __init__(self, exe: str, think_ms: int, model: str | None = None) -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
         self._exe = exe
         self._think_ms = think_ms
-        self._client = ExecutorClient(exe)
-        self._about = self._client.about()
+        self._model = str(model) if model else None
+        self._startup_error = ""
+        try:
+            self._client, self._about = start_executor(exe, self._model)
+        except ExecutorError as exc:
+            # Keep the client usable, but never pretend the rejected model is
+            # loaded: the identity panel and error label say what happened.
+            self._startup_error = str(exc)
+            self._model = None
+            self._client, self._about = start_executor(exe, None)
         self._state: dict | None = None
         self._phase = "idle"  # idle | thinking | game_over
         self._player_color = "black"
@@ -169,6 +218,8 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._poll_queue)
         self._timer.start(40)
         self._new_game()
+        if self._startup_error:
+            self._show_error(self._startup_error)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -334,16 +385,32 @@ class MainWindow(QMainWindow):
         tv2.addWidget(self.train_result)
         panel.addWidget(training)
 
+        model_group = QGroupBox("模型与评估方式")
+        mv = QVBoxLayout(model_group)
+        model_row = QHBoxLayout()
+        self.combo_model = QComboBox()
+        self._reload_model_choices()
+        model_row.addWidget(self.combo_model, 1)
+        self.btn_browse_model = QPushButton("浏览…")
+        self.btn_browse_model.clicked.connect(self._browse_model)
+        model_row.addWidget(self.btn_browse_model)
+        mv.addLayout(model_row)
+        model_buttons = QHBoxLayout()
+        self.btn_apply_model = QPushButton("应用模型")
+        self.btn_apply_model.clicked.connect(self._apply_model)
+        model_buttons.addWidget(self.btn_apply_model)
+        self.btn_unload_model = QPushButton("回到手工评估")
+        self.btn_unload_model.clicked.connect(lambda: self._apply_model_path(None))
+        model_buttons.addWidget(self.btn_unload_model)
+        mv.addLayout(model_buttons)
+        self.eval_label = QLabel("")
+        self.eval_label.setWordWrap(True)
+        mv.addWidget(self.eval_label)
+        self._update_eval_label()
+        panel.addWidget(model_group)
+
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
-        if self._about.get("nnue_loaded"):
-            eval_text = ("评估方式：NNUE（"
-                         + str(self._about.get("nnue_backend")) + "，"
-                         + str(self._about.get("nnue_path")) + "）")
-        else:
-            eval_text = "评估方式：手工威胁评估（未加载已训练 NNUE 模型）"
-        self.eval_label = QLabel(eval_text)
-        self.eval_label.setWordWrap(True)
         self.turn_label = QLabel("行棋方：-")
         self.status_label = QLabel("")
         self.vcf_label = QLabel("算杀：未检查")
@@ -357,7 +424,7 @@ class MainWindow(QMainWindow):
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet("color: #B00020;")
-        for widget in (self.eval_label, self.vcf_engine_label, self.turn_label,
+        for widget in (self.vcf_engine_label, self.turn_label,
                        self.status_label, self.vcf_label, self.result_label,
                        self.replay_label, self.error_label):
             stv.addWidget(widget)
@@ -372,6 +439,96 @@ class MainWindow(QMainWindow):
         root.addLayout(panel)
         self.setCentralWidget(central)
         self.resize(BOARD_PX + 330, BOARD_PX + 40)
+
+    # ---- model selection ----------------------------------------------
+
+    @staticmethod
+    def _model_display(path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(ROOT))
+        except ValueError:
+            return str(path)
+
+    def _reload_model_choices(self) -> None:
+        self.combo_model.clear()
+        self.combo_model.addItem(NO_MODEL_TEXT, None)
+        for path in discover_models():
+            self.combo_model.addItem(self._model_display(path), str(path))
+        index = self.combo_model.findData(self._model)
+        if index < 0 and self._model:
+            self.combo_model.addItem(self._model_display(Path(self._model)),
+                                     self._model)
+            index = self.combo_model.count() - 1
+        self.combo_model.setCurrentIndex(max(0, index))
+
+    def _update_eval_label(self) -> None:
+        about = self._about or {}
+        value = about.get("value_model") or {}
+        if about.get("value_model_loaded"):
+            text = (
+                "评估方式：价值网络 GMVALUE1（标量全量参照前向）\n"
+                f"模型：{value.get('model_id', '?')}  "
+                f"{value.get('arch', '')}\n"
+                f"规则/特征/价值：{value.get('rule', '?')} / "
+                f"{value.get('feature_spec', '?')} / "
+                f"{value.get('value_contract', '?')}\n"
+                f"文件：{value.get('path', '')}\n"
+                "状态：候选试玩（未晋级正式版本）")
+        elif about.get("nnue_loaded"):
+            text = ("评估方式：旧版 NNUE（" + str(about.get("nnue_backend"))
+                    + "）\n文件：" + str(about.get("nnue_path")))
+        else:
+            text = "评估方式：手工威胁评估（没有加载已训练模型）"
+        self.eval_label.setText(text)
+
+    def _browse_model(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择 GMVALUE1 模型", str(ROOT / "weights"),
+            "GMVALUE1 模型 (*.gmvalue);;所有文件 (*)")
+        if not path:
+            return
+        index = self.combo_model.findData(path)
+        if index < 0:
+            self.combo_model.addItem(self._model_display(Path(path)), path)
+            index = self.combo_model.count() - 1
+        self.combo_model.setCurrentIndex(index)
+        self._apply_model_path(path)
+
+    def _apply_model(self) -> None:
+        self._apply_model_path(self.combo_model.currentData())
+
+    def _apply_model_path(self, path: str | None) -> bool:
+        """Load a model into a fresh engine process; never claim a failed one.
+
+        The old process keeps running until the new one has produced a valid
+        ``about`` reply, so a rejected candidate cannot break the current game
+        or silently switch the visible evaluation identity.
+        """
+        if self._phase in ("thinking", "collecting", "training"):
+            self._show_error("当前任务运行中，请先停止后再切换模型")
+            return False
+        candidate = str(path) if path else None
+        try:
+            client, about = start_executor(self._exe, candidate)
+        except ExecutorError as exc:
+            self._show_error(str(exc))
+            return False
+        old = self._client
+        self._client = client
+        self._about = about
+        self._model = candidate
+        try:
+            old.close()
+        except Exception:  # noqa: BLE001 - switching models must not fail
+            pass
+        self._startup_error = ""
+        self._phase = "idle"
+        self._reload_model_choices()
+        self._update_eval_label()
+        self.status_label.setText(
+            "模型已应用：" + (NO_MODEL_TEXT if candidate is None else candidate))
+        self._new_game()
+        return True
 
     # ---- game flow -----------------------------------------------------
 
@@ -401,6 +558,8 @@ class MainWindow(QMainWindow):
         self.vcf_label.setText("算杀：未检查")
         self.status_label.setText("新局开始：黑先")
         self._refresh()
+        if self._startup_error:
+            self._show_error(self._startup_error)
         self._maybe_engine_move()
 
     def _stop_game(self) -> None:
@@ -435,8 +594,16 @@ class MainWindow(QMainWindow):
                 pass
         self._active_teacher = None
         self._client.close()
-        self._client = ExecutorClient(self._exe)
-        self._about = self._client.about()
+        try:
+            self._client, self._about = start_executor(self._exe, self._model)
+        except ExecutorError as exc:
+            # The selected model disappeared or no longer loads. Keep the app
+            # usable but say so; never leave the old identity on screen.
+            self._startup_error = str(exc)
+            self._model = None
+            self._client, self._about = start_executor(self._exe, None)
+        self._reload_model_choices()
+        self._update_eval_label()
         self._phase = "idle"
 
     def _maybe_engine_move(self) -> None:
@@ -971,6 +1138,7 @@ def resolve_engine(explicit: str | None) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="GomokuNNUE 本地人机对弈")
     parser.add_argument("--engine", help="引擎可执行文件路径")
+    parser.add_argument("--model", help="启动时加载的 GMVALUE1 价值网络（试玩候选）")
     parser.add_argument("--movetime", type=int, default=1000,
                         help="引擎每步思考毫秒数（界面可调整）")
     args = parser.parse_args()
@@ -982,7 +1150,7 @@ def main() -> int:
             "未找到引擎可执行文件。请先按 README 用 venv 的 cmake + Ninja 构建，"
             "或通过 --engine / GOMOKU_ENGINE 指定路径。")
         return 1
-    window = MainWindow(exe, args.movetime)
+    window = MainWindow(exe, args.movetime, model=args.model)
     window.show()
     return app.exec()
 

@@ -26,7 +26,7 @@
 
 ## 价值网络与导出（工单 06）
 
-新训练链路只使用以下模块，旧的 `nnue.py` / `train.py` / `export.py` / `weights_format.py` 属于旧 GMNNUE 双头实现，保留是为了旧 C++ 推理测试在工单 07/11 切换前仍可运行，新流程不使用它们。
+新训练链路只使用以下模块，旧的 `nnue.py` / `train.py` / `export.py` / `weights_format.py` 属于旧 GMNNUE 双头实现，仅为旧 C++ 推理对拍测试保留，新流程不使用它们。
 
 | 模块 | 职责 |
 |---|---|
@@ -40,7 +40,7 @@
     --output-dir weights\value-run1 --steps 200 --batch-size 32 --lr 1e-3 --loss mse
 ~~~
 
-输出目录包含 `last.pt` / `best.pt`（可恢复）、`train_history.jsonl`、`train_summary.json`、`model.gmvalue` 与 `fidelity.json`。`GMVALUE1` 记录架构、规则、特征、价值契约、标签版本和训练数据身份；加载旧 `GMNNUE01` 或架构不符的元数据会被拒绝。C++ 侧的新格式加载与对弈在工单 07/11。
+输出目录包含 `last.pt` / `best.pt`（可恢复）、`train_history.jsonl`、`train_summary.json`、`model.gmvalue` 与 `fidelity.json`。`GMVALUE1` 记录架构、规则、特征、价值契约、标签版本和训练数据身份；加载旧 `GMNNUE01` 或架构不符的元数据会被拒绝。C++ 已能严格加载该格式并在 Alpha-Beta 中实际对弈（工单 07）；第一层增量累加与 AVX2 在工单 11，当前搜索使用全量重建参照路径。
 
 ## 环境与现有命令
 

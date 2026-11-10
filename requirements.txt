@@ -1,22 +1,26 @@
-# Project environment. Build tools, the desktop GUI and training dependencies
-# all live in the venv; no system-installed cmake is used.
+# Build toolchain: everything needed to build the C++ engine and the Rust VCF
+# bridge lives inside the venv on Windows.
+#   * cmake / ctest / ninja / ziglang are PyPI wheels (ziglang bundles clang,
+#     libc++, lld and the mingw-w64 headers/libraries the build targets).
+#   * the Rust toolchain is installed *into* .venv once with
+#     `.venv\Scripts\python.exe tools\build\bootstrap_toolchain.py`
+# No system cmake, Visual Studio, Windows SDK or global ~/.cargo is used.
+# On Linux/macOS the system C++ compiler and Rust toolchain are used.
 #
 #   py -3.12 -m venv .venv
 #   .venv\Scripts\python.exe -m pip install -r requirements.txt ^
 #       --extra-index-url https://download.pytorch.org/whl/cu124
+#   .venv\Scripts\python.exe tools\build\bootstrap_toolchain.py
+#   .venv\Scripts\python.exe tools\build\build.py --clean
 #
 # The +cu124 torch wheel is the CUDA build for this machine's RTX 4080 SUPER.
 # On a CPU-only machine replace that line with `torch==2.6.0`; the training
 # scripts auto-select CUDA when available and stay fully functional on CPU.
-#
-# Build toolchain: cmake / ctest / ninja are cross-platform wheels inside the
-# venv. On Windows the C++ compiler (cl.exe) still comes from Visual Studio;
-# activate its vcvars environment before invoking the venv cmake (see README).
-# On Linux/macOS the system C++ compiler is used directly.
 
 # Build & test (cross-platform wheels, no system cmake needed).
 cmake==3.31.10
 ninja==1.13.2
+ziglang==0.17.1
 
 # Desktop GUI (ticket 02).
 PySide6==6.9.3

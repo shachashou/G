@@ -1,4 +1,4 @@
-﻿#include <cstdlib>
+#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
@@ -18,8 +18,10 @@ void printUsage() {
             << "  --vcf-policy NAME    VCF call sites: off | root | root_and_children\n"
             << "                       (default root_and_children)\n"
             << "  --vcf-nodes N        root VCF node budget (default 50000)\n"
-            << "  --nnue PATH          NNUE evaluation from a GMNNUE01 file\n"
-            << "  --nnue-backend NAME  NNUE backend: avx2 (default) | scalar\n"
+            << "  --nnue PATH          legacy NNUE evaluation from a GMNNUE01 file\n"
+            << "  --nnue-backend NAME  legacy NNUE backend: avx2 (default) | scalar\n"
+            << "  --value-model PATH   deployed value network (GMVALUE1); a bad\n"
+            << "                       file aborts instead of falling back\n"
             << "  --executor           JSON-lines authoritative executor (ticket 02)\n"
             << "  --help               show this help\n"
             << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
@@ -62,17 +64,31 @@ int main(int argc, char* argv[]) {
       cfg.nnueWeights = argv[++i];
     } else if (a == "--nnue-backend" && i + 1 < argc) {
       cfg.nnueBackend = argv[++i];
+    } else if (a == "--value-model" && i + 1 < argc) {
+      cfg.valueModel = argv[++i];
     }
   }
-  if (executorMode) {
-    // One JSON request per line, one JSON response per line. stdout is the
-    // protocol stream; diagnostics go to stderr.
-    gomoku::ExecutorProtocol protocol(cfg, std::cout);
-    return protocol.run(std::cin);
+  if (!cfg.valueModel.empty() && !cfg.nnueWeights.empty()) {
+    std::cerr << "--value-model and --nnue are mutually exclusive; choose the "
+                 "deployed GMVALUE1 model or the legacy weights\n";
+    return 2;
   }
-  // Protocol mode: speak Gomocup on stdin/stdout. No banner — extra output
-  // would corrupt the protocol stream.
-  gomoku::Protocol protocol(cfg);
-  return protocol.run(std::cin, std::cout);
+  try {
+    if (executorMode) {
+      // One JSON request per line, one JSON response per line. stdout is the
+      // protocol stream; diagnostics go to stderr.
+      gomoku::ExecutorProtocol protocol(cfg, std::cout);
+      return protocol.run(std::cin);
+    }
+    // Protocol mode: speak Gomocup on stdin/stdout. No banner — extra output
+    // would corrupt the protocol stream.
+    gomoku::Protocol protocol(cfg);
+    return protocol.run(std::cin, std::cout);
+  } catch (const gomoku::ValueNetError& error) {
+    // Ticket 07: an explicitly requested value model must either load exactly
+    // or fail the process. There is no silent handcrafted continuation.
+    std::cerr << "value model failed to load: " << error.what() << "\n";
+    return 2;
+  }
 }
 

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <iosfwd>
 #include <memory>
@@ -8,6 +8,7 @@
 #include "nnue.h"
 #include "random_player.h"
 #include "search.h"
+#include "value_net.h"
 
 namespace gomoku {
 
@@ -17,9 +18,12 @@ struct EngineConfig {
   int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
   VcfPolicy vcfPolicy = VcfPolicy::RootAndChildren;  // --vcf-policy: VCF call sites
   uint64_t vcfNodeLimit = 50000;          // --vcf-nodes: root query budget
-  std::string nnueWeights;  // --nnue PATH: NNUE evaluation (ticket 09)
+  std::string nnueWeights;  // --nnue PATH: legacy NNUE evaluation (ticket 09)
   // --nnue-backend scalar|avx2: inference backend (ticket 10, default avx2).
   std::string nnueBackend = "avx2";
+  // Ticket 07: strict GMVALUE1 deployment model. When set, a bad file aborts
+  // the process instead of silently falling back to a handcrafted evaluator.
+  std::string valueModel;  // --value-model PATH
 };
 
 // Gomocup/piskvork protocol subset over stdin/stdout:
@@ -52,6 +56,8 @@ class Protocol {
   // pointer. Declared before search_ so it outlives the search object.
   std::unique_ptr<NnueNetwork> nnue_;
   bool nnueActive_ = false;
+  // Ticket 07: new value network (GMVALUE1) takes precedence over nnue_.
+  std::unique_ptr<ValueNetwork> valueNet_;
   // Allocated only for the search engine: the random baseline stays tiny.
   std::unique_ptr<Search> search_;
   int timeoutTurnMs_ = 0;

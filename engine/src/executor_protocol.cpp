@@ -1,4 +1,4 @@
-﻿#include "executor_protocol.h"
+#include "executor_protocol.h"
 
 #include <array>
 #include <exception>
@@ -58,6 +58,14 @@ bool parsePoint(const Value& request, int& x, int& y, std::string& error) {
 ExecutorProtocol::ExecutorProtocol(const EngineConfig& cfg, std::ostream& out)
     : cfg_(cfg), out_(out), executor_(RuleMode::Renju) {
   search_ = std::make_unique<Search>();
+  if (!cfg_.valueModel.empty()) {
+    // Ticket 07: strict load. A malformed or incompatible model propagates to
+    // main() so the process exits; it never plays with another evaluator while
+    // the response still claims NNUE.
+    valueNet_ = std::make_unique<ValueNetwork>();
+    valueNet_->load(cfg_.valueModel);
+    search_->setValueNetwork(valueNet_.get());
+  }
   if (!cfg_.nnueWeights.empty()) {
     try {
       nnue_ = std::make_unique<NnueNetwork>();
@@ -102,6 +110,42 @@ Value ExecutorProtocol::errorValue(const std::string& message) const {
   json::set(response, "ok", json::booleanValue(false));
   json::set(response, "error", json::stringValue(message));
   return response;
+}
+
+Value ExecutorProtocol::valueModelValue() const {
+  Value out = json::objectValue();
+  if (!valueNet_) {
+    json::set(out, "loaded", json::booleanValue(false));
+    return out;
+  }
+  const ValueModelInfo& info = valueNet_->info();
+  json::set(out, "loaded", json::booleanValue(true));
+  json::set(out, "path", json::stringValue(info.path));
+  json::set(out, "model_id", json::stringValue(info.model_id));
+  json::set(out, "arch", json::stringValue(info.arch()));
+  json::set(out, "rule", json::stringValue(info.rule));
+  json::set(out, "feature_spec", json::stringValue(info.feature_spec));
+  json::set(out, "value_contract", json::stringValue(info.value_contract));
+  json::set(out, "ea", json::numberValue(info.ea));
+  json::set(out, "act_max_int", json::numberValue(info.act_max_int));
+  json::set(out, "scale", json::numberValue(1 << info.ea));
+  json::set(out, "bytes", json::numberValue(info.file_bytes));
+  json::set(out, "fnv1a",
+            json::numberValue(static_cast<long long>(info.fnv1a)));
+  json::set(out, "training_steps", json::numberValue(info.training_steps));
+  json::set(out, "created_at", json::stringValue(info.created_at));
+  std::vector<Value> labels;
+  labels.reserve(info.label_versions.size());
+  for (const std::string& version : info.label_versions) {
+    labels.push_back(json::stringValue(version));
+  }
+  json::set(out, "label_versions", json::arrayValue(std::move(labels)));
+  json::set(out, "backend", json::stringValue("scalar-full-rebuild"));
+  // Ticket 08 owns promotion; a successfully loaded candidate is playable but
+  // is never presented as the promoted official version.
+  json::set(out, "promoted", json::booleanValue(false));
+  json::set(out, "status", json::stringValue("candidate-unpromoted"));
+  return out;
 }
 
 void ExecutorProtocol::addState(Value& target, const PositionState& s) const {
@@ -277,7 +321,17 @@ Value ExecutorProtocol::think(const Value& request) const {
   json::set(response, "vcf_child_losses",
             json::numberValue(result.vcfChildLosses));
   json::set(response, "eval",
-            json::stringValue(nnueActive_ ? "nnue" : "handcrafted"));
+            json::stringValue(valueNet_ || nnueActive_ ? "nnue" : "handcrafted"));
+  json::set(response, "eval_backend",
+            json::stringValue(valueNet_ ? "value-gmvalue1-scalar"
+                                        : (nnueActive_ ? "legacy-gmnnue"
+                                                       : "handcrafted")));
+  if (valueNet_) {
+    json::set(response, "value_model_id",
+              json::stringValue(valueNet_->info().model_id));
+    json::set(response, "value_model_backend",
+              json::stringValue("scalar-full-rebuild"));
+  }
   return response;
 }
 
@@ -300,7 +354,12 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
     json::set(response, "engine", json::stringValue(kEngineName));
     json::set(response, "version", json::stringValue(kEngineVersion));
     json::set(response, "eval",
-              json::stringValue(nnueActive_ ? "nnue" : "handcrafted"));
+              json::stringValue(valueNet_ || nnueActive_ ? "nnue"
+                                                         : "handcrafted"));
+    json::set(response, "eval_backend",
+              json::stringValue(valueNet_ ? "value-gmvalue1-scalar"
+                                          : (nnueActive_ ? "legacy-gmnnue"
+                                                         : "handcrafted")));
     json::set(response, "nnue_loaded", json::booleanValue(nnueActive_));
     json::set(response, "nnue_backend",
               json::stringValue(nnueActive_
@@ -308,6 +367,11 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
                                     : "none"));
     json::set(response, "nnue_path",
               json::stringValue(nnueActive_ ? nnue_->path() : ""));
+    // Ticket 07: identity of the actually loaded value model, including its
+    // architecture, rule, feature spec, value contract and training identity.
+    json::set(response, "value_model_loaded",
+              json::booleanValue(valueNet_ != nullptr));
+    json::set(response, "value_model", valueModelValue());
     // Ticket 03: which upstream VCF implementation the engine calls and how.
     json::set(response, "vcf_engine", json::stringValue(vcfUpstreamIdentity()));
     json::set(response, "vcf_policy",
@@ -315,12 +379,21 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
     json::set(response, "vcf_nodes",
               json::numberValue(static_cast<long long>(cfg_.vcfNodeLimit)));
     // A handcrafted evaluation must never be presented as a trained NNUE.
-    json::set(response, "eval_description",
-              json::stringValue(
-                  nnueActive_
-                      ? std::string("NNUE network (GMNNUE01), ") +
-                            nnueBackendName(nnue_->backend())
-                      : "handcrafted threat evaluation (no trained NNUE model loaded)"));
+    std::string description;
+    if (valueNet_) {
+      const ValueModelInfo& info = valueNet_->info();
+      description =
+          "new value network (GMVALUE1, " + info.arch() +
+          ", scalar full-rebuild reference), model " + info.model_id +
+          "; candidate for play, not promoted";
+    } else if (nnueActive_) {
+      description = std::string("legacy NNUE network (GMNNUE), ") +
+                    nnueBackendName(nnue_->backend());
+    } else {
+      description =
+          "handcrafted threat evaluation (no trained NNUE model loaded)";
+    }
+    json::set(response, "eval_description", json::stringValue(description));
     return response;
   }
 

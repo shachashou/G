@@ -5,6 +5,11 @@ out/
 dist/
 target/
 
+# The venv-contained build helper scripts live in tools/build and ARE source;
+# the "build/" pattern above would otherwise hide them.
+!tools/build/
+!tools/build/**
+
 # Compiled binaries and intermediates (normal builds land in build/ or target/)
 *.exe
 *.dll

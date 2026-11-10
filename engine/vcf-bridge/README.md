@@ -7,7 +7,10 @@ them:
 
 - `quintet = { path = "../../vendor/quintet" }` — an unmodified upstream copy.
 - `crate-type = ["staticlib"]` — CMake runs `cargo build --release` and links
-  `target/release/vcf_bridge.lib` (`.a` on POSIX).
+  `target/release/libvcf_bridge.a`. On Windows the build uses the venv-contained
+  Rust toolchain (`stable-x86_64-pc-windows-gnu` under `.venv/rustup`, plus
+  `.venv/cargo`) and the venv `rust-lld`, so the ABI matches the Zig-built C++
+  engine (mingw-w64) and no Visual Studio / global cargo is read.
 - No search logic lives here: the crate converts the engine's cell array into
   the upstream `Board`, calls `solve_with_stats(SolveMode::VCFDFS, …)`, and
   copies the outcome back.
@@ -35,17 +38,22 @@ VcfBridgeResult { status, end_kind, end_a, end_b, first_move,
 
 ## Build and test
 
-CMake builds this crate automatically:
+CMake builds this crate automatically (venv-contained toolchain on Windows):
 
 ```powershell
-.venv\Scripts\cmake.exe --build build
+.venv\Scripts\python.exe tools\build\bootstrap_toolchain.py   # once
+.venv\Scripts\python.exe tools\build\build.py --target vcf_bridge
 ```
 
-Standalone:
+Standalone from the venv (PowerShell; sets the same variables CMake sets):
 
 ```powershell
-cargo build --release --manifest-path engine/vcf-bridge/Cargo.toml
-cargo test  --release --manifest-path engine/vcf-bridge/Cargo.toml
+$env:RUSTUP_HOME = "$PWD\.venv\rustup"
+$env:CARGO_HOME  = "$PWD\.venv\cargo"
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "$PWD\.venv\rustup\toolchains\stable-x86_64-pc-windows-gnu\lib\rustlib\x86_64-pc-windows-gnu\bin\rust-lld.exe"
+$env:RUSTFLAGS = "-Clink-self-contained=yes"
+& .venv\cargo\bin\cargo.exe build --release --manifest-path engine\vcf-bridge\Cargo.toml
+& .venv\cargo\bin\cargo.exe test  --release --manifest-path engine\vcf-bridge\Cargo.toml
 ```
 
 The crate's unit tests cover the encoding direction (a known VCF line's engine

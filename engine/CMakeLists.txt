@@ -1,52 +1,104 @@
-﻿set(ENGINE_CORE_SRC
+set(ENGINE_CORE_SRC
   src/board.cpp
   src/renju.cpp
   src/eval.cpp
   src/nnue.cpp
+  src/value_net.cpp
   src/movegen.cpp
   src/search.cpp
   src/vcf.cpp
   src/random_player.cpp
   src/binpack.cpp
+  src/json.cpp
   src/executor.cpp)
 
 # Ticket 03: the VCF solver is the vendored upstream quintet crate (MIT,
 # pinned commit in vendor/quintet/UPSTREAM.md), reached through the small C ABI
 # in engine/vcf-bridge. Cargo builds it as a static library; every target that
 # compiles vcf.cpp must link it.
-if(MSVC)
-  set(VCF_BRIDGE_LIB
-    "${CMAKE_CURRENT_SOURCE_DIR}/vcf-bridge/target/release/vcf_bridge.lib")
+# Rust static libraries are named libvcf_bridge.a on every supported platform.
+set(VCF_BRIDGE_LIB
+  "${CMAKE_CURRENT_SOURCE_DIR}/vcf-bridge/target/release/libvcf_bridge.a")
+# Ticket 07: the build toolchain is contained in .venv on Windows.
+#   * C/C++: pip-installed ziglang (clang + libc++ + mingw-w64 ABI) through the
+#     wrappers in tools/build. No Visual Studio / Windows SDK files are read.
+#   * Rust: rustup toolchain installed under .venv (stable-x86_64-pc-windows-gnu),
+#     linking with the venv rust-lld and self-contained mingw import libraries.
+# Linux / macOS keep using the system toolchain.
+set(GOMOKU_VENV "${CMAKE_SOURCE_DIR}/.venv")
+set(GOMOKU_VENV_CARGO "${GOMOKU_VENV}/cargo/bin/cargo.exe")
+if(WIN32)
+  if(NOT EXISTS "${GOMOKU_VENV_CARGO}")
+    message(FATAL_ERROR
+      "Windows builds use only the toolchain inside .venv. Run: "
+      ".venv\\Scripts\\python.exe tools\\build\\bootstrap_toolchain.py")
+  endif()
+  set(GOMOKU_CARGO "${GOMOKU_VENV_CARGO}")
+  set(GOMOKU_RUST_LLD
+    "${GOMOKU_VENV}/rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe")
+  if(NOT EXISTS "${GOMOKU_RUST_LLD}")
+    message(FATAL_ERROR
+      "venv Rust toolchain is missing. Run: "
+      ".venv\\Scripts\\python.exe tools\\build\\bootstrap_toolchain.py")
+  endif()
+  set(GOMOKU_CARGO_ENV
+    "RUSTUP_HOME=${GOMOKU_VENV}/rustup"
+    "CARGO_HOME=${GOMOKU_VENV}/cargo"
+    "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu"
+    "RUSTC=${GOMOKU_VENV}/cargo/bin/rustc.exe"
+    "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=${GOMOKU_RUST_LLD}"
+    "CC_x86_64_pc_windows_gnu=${CMAKE_SOURCE_DIR}/tools/build/zig-cc.cmd"
+    "CXX_x86_64_pc_windows_gnu=${CMAKE_SOURCE_DIR}/tools/build/zig-cxx.cmd"
+    "RUSTFLAGS=-Clink-self-contained=yes"
+    "ZIG_GLOBAL_CACHE_DIR=${GOMOKU_VENV}/zig-cache"
+    "ZIG_LOCAL_CACHE_DIR=${GOMOKU_VENV}/zig-cache/local")
 else()
-  set(VCF_BRIDGE_LIB
-    "${CMAKE_CURRENT_SOURCE_DIR}/vcf-bridge/target/release/libvcf_bridge.a")
+  find_program(GOMOKU_CARGO cargo
+    HINTS "$ENV{USERPROFILE}/.cargo/bin" "$ENV{HOME}/.cargo/bin")
+  set(GOMOKU_CARGO_ENV "")
 endif()
-find_program(GOMOKU_CARGO cargo
-  HINTS "$ENV{USERPROFILE}/.cargo/bin" "$ENV{HOME}/.cargo/bin")
 if(NOT GOMOKU_CARGO)
   message(FATAL_ERROR
     "cargo was not found. Ticket 03 builds the vendored quintet VCF solver "
-    "with the stable Rust toolchain (https://rustup.rs). Install it, or put "
-    "cargo on PATH, then re-run cmake.")
+    "with the stable Rust toolchain. On Windows run "
+    "(venv\\Scripts\\python.exe tools/build/bootstrap_toolchain.py); on other "
+    "platforms install Rust (https://rustup.rs).")
+endif()
+if(GOMOKU_CARGO_ENV)
+  set(GOMOKU_CARGO_RUN ${CMAKE_COMMAND} -E env ${GOMOKU_CARGO_ENV}
+      "${GOMOKU_CARGO}")
+else()
+  set(GOMOKU_CARGO_RUN "${GOMOKU_CARGO}")
+endif()
+
+# Ticket 07: AVX2 is part of the deployment contract (added by the top-level
+# CMakeLists for non-MSVC toolchains).
+
+# Zig's linker is memory-hungry (each link loads LLVM); run link steps one at
+# a time while compilation stays parallel. This keeps the venv toolchain from
+# hitting LLVM's out-of-memory during multi-target builds.
+if(CMAKE_GENERATOR MATCHES "Ninja")
+  set_property(GLOBAL PROPERTY JOB_POOLS link_pool=1)
+  set(CMAKE_JOB_POOL_LINK link_pool)
 endif()
 add_test(NAME vcf_bridge_tests
-  COMMAND ${GOMOKU_CARGO} test --release
+  COMMAND ${GOMOKU_CARGO_RUN} test --release
           --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/vcf-bridge/Cargo.toml")
 set_tests_properties(vcf_bridge_tests PROPERTIES TIMEOUT 300)
 
 add_custom_target(vcf_bridge ALL
-  COMMAND ${GOMOKU_CARGO} build --release
+  COMMAND ${GOMOKU_CARGO_RUN} build --release
           --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/vcf-bridge/Cargo.toml"
   BYPRODUCTS "${VCF_BRIDGE_LIB}"
-  COMMENT "Building vendored quintet VCF bridge (Rust)"
+  COMMENT "Building vendored quintet VCF bridge (Rust, venv toolchain)"
   VERBATIM)
 
 function(gomoku_link_vcf_bridge target)
   add_dependencies(${target} vcf_bridge)
   target_link_libraries(${target} PRIVATE "${VCF_BRIDGE_LIB}")
-  if(MSVC)
-    # Native libraries a Rust static library needs on Windows
-    # (`cargo rustc -- --print native-static-libs`).
+  if(WIN32)
+    # Native libraries a Rust static library needs on Windows. Zig resolves
+    # the mingw-w64 import libraries it bundles itself.
     target_link_libraries(${target} PRIVATE kernel32 ntdll userenv ws2_32 dbghelp)
   else()
     target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS} pthread m)
@@ -58,7 +110,6 @@ add_executable(gomoku_nnue
   src/main.cpp
   src/protocol.cpp
   src/executor_protocol.cpp
-  src/json.cpp
   ${ENGINE_CORE_SRC})
 target_compile_features(gomoku_nnue PRIVATE cxx_std_20)
 target_include_directories(gomoku_nnue PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -69,6 +120,12 @@ add_executable(nnue_probe src/nnue_probe.cpp ${ENGINE_CORE_SRC})
 target_compile_features(nnue_probe PRIVATE cxx_std_20)
 target_include_directories(nnue_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 gomoku_link_vcf_bridge(nnue_probe)
+
+# Ticket 07: reference-path probe for the deployed GMVALUE1 value network.
+add_executable(value_probe src/value_probe.cpp ${ENGINE_CORE_SRC})
+target_compile_features(value_probe PRIVATE cxx_std_20)
+target_include_directories(value_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+gomoku_link_vcf_bridge(value_probe)
 
 # Self-play datagen worker (ticket 07). One process owns one shard file;
 # tools/datagen.py launches many of them in parallel.
@@ -136,6 +193,14 @@ target_include_directories(nnue_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 gomoku_link_vcf_bridge(nnue_tests)
 add_test(NAME nnue_tests COMMAND nnue_tests)
 
+# Ticket 07: GMVALUE1 loader, scalar reference forward, full first-layer
+# rebuild, side-to-move conversion, rejection paths and Alpha-Beta integration.
+add_executable(value_net_tests tests/value_net_tests.cpp ${ENGINE_CORE_SRC})
+target_compile_features(value_net_tests PRIVATE cxx_std_20)
+target_include_directories(value_net_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+gomoku_link_vcf_bridge(value_net_tests)
+add_test(NAME value_net_tests COMMAND value_net_tests)
+
 # Protocol black-box test: drives the exe via stdin/stdout.
 # Prefer the project venv (py -3.12 -m venv .venv) on Windows (Scripts/) or
 # POSIX (bin/), never the system Python.
@@ -198,6 +263,13 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_parity_tests.py"
             "$<TARGET_FILE:nnue_probe>")
   set_tests_properties(nnue_parity_tests PROPERTIES TIMEOUT 300)
+
+  # Ticket 07: C++ GMVALUE1 reference forward / full rebuild vs the Python
+  # integer reference and the exported training model.
+  add_test(NAME value_parity_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/value_parity_tests.py"
+            "$<TARGET_FILE:value_probe>")
+  set_tests_properties(value_parity_tests PROPERTIES TIMEOUT 600)
 
   # Ticket 10: scalar/AVX2 bit-exact parity and single-evaluation timing.
   add_test(NAME nnue_backend_tests
@@ -271,5 +343,20 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(nnue_blackbox PROPERTIES TIMEOUT 300)
+
+  # Ticket 07: real games with a GMVALUE1 model through the executor and the
+  # Gomocup protocol, side-to-move signs, terminal/VCF precedence, strict
+  # rejection of damaged or incompatible models, and replay consistency.
+  add_test(NAME value_engine_blackbox
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/value_engine_blackbox.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(value_engine_blackbox PROPERTIES TIMEOUT 600)
+
+  # Ticket 07: offscreen GUI model picker / identity / candidate play / failure.
+  add_test(NAME gui_model_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_model_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_model_smoke PROPERTIES
+    TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 

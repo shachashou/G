@@ -4,6 +4,7 @@
 
 #include "board.h"
 #include "nnue.h"
+#include "value_net.h"
 
 namespace gomoku {
 
@@ -19,6 +20,13 @@ class Evaluator {
   // The network is borrowed and must outlive the Evaluator.
   void setNetwork(const NnueNetwork* network) { network_ = network; }
   const NnueNetwork* network() const { return network_; }
+
+  // Ticket 07: the new GMVALUE1 value network takes precedence over the
+  // legacy NNUE. Until ticket 11 this path rebuilds the whole first layer on
+  // every evaluation (the numeric reference), which is deliberately not
+  // incremental.
+  void setValueNetwork(const ValueNetwork* network) { valueNetwork_ = network; }
+  const ValueNetwork* valueNetwork() const { return valueNetwork_; }
 
   // Full recompute (search root / BOARD sync).
   void init(const Board& board);
@@ -40,6 +48,7 @@ class Evaluator {
   int blackScore_ = 0;
   int whiteScore_ = 0;
   const NnueNetwork* network_ = nullptr;
+  const ValueNetwork* valueNetwork_ = nullptr;
   // Exact (unsaturated) int32 accumulator, incrementally maintained by
   // update() so the NNUE backend stays scalar but cheap during search.
   NnueAccumulator nnueAcc_{};

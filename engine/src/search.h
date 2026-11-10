@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <array>
 #include <chrono>
@@ -51,6 +51,9 @@ class Search {
   // Null keeps the handcrafted evaluator; the network is borrowed.
   void setNetwork(const NnueNetwork* network) { network_ = network; }
 
+  // Ticket 07: a loaded GMVALUE1 model takes precedence over the legacy NNUE.
+  void setValueNetwork(const ValueNetwork* network) { valueNetwork_ = network; }
+
   SearchResult findBestMove(Board& board, const SearchLimits& limits);
 
  private:
@@ -70,6 +73,7 @@ class Search {
 
   std::vector<TTEntry> tt_;
   const NnueNetwork* network_ = nullptr;
+  const ValueNetwork* valueNetwork_ = nullptr;
   size_t ttMask_ = 0;
   uint8_t generation_ = 1;
   std::array<std::array<int, 2>, 64> killers_{};

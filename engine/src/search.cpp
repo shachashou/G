@@ -101,6 +101,7 @@ SearchResult Search::findBestMove(Board& board, const SearchLimits& limits) {
   SearchResult result;
   Evaluator eval;
   eval.setNetwork(network_);
+  eval.setValueNetwork(valueNetwork_);
   eval.init(board);
   const uint64_t rootHash = hashOf(board);
 

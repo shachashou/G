@@ -2,14 +2,14 @@
 
 Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"玩一把、收集数据、从0训练、自我训练、历史版本测评"。
 
-**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、可完成一局合法对弈的桌面 GUI，以及接入开源实现的 VCF 算杀；Rapfi 教师接入、新网络及持续自主训练仍待实现。
+**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、可完成一局合法对弈的桌面 GUI、接入开源实现的 VCF 算杀、Rapfi 教师打标与持续样本池，以及可在实际 Alpha-Beta 对弈中加载执行的新价值网络；持续自主训练与正式版本晋级仍待实现。
 
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md) 和 [06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md) 和 [07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -41,30 +41,29 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 
 ## 环境与构建
 
-所有 Python 侧工具都在 venv 里，**不使用系统安装的 cmake**。`cmake` / `ctest` / `ninja` 是跨平台的 PyPI 轮子，GUI 依赖 PySide6 也在其中：
+**Windows 上的编译工具链完全收敛在 `.venv` 内，不读取 Visual Studio、Windows SDK 或全局 `~/.cargo`。**
+
+- Python 依赖（含 PySide6、PyTorch）与 `cmake` / `ctest` / `ninja` / `ziglang` 都是 venv 里的包。`ziglang` 自带 clang、libc++、lld 与 mingw-w64 头文件/库，作为 C/C++ 编译器。
+- VCF 算杀复用 vendored 的开源 quintet；Rust 工具链通过一次性引导安装到 `.venv/rustup` 与 `.venv/cargo`（`stable-x86_64-pc-windows-gnu`，含 proc-macro 所需的 rust-mingw 导入库），链接器使用 venv 内的 `rust-lld`。
+- CMake 通过 `tools/build/zig-cc.cmd` / `zig-cxx.cmd` 调用 venv 中的 Zig，Rust 桥由 CMake 自动执行 `cargo build --release` 生成 `engine/vcf-bridge/target/release/libvcf_bridge.a` 再链接。
+
+首次配置：
 
 ~~~powershell
 py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+.venv\Scripts\python.exe tools\build\bootstrap_toolchain.py
 ~~~
 
-此外还需要 **Rust 稳定工具链**（`cargo`）：VCF 算杀复用 vendored 的开源 quintet，由 CMake 自动执行 `cargo build --release` 生成 `engine/vcf-bridge/target/release/vcf_bridge.lib` 再链接。未安装时 cmake 会直接报错并提示：
+构建与测试：
 
 ~~~powershell
-winget install --id Rustlang.Rustup -e   # 或 https://rustup.rs
+.venv\Scripts\python.exe tools\build\build.py --clean
+.venv\Scripts\python.exe tools\build\build.py --test
+.venv\Scripts\python.exe tools\build\build.py --test --test-regex value
 ~~~
 
-Windows 上的 C++ 编译器 `cl.exe` 仍来自 Visual Studio。用其 DevShell PowerShell 模块激活编译器环境后，用 venv 的 cmake + Ninja 构建：
-
-~~~powershell
-Import-Module "D:\VisualStudio\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -host_arch=x64' -SkipAutomaticLocation
-.venv\Scripts\cmake.exe -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-.venv\Scripts\cmake.exe --build build
-.venv\Scripts\ctest.exe --test-dir build --output-on-failure
-~~~
-
-`CMakeLists.txt` 不再强制 MSVC；Linux / macOS 上用系统 C++ 编译器直接执行上面三条 cmake / ctest 命令即可。改了 CMakeLists.txt 后先重新执行 `cmake -S . -B build -G Ninja`。
+`build.py` 使用 venv 的 cmake + Ninja，并把 Zig 缓存、Rust 工具链与链接器都指向 `.venv`。链接步骤在 Ninja 中串行执行，避免 Zig/lld 并行链接耗尽内存。Linux / macOS 仍使用系统 C++ 编译器与 Rust 工具链，直接执行同样的 `build.py`（脚本只在 Windows 设置 venv 工具链变量）。
 
 技能目录 `.agents/skills/` 由根目录 `skills-lock.json` 记录的来源安装，属于安装物而非项目源码，因此不纳入版本控制；新克隆后按该锁文件重装技能即可，版本仍由锁文件固定。
 
@@ -136,7 +135,16 @@ Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -h
     --output-dir weights\value-run1 --steps 200 --batch-size 32 --lr 1e-3 --loss mse
 ~~~
 
-C++ 加载新格式与对弈接入在工单 07/11；在那之前引擎仍使用旧手工评估/旧权重。
+## 新模型实际对弈（工单 07）
+
+- **加载**：`--value-model PATH` 严格读取 `GMVALUE1`。校验 magic/版本、架构、规则、特征、价值契约、固定点参数、元数据一致性与 FNV 校验；损坏、截断、旧 `GMNNUE01` 或元数据不兼容时进程以非零码退出并在 stderr 说明原因，**不会**静默切回手工评估再标成 NNUE。`--value-model` 与旧 `--nnue` 互斥。
+- **推理参照**：`engine/src/value_net.{h,cpp}` 实现 450 → 1024 → 64 → 32 → 1 的标量前向和全量第一层重建（int64 累加，避免饱和后无法撤销）。这是工单 11 增量累加器与 SIMD 的长期数值参照；本工单的搜索评估每次做全量重建。
+- **数值契约**：网络输出黑方绝对定点 z；`value = tanh(z / 2^ea)`。搜索使用 `stm_score = ±round(z × 1000 / 2^ea)`（黑方为正、白方取反），并限制在 ±100000，远低于 mate 分。终局与已证明 VCF 分数由搜索先判定，网络分数不能覆盖。
+- **搜索接入**：新模型接入现有 Alpha-Beta 选点；合法落点、终局、开源 VCF 与时间控制共同生效。`about`/`think` 返回实际加载的 `model_id`、架构、规则、特征、价值契约与 `backend=scalar-full-rebuild`；模型只是「候选试玩（未晋级）」，加载成功不会自动晋级。
+- **GUI**：「模型与评估方式」面板列出/浏览 `weights/` 下的 `*.gmvalue`，应用后重启引擎并显示真实模型身份；加载失败保留当前引擎并明确报错。启动参数 `--model PATH`。
+- **无界面路径**：执行器 `--executor --value-model PATH`、Gomocup 协议模式与 `tools/match_runner.py --engine-a "... --value-model PATH"` 均可完成真实对局；从着法记录 `replay` 得到相同终局。
+- **验证**：`value_net_tests`（加载/拒绝/前向/全量重建/视角/终局与 VCF 优先级）、`value_parity_tests`（C++ 与 `trainer/value_format.infer_int` 逐位一致；本地 demo 模型与训练原模型按冻结容差对拍）、`value_engine_blackbox`（真实完整对局、重放、时间控制、正负视角、严格失败）、`gui_model_smoke`（offscreen 模型选择到落子）。验收记录见[工单 07](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)。
+- **性能**：全量参照推理在 40 子局面实测约 14 µs/次；增量与 AVX2 加速属于工单 11，本工单不以此声称棋力提升。
 
 ## 当前代码与目标的差距
 
@@ -145,10 +153,10 @@ C++ 加载新格式与对弈接入在工单 07/11；在那之前引擎仍使用�
 | 执行器 | 已有 C++ 权威执行器、Renju、协议和 Alpha-Beta | 核验规则并统一裁判、采集和对弈 |
 | VCF | 已接入开源 quintet（MIT，固定 commit），适配层区分已证明/未证明/预算耗尽/中断，证据经执行器复查 | 保持上游版本，供工单 05 的战术筛选与打标复用 |
 | 标签 | 已接入 Rapfi 教师（固定版本）与版本化样本存储，区分评分/建议着法/胜负标签 | 持续采集与样本池（工单 05）、结果标签 |
-| 网络 | 旧15维隐藏层及双输出头 | 新64、32隐藏层与单输出 |
-| 推理 | 已有标量、AVX2、增量和对拍基础 | 新架构导出、加载与增量推理 |
-| 数据与编排 | 批处理工具和旧自举流程 | 有容量上限的持续样本池和任务管理 |
-| GUI | 已可完成一局合法人机对弈（PySide6） | 采集、训练、自我训练、测评任务编排 |
+| 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
+| 推理 | `GMVALUE1` 标量全量参照前向已接入搜索；旧 NNUE 保留 | 第一层增量累加、AVX2 与实际搜索吞吐（工单 11） |
+| 数据与编排 | 有容量上限的持续样本池与训练闭环 | 持续自主训练、结果标签与任务管理 |
+| GUI | 对弈、采集、教师打标、训练、模型选择已完成 | 自我训练、测评与版本晋级编排 |
 
 现有工具可用于检查和迁移基础能力，不能当作新工作台已经交付。旧权重不视为新网络的兼容模型。
 

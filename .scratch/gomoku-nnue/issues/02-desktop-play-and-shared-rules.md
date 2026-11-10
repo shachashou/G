@@ -30,4 +30,5 @@
   - GUI `gui/gomoku_gui.py`：选色、新局、合法落点/禁手原因标记、着法记录、终局结果、结束自动重放校验、手工评估明确标注「未加载已训练 NNUE 模型」、后台线程思考、停止/退出清理进程、错误显示。
   - cmake 重新生成 + Ninja 编译 135/135 成功；`ctest` **17/17 全绿**（原有 15 项 + `executor_tests` + `executor_blackbox`）；GUI 用 `QT_QPA_PLATFORM=offscreen` 冒烟通过：窗口构造/绘制、评估方式显示、玩家落子→引擎思考→引擎响应→回到可落子状态，无错误。
 - **缺少依赖**：无（torch/numpy/tqdm/PySide6/cmake/ninja 均在 venv，MSVC 编译器由本机 VS 提供）。
+- **环境变更（工单 07）**：上面的 VS DevShell/cl.exe 记录是当时的构建方式；现在 Windows 构建完全在 `.venv` 内（ziglang + venv Rust），由 `tools/build/build.py` 驱动，不再读取 Visual Studio 文件。本工单的执行器、规则、协议与 GUI 测试在工单 07 的全量回归中仍通过。
 - **未运行**：未做人工长时间 GUI 对弈或棋力实验；界面交互以 offscreen 冒烟与协议黑盒覆盖，真实桌面点击流程留待用户启动 `gui/play.bat` 体验。未启动大规模采集或训练（不在本工单范围）。

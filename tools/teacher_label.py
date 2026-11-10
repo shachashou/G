@@ -100,7 +100,7 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
                    last_move: int | None = None, model_id: str | None = None,
                    final_result: str | None = None,
                    budget_ms: int | None = None, vcf_nodes: int = 50000,
-                   vcf_plies: int = 10) -> dict:
+                   vcf_plies: int = 10, return_record: bool = False) -> dict:
     """Labels one position; returns a report and appends to the store."""
     if len(cells) != SIZE * SIZE or any(c not in (0, 1, 2) for c in cells):
         raise ValueError("cells must be 225 values of 0/1/2")
@@ -158,6 +158,7 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
             final_result=final_result, budget_ms=budget_ms,
             tactical_status=tactical, teacher_status="skipped",
             filter_reason="vcf_proven", accepted=False,
+            include_record=return_record,
             message="a forced VCF exists; not a static-value sample")
     if vcf_status == "disproven":
         tactical = "vcf_clear"
@@ -177,7 +178,7 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
             final_result=final_result, budget_ms=budget_ms,
             tactical_status=tactical, teacher_status="error",
             filter_reason="teacher_error", accepted=False,
-            message=str(exc))
+            include_record=return_record, message=str(exc))
 
     if report.status != "ok":
         return _finish(
@@ -188,6 +189,7 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
             tactical_status=tactical, teacher_status=report.status,
             filter_reason=TEACHER_FILTERS.get(report.status, "teacher_error"),
             accepted=False, teacher_report=report,
+            include_record=return_record,
             message=report.message or f"teacher status {report.status}")
 
     value = report.normalized()
@@ -199,6 +201,7 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
             final_result=final_result, budget_ms=budget_ms,
             tactical_status=tactical, teacher_status="ok",
             filter_reason="no_value", accepted=False, teacher_report=report,
+            include_record=return_record,
             message="teacher returned no normalized value")
     return _finish(
         executor=executor, teacher=teacher, store=store, cells=cells,
@@ -206,7 +209,8 @@ def label_position(*, executor: ExecutorClient, teacher: RapfiTeacher,
         ply=ply, last_move=last_move, model_id=model_id,
         final_result=final_result, budget_ms=budget_ms,
         tactical_status=tactical, teacher_status="ok", filter_reason=None,
-        accepted=True, teacher_report=report, value=value)
+        accepted=True, teacher_report=report, value=value,
+        include_record=return_record)
 
 
 def _finish(*, executor: ExecutorClient, teacher: RapfiTeacher,
@@ -217,7 +221,7 @@ def _finish(*, executor: ExecutorClient, teacher: RapfiTeacher,
             tactical_status: str, teacher_status: str,
             filter_reason: str | None, accepted: bool,
             teacher_report=None, value: float | None = None,
-            message: str = "") -> dict:
+            message: str = "", include_record: bool = False) -> dict:
     identity = teacher.identity
     record = {
         "created_at": _now(),
@@ -262,7 +266,7 @@ def _finish(*, executor: ExecutorClient, teacher: RapfiTeacher,
     }
     record_id = store.add(record) if store is not None else None
     counts = store.counts() if store is not None else None
-    return _report(
+    report = _report(
         accepted=accepted, stored=store is not None, record_id=record_id,
         filter_reason=filter_reason, tactical_status=tactical_status,
         teacher_status=teacher_status, message=message,
@@ -274,6 +278,9 @@ def _finish(*, executor: ExecutorClient, teacher: RapfiTeacher,
         label_version=record["label_version"],
         teacher_identity=identity.describe(),
         counts=counts)
+    if include_record:
+        report["record"] = record
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:

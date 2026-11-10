@@ -233,6 +233,26 @@ if(GOMOKU_PYTHON)
   set_tests_properties(gui_teacher_smoke PROPERTIES
     TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+  # Ticket 05: rolling sample pool boundary (no engine), collection with a
+  # real executor and a deterministic stub teacher, and the offscreen GUI
+  # collection panel against the real teacher (skipped when Rapfi is absent).
+  add_test(NAME pool_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/pool_tests.py"
+            "${CMAKE_SOURCE_DIR}/tools")
+  set_tests_properties(pool_tests PROPERTIES TIMEOUT 180)
+
+  add_test(NAME collect_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/collect_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>"
+            "${CMAKE_SOURCE_DIR}/tools")
+  set_tests_properties(collect_tests PROPERTIES TIMEOUT 300)
+
+  add_test(NAME gui_collect_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_collect_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_collect_smoke PROPERTIES
+    TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   # Ticket 09: full self-play game with NNUE evaluation + bad-weight fallback.
   add_test(NAME nnue_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"

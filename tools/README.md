@@ -20,7 +20,9 @@
 | vcf_bench.py | 算杀调用点与节点预算实测（工单 03） | 记录搜索接入位置和开销，供后续调整 |
 | rapfi_teacher.py | 本地 Rapfi 教师适配器（工单 04） | 固定身份、Renju 配置、预算与评分解析 |
 | teacher_store.py | 版本化教师样本存储（工单 04） | 连续性、完整性与来源字段校验 |
-| teacher_label.py | 执行器 → VCF → Rapfi → 落盘流水线（工单 04） | 供工单 05 的持续打标复用 |
+| teacher_label.py | 执行器 → VCF → Rapfi → 落盘流水线（工单 04） | 供持续打标复用 |
+| collect.py | 自我对弈采集、抽样、打标并提交样本池（工单 05） | 与样本池、教师和 GUI 共用同一适配层 |
+| sample_pool.py | 有容量、去重、冻结验证集的滚动样本池（工单 05） | 工单 06 的训练读取边界 |
 | datagen.py | 多进程自我对弈采集、合并、校验与吞吐统计 | 标签来源、战术筛选、持续入池 |
 | match_runner.py | 双引擎对战、配对开局、结果和异常报告 | 共用完整禁手裁判、冻结版本与新晋级配置 |
 | dataset_profile.py | 数据画像 | 统计新标签来源、过滤原因与数据覆盖 |
@@ -58,6 +60,22 @@
 .venv\Scripts\python.exe tools\teacher_label.py label "H8,H9,I8,I9"
 .venv\Scripts\python.exe tools\teacher_label.py stats
 .venv\Scripts\python.exe tools\teacher_label.py validate
+~~~
+
+## 持续采集与样本池（工单 05）
+
+`collect.py` 用当前引擎自我对弈：随机开局 + 定深搜索，按 `--sample-every` 抽取局面，走 `teacher_label.py` 的“执行器校验 → VCF 过滤 → Rapfi 评分”流水线，再按对局提交进样本池。`sample_pool.py` 是 SQLite 滚动池：
+
+- 对局先暂存（staged），提交后读取者才可见；中断的对局直接丢弃，读取者永远不会看到半写入数据。
+- 精确去重 + 默认 D4 规范形去重；验证集在首批提交时冻结，训练侧与验证 D4 等价的样本被拒绝；容量淘汰只删最旧的训练对局，验证对局永久保留。
+- 读取走 WAL 快照，写端淘汰不会影响正在读取的行；`--throttle-ms` 在高利用率时暂停采集。
+- `stats/validate/evict` 分别查看计数、跑完整性检查、按新容量触发淘汰。
+
+~~~powershell
+.venv\Scripts\python.exe tools\collect.py --games 2 --capacity 80 --sample-every 3 --budget-ms 200
+.venv\Scripts\python.exe tools\sample_pool.py stats data\pool\pool.sqlite3
+.venv\Scripts\python.exe tools\sample_pool.py validate data\pool\pool.sqlite3
+.venv\Scripts\python.exe tools\sample_pool.py evict data\pool\pool.sqlite3 --capacity 40
 ~~~
 
 ## 数据格式边界

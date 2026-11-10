@@ -14,6 +14,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -28,9 +29,11 @@ from PySide6.QtWidgets import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from executor import ExecutorClient, ExecutorError  # noqa: E402
+import collect  # noqa: E402
 import rapfi_teacher  # noqa: E402
 import teacher_label  # noqa: E402
 import vcf_tactics  # noqa: E402
+from sample_pool import PoolError, SamplePool  # noqa: E402
 from teacher_store import TeacherStore  # noqa: E402
 
 SIZE = 15
@@ -152,6 +155,9 @@ class MainWindow(QMainWindow):
         self._player_color = "black"
         self._game_id = uuid.uuid4().hex[:12]
         self._active_teacher = None
+        self._collect_stop = None
+        self._collect_thread = None
+        self._collect_generation = 0
         self._generation = 0
         self._queue: queue.Queue = queue.Queue()
         self._build_ui()
@@ -235,6 +241,44 @@ class MainWindow(QMainWindow):
         tv.addWidget(self.teacher_result)
         panel.addWidget(teacher)
 
+        collection = QGroupBox("持续采集")
+        cv = QVBoxLayout(collection)
+        self.collect_pool_label = QLabel(self._pool_status_text())
+        self.collect_pool_label.setWordWrap(True)
+        cv.addWidget(self.collect_pool_label)
+        collect_row = QHBoxLayout()
+        collect_row.addWidget(QLabel("局数"))
+        self.spin_collect_games = QSpinBox()
+        self.spin_collect_games.setRange(1, 200)
+        self.spin_collect_games.setValue(2)
+        collect_row.addWidget(self.spin_collect_games)
+        collect_row.addWidget(QLabel("容量"))
+        self.spin_collect_capacity = QSpinBox()
+        self.spin_collect_capacity.setRange(10, 100000)
+        self.spin_collect_capacity.setSingleStep(50)
+        self.spin_collect_capacity.setValue(200)
+        collect_row.addWidget(self.spin_collect_capacity)
+        collect_row.addWidget(QLabel("预算(ms)"))
+        self.spin_collect_budget = QSpinBox()
+        self.spin_collect_budget.setRange(100, 2000)
+        self.spin_collect_budget.setSingleStep(100)
+        self.spin_collect_budget.setValue(300)
+        collect_row.addWidget(self.spin_collect_budget)
+        cv.addLayout(collect_row)
+        collect_buttons = QHBoxLayout()
+        self.btn_collect_start = QPushButton("启动采集")
+        self.btn_collect_start.clicked.connect(self._start_collection)
+        self.btn_collect_stop = QPushButton("停止采集")
+        self.btn_collect_stop.clicked.connect(self._stop_collection)
+        self.btn_collect_stop.setEnabled(False)
+        collect_buttons.addWidget(self.btn_collect_start)
+        collect_buttons.addWidget(self.btn_collect_stop)
+        cv.addLayout(collect_buttons)
+        self.collect_label = QLabel("采集：未开始")
+        self.collect_label.setWordWrap(True)
+        cv.addWidget(self.collect_label)
+        panel.addWidget(collection)
+
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
         if self._about.get("nnue_loaded"):
@@ -277,6 +321,9 @@ class MainWindow(QMainWindow):
     # ---- game flow -----------------------------------------------------
 
     def _new_game(self) -> None:
+        if self._phase == "collecting":
+            self._show_error("采集运行中，请先停止采集")
+            return
         self._interrupt()
         self._player_color = "black" if self.radio_black.isChecked() else "white"
         self._game_id = uuid.uuid4().hex[:12]
@@ -299,6 +346,9 @@ class MainWindow(QMainWindow):
         self._maybe_engine_move()
 
     def _stop_game(self) -> None:
+        if self._phase == "collecting":
+            self._show_error("请用「停止采集」结束采集任务")
+            return
         self._interrupt()
         self._phase = "idle"
         self._state = None
@@ -366,6 +416,23 @@ class MainWindow(QMainWindow):
                 kind, generation, payload = self._queue.get_nowait()
             except queue.Empty:
                 return
+            if kind in ("collect_progress", "collect_done", "collect_error"):
+                if generation != self._collect_generation:
+                    continue
+                if kind == "collect_progress":
+                    self._show_collection_update(payload)
+                    continue
+                self._phase = "idle"
+                self._collect_thread = None
+                self._collect_stop = None
+                self.btn_collect_start.setEnabled(True)
+                self.btn_collect_stop.setEnabled(False)
+                if kind == "collect_done":
+                    self.status_label.setText("采集完成")
+                    self._show_collection_update(payload, done=True)
+                else:
+                    self._show_error("采集失败：" + str(payload))
+                continue
             if generation != self._generation:
                 continue  # a stop/new-game interrupted this thinking step
             if kind == "think":
@@ -414,6 +481,107 @@ class MainWindow(QMainWindow):
             self.vcf_label.setText("算杀：未运行")
             return
         self.vcf_label.setText("算杀：" + vcf_tactics.describe(report))
+
+    def _pool_status_text(self) -> str:
+        path = ROOT / "data" / "pool" / "pool.sqlite3"
+        if not path.exists():
+            return "样本池：未开始"
+        try:
+            with SamplePool(path, create=False) as pool:
+                stats = pool.stats()
+        except PoolError as exc:
+            return "样本池：不可读 — " + str(exc)
+        return (f"样本池：{stats['pool_samples']}/{stats['capacity']}"
+                f"（训练 {stats['train_samples']}，验证 {stats['validation_samples']}，"
+                f"淘汰局 {stats['evicted_games']}）")
+
+    def _start_collection(self) -> None:
+        if self._phase in ("collecting", "thinking"):
+            return
+        try:
+            identity = rapfi_teacher.load_lock()
+            install = rapfi_teacher.check_install(identity)
+        except rapfi_teacher.TeacherError as exc:
+            self._show_error("教师不可用：" + str(exc))
+            return
+        if not install.ok:
+            self._show_error("教师不可用：" + "；".join(install.problems))
+            return
+        games = self.spin_collect_games.value()
+        capacity = self.spin_collect_capacity.value()
+        budget = self.spin_collect_budget.value()
+        config = collect.CollectConfig(
+            games=games, depth=2, max_plies=24, opening_plies=2,
+            opening_region=7, sample_every=3, budget_ms=budget,
+            vcf_nodes=5000, vcf_plies=4, seed=int(time.time()) % 100000,
+            model_id="handcrafted")
+        stop_event = threading.Event()
+        self._collect_stop = stop_event
+        self._collect_generation += 1
+        generation = self._collect_generation
+        self._phase = "collecting"
+        self.status_label.setText("采集运行中…")
+        self.btn_collect_start.setEnabled(False)
+        self.btn_collect_stop.setEnabled(True)
+        exe = self._exe
+        pool_path = ROOT / "data" / "pool" / "pool.sqlite3"
+
+        def worker() -> None:
+            pool = None
+            try:
+                pool = SamplePool(pool_path, capacity=capacity)
+                pool.set_config("validation_games", 1)
+                with ExecutorClient(exe) as game_client, \
+                        ExecutorClient(exe) as label_client, \
+                        rapfi_teacher.RapfiTeacher(identity=identity) as teacher:
+                    summary = collect.collect(
+                        pool, config, game_client, label_client, teacher,
+                        stop_event=stop_event,
+                        progress=lambda update: self._queue.put(
+                            ("collect_progress", generation, update)))
+                self._queue.put(("collect_done", generation, summary))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                self._queue.put(("collect_error", generation, str(exc)))
+            finally:
+                if pool is not None:
+                    pool.close()
+
+        self._collect_thread = threading.Thread(target=worker, daemon=True)
+        self._collect_thread.start()
+
+    def _stop_collection(self) -> None:
+        if self._collect_stop is None:
+            return
+        self._collect_stop.set()
+        self.btn_collect_stop.setEnabled(False)
+        self.status_label.setText("停止采集中…")
+
+    def _show_collection_update(self, update: dict, *, done: bool = False) -> None:
+        parts = [
+            f"生成 {update.get('generated', 0)}",
+            f"有效 {update.get('valid', 0)}",
+            f"入池 {update.get('inserted', 0)}",
+            f"池 {update.get('pool_samples', 0)}/{update.get('capacity', 0)}",
+        ]
+        rate = update.get("effective_per_second")
+        if rate:
+            parts.append(f"有效/秒 {rate:.2f}")
+        if update.get("validation_samples"):
+            parts.append(f"验证 {update['validation_samples']}")
+        if update.get("evicted_games"):
+            parts.append(f"淘汰局 {update['evicted_games']}")
+        if update.get("staged_games"):
+            parts.append(f"暂存 {update['staged_games']}")
+        if done:
+            parts.append("已完成" if not update.get("stopped") else "已停止")
+        self.collect_label.setText("采集：" + "，".join(parts))
+        filters = update.get("filters") or {}
+        if filters:
+            top = ", ".join(f"{name}={count}"
+                            for name, count in sorted(filters.items()))
+            self.collect_label.setText(self.collect_label.text() + "；过滤 " + top)
+        if done:
+            self.collect_pool_label.setText(self._pool_status_text())
 
     def _teacher_status_text(self) -> str:
         try:
@@ -607,6 +775,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._generation += 1
+        if self._collect_stop is not None:
+            self._collect_stop.set()
+        if self._collect_thread is not None:
+            self._collect_thread.join(timeout=10)
         teacher = self._active_teacher
         if teacher is not None:
             try:

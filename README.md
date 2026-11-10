@@ -9,7 +9,7 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md) 和 [04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md) 和 [05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -100,6 +100,24 @@ Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -h
 .venv\Scripts\python.exe tools\teacher_label.py label "H8,H9,I8,I9"
 .venv\Scripts\python.exe tools\teacher_label.py stats
 .venv\Scripts\python.exe tools\teacher_label.py validate
+~~~
+
+## 持续采集与滚动样本池
+
+- **采集**：`tools/collect.py` 用当前引擎（未训练模型时即手工评估）自我对弈：随机开局（区域可配）+ 定深搜索，按间隔抽取开局与中盘局面，经“执行器校验 → VCF 过滤 → Rapfi 教师”打标后按对局暂存并原子提交。对局未完成时写入 NULL 结果，不伪造和棋。
+- **配置与身份**：局数、深度、最大手数、开局手数/区域、采样间隔、教师预算、容量、验证局数、D4 去重开关、新旧混合比例、限速都记录在样本池的运行配置里；采集策略版本为 `collect-v1`，模型身份随对局记录。
+- **样本池**：`data/pool/pool.sqlite3`（SQLite，`application_id` + `user_version=1`）。对局先 `staged`，`commit_game` 在一个事务里转成可读并执行容量淘汰；中断/崩溃的暂存对局对读取者不可见，停止时主动丢弃。
+- **去重与泄漏**：按“棋盘+行棋方”精确去重；默认再按 D4 规范形去重，所以对称增广不计为独立原始数据。验证集成员在首批提交时冻结，训练样本若与验证样本 D4 等价会被拒绝并计数；淘汰只针对最旧的训练对局，验证对局永不淘汰。
+- **并发与背压**：读端在 WAL 快照里读，写端淘汰旧对局不会把读取中的行抽走；池利用率过高时可配置 `--throttle-ms` 暂停采集。
+- **统计**：`stats` 分别给出累计生成、有效、入池（去重后）、当前池容量、过滤原因、异常/未证明计数、有效样本/秒、淘汰局数与对称增广计数（采集阶段恒为 0）。
+- **GUI**：状态区显示样本池容量与训练/验证数量；「启动采集」「停止采集」在后台线程运行，实时显示生成/有效/入池/池容量/有效每秒与过滤原因，停止后不遗留采集或教师进程。
+- **命令**：
+
+~~~powershell
+.venv\Scripts\python.exe tools\collect.py --games 2 --capacity 80 --sample-every 3 --budget-ms 200
+.venv\Scripts\python.exe tools\sample_pool.py stats data\pool\pool.sqlite3
+.venv\Scripts\python.exe tools\sample_pool.py validate data\pool\pool.sqlite3
+.venv\Scripts\python.exe tools\sample_pool.py evict data\pool\pool.sqlite3 --capacity 40
 ~~~
 
 ## 当前代码与目标的差距

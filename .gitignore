@@ -1,8 +1,19 @@
-# Build
+# Build outputs (build/, Cargo target/, packages)
 build/
 build-*/
 out/
+dist/
 target/
+
+# Compiled binaries and intermediates (normal builds land in build/ or target/)
+*.exe
+*.dll
+*.lib
+*.pdb
+*.obj
+*.ilk
+.ninja_log
+.ninja_deps
 
 # Python
 __pycache__/
@@ -12,26 +23,41 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+*.egg-info/
+.ipynb_checkpoints/
 
-# Data & weights (large binaries; keep dirs via .gitkeep)
+# Runtime data and weights (generated; keep the directories via .gitkeep)
 data/*
 !data/.gitkeep
 weights/*
 !weights/.gitkeep
 *.binpack
-match_results*.json
 *.jsonl
+match_results*.json
+*.log
 
-# Model artifacts
+# Model and tensor artifacts
 *.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.npy
+*.npz
 *.nnue
-
-# IDE
-.vs/
-.vscode/
-.idea/
 
 # Generated reports and measurement dumps are local artifacts. Specs and
 # tickets under .scratch are Markdown and stay tracked.
-.scratch/**/*.log
 .scratch/**/*.json
+
+# OS / editor junk
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*.tmp
+*.orig
+*.rej

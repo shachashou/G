@@ -2,6 +2,7 @@
 """Ticket 09: scheduling, real training/evaluation, backpressure and cleanup."""
 from dataclasses import replace
 import json
+import os
 import random
 from pathlib import Path
 import sys
@@ -251,6 +252,34 @@ class TaskTests(unittest.TestCase):
             rows = pool.read_batch()
             newest = pool.read_batch(limit=1, seed=3, new_ratio=1)
             self.assertEqual(newest[0]["id"], rows[-1]["id"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing semantics")
+    def test_state_reader_during_training_does_not_fail_task(self):
+        from run_support_tests import windows_reader
+        build_pool(self.cfg.pool)
+        locked = False
+        def trainer(config, *, progress, **kw):
+            def notify(value):
+                nonlocal locked
+                if not locked:
+                    locked = True
+                    close = windows_reader(task.directory / "state.json")
+                    reader = threading.Timer(.15, close)
+                    reader.start()
+                    try:
+                        progress(value)
+                    finally:
+                        reader.join()
+                else:
+                    progress(value)
+            return train_value(config, progress=notify, **kw)
+        task = TrainingTask(replace(self.cfg, capacity=1000, max_rounds=1, max_games=1),
+                            source_factory=EmptySource, trainer=trainer)
+        result = task.run()
+        self.assertTrue(locked)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertTrue(result["cleanup_complete"])
+        self.assertEqual(result["current"]["version"], "v0")
 
 
 if __name__ == "__main__":

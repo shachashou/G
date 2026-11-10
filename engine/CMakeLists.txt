@@ -375,6 +375,10 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(training_task_tests PROPERTIES TIMEOUT 300)
 
+  add_test(NAME run_support_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_support_tests.py")
+  set_tests_properties(run_support_tests PROPERTIES TIMEOUT 30)
+
   add_test(NAME gui_training_task_smoke
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_training_task_smoke.py"
             "$<TARGET_FILE:gomoku_nnue>")

@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,11 +23,37 @@ def file_identity(path: str | Path) -> dict:
 
 
 def write_json(path: Path, value: dict) -> None:
+    """Publish a whole document, tolerating brief Windows sharing locks.
+
+    Each writer owns its temporary file. Never remove the current document
+    to work around a lock: readers must keep seeing the last valid version.
+    Permanent permission errors still propagate after a bounded retry.
+    """
+    payload = json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    pending = path.with_suffix(path.suffix + ".pending")
-    pending.write_text(json.dumps(value, indent=2, ensure_ascii=False,
-                                  allow_nan=False) + "\n", encoding="utf-8")
-    pending.replace(path)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".pending", dir=path.parent)
+    pending = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        deadline = time.monotonic() + 2.0
+        delay = 0.01
+        while True:
+            try:
+                pending.replace(path)
+                break
+            except PermissionError as exc:
+                remaining = deadline - time.monotonic()
+                if os.name != "nt" or exc.winerror not in (5, 32, 33) or remaining <= 0:
+                    raise
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 0.1)
+    finally:
+        try:
+            pending.unlink(missing_ok=True)
+        except OSError:
+            # Preserve the original error if Windows also holds the temp file.
+            pass
 
 
 def source_identity() -> dict:

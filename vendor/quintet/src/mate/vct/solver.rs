@@ -1,0 +1,154 @@
+use super::generator::Candidates;
+use super::nested_vcf::NestedVCF;
+use super::proof::{DEFAULT_CARRY_CAPACITY, PnDn, ProofTable};
+use super::state::VCTState;
+use super::threshold::ThresholdPolicy;
+use crate::mate::budget::NodeBudget;
+use crate::mate::mate::Mate;
+use crate::mate::memo::ZobristBuildHasher;
+use crate::mate::solver::Solver;
+use lru::LruCache;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+
+/// The VCT solver. The three variants (DFS, PNS, df-pn) share everything
+/// except how child thresholds are chosen, which is supplied by `P`.
+///
+/// One solver answers under any `threat_limit`: it is the state's
+/// ([`VCTState::threat_limit`]), and part of the key of everything the
+/// solver remembers about a position, so what it learned under one
+/// `threat_limit` is never read under another. What the nested VCF searches
+/// learn is keyed by their own depth instead, and serves them all.
+///
+/// The methods are split by phase across sibling modules:
+/// `searcher.rs` (AND/OR search and choosing the most-proving child),
+/// `generator.rs` (candidate moves) and `extractor.rs` (recovering the
+/// winning line after a proof); `nested_vcf.rs` is the VCF sub-search the
+/// generator and the extractor ask.
+pub struct VCTSolver<P: ThresholdPolicy> {
+    /// Proof numbers of the positions after an attack (defender to move).
+    pub(super) attacker_table: ProofTable,
+    /// Proof numbers of the positions after a defence (attacker to move).
+    pub(super) defender_table: ProofTable,
+    /// The attacker's nested VCF search, `threat_limit` deep.
+    pub(super) attacker_vcf: NestedVCF,
+    /// The defender's nested VCF search, `defender_vcf_depth` deep.
+    pub(super) defender_vcf: NestedVCF,
+    /// What `generate_attacks` found, by position.
+    pub(super) attacks_cache: CandidatesCache,
+    /// What `generate_defences` found, by position.
+    pub(super) defences_cache: CandidatesCache,
+    /// The children's numbers of the expansions under way, each on top of
+    /// its parent's (`expand_attacks` / `expand_defences`).
+    pub(super) children: Vec<Option<PnDn>>,
+    policy: PhantomData<P>,
+}
+
+/// How many positions' candidates each of the two caches keeps. Unlike the
+/// proof tables they are a plain LRU, bounded within a search too: losing
+/// an entry only costs generating the moves again.
+///
+/// An entry takes about 280 bytes in the attacks cache (some 30 moves of 8
+/// bytes) and 110 in the defences cache (some 6), so the two together take
+/// about 25 MB when full. On the benchmark (07), going up from 1000 took
+/// 7% off the nodes and 10% off the time; larger caches bought little more
+/// (8% at 2^18 and at 2^20) for four and sixteen times the memory.
+const CANDIDATES_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1 << 16).unwrap();
+
+pub(super) type CandidatesCache = LruCache<u64, Candidates, ZobristBuildHasher>;
+
+/// An empty cache that grows as it is filled. `LruCache::with_hasher` would
+/// allocate the table for the whole capacity up front, for every solver,
+/// however small its search.
+fn candidates_cache() -> CandidatesCache {
+    let mut cache = LruCache::unbounded_with_hasher(ZobristBuildHasher::default());
+    cache.resize(CANDIDATES_CACHE_CAPACITY);
+    cache
+}
+
+impl<P: ThresholdPolicy> VCTSolver<P> {
+    pub fn new(defender_vcf_depth: u8) -> Self {
+        Self::with_carry_capacity(defender_vcf_depth, DEFAULT_CARRY_CAPACITY)
+    }
+
+    /// Like [`Self::new`], but setting how much each memo carries from one
+    /// search into the next (see [`Solver::advance_generation`]).
+    pub fn with_carry_capacity(defender_vcf_depth: u8, carry_capacity: usize) -> Self {
+        // Candidate generation asks the nested VCF solvers with
+        // `min(state.limit, depth)`, so below this the moves generated still
+        // move with the limit and one limit's decision says nothing about
+        // another's. `search_defences` also cuts off at `limit <= 1`. The
+        // attacker's depth, the state's `threat_limit`, raises it further
+        // (`ProofTable::transfer_from`).
+        let transfer_floor = defender_vcf_depth.saturating_add(1).max(2);
+        Self {
+            attacker_table: ProofTable::with_carry_capacity(carry_capacity, transfer_floor),
+            defender_table: ProofTable::with_carry_capacity(carry_capacity, transfer_floor),
+            attacker_vcf: NestedVCF::attacker(carry_capacity),
+            defender_vcf: NestedVCF::defender(defender_vcf_depth, carry_capacity),
+            attacks_cache: candidates_cache(),
+            defences_cache: candidates_cache(),
+            children: Vec::new(),
+            policy: PhantomData,
+        }
+    }
+}
+
+impl<P: ThresholdPolicy> Solver for VCTSolver<P> {
+    type State = VCTState;
+
+    /// Searches for a VCT. `None` means either "no VCT within `state.limit`"
+    /// or "gave up"; the two are told apart by `budget.is_exhausted()`.
+    ///
+    /// Ask as many questions of one solver as you like, about either
+    /// attacker and under any `threat_limit`: what it remembers is keyed so that answers cannot be
+    /// confused, and each call opens a new generation so that the memos do
+    /// not grow without bound.
+    ///
+    /// What reuse buys is asking the *same* question again, which costs a
+    /// few nodes instead of the whole search. Two different positions share
+    /// much less than one might hope, because the remaining limit is part of
+    /// the key: the same board reached from two roots is two entries unless
+    /// the roots are the same depth away from it.
+    fn solve(&mut self, state: &mut VCTState, budget: &mut NodeBudget) -> Option<Mate> {
+        self.advance_generation();
+        if self.search(state, budget) {
+            // The root is proven, so the winning line is in the tables and
+            // recovering it is bounded by the length of that line. It would be
+            // pointless to abandon a proof for want of budget, so the walk runs
+            // outside the budget.
+            self.extract(state, &mut NodeBudget::unlimited())
+        } else {
+            None
+        }
+    }
+
+    /// Forgets both proof tables, both move caches and the nested VCF
+    /// solvers' dead ends.
+    fn clear(&mut self) {
+        self.attacker_table.clear();
+        self.defender_table.clear();
+        self.attacks_cache.clear();
+        self.defences_cache.clear();
+        self.attacker_vcf.clear();
+        self.defender_vcf.clear();
+    }
+
+    /// A caller driving [`Self::search`] or [`Self::extract`] by hand does
+    /// this itself, once per question.
+    fn advance_generation(&mut self) {
+        self.attacker_table.advance_generation();
+        self.defender_table.advance_generation();
+        self.attacker_vcf.advance_generation();
+        self.defender_vcf.advance_generation();
+        // The two candidate caches are `LruCache`s, already bounded.
+    }
+
+    /// The two proof tables and the two nested VCF solvers' dead ends.
+    fn memo_len(&self) -> usize {
+        self.attacker_table.len()
+            + self.defender_table.len()
+            + self.attacker_vcf.memo_len()
+            + self.defender_vcf.memo_len()
+    }
+}

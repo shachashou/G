@@ -1,0 +1,666 @@
+use super::bits::Bits;
+use super::line::*;
+use super::player::*;
+use super::point::*;
+use super::row::*;
+use super::segment::FIVE;
+use std::fmt;
+use std::str::FromStr;
+
+const DIAGONAL_LINE_SKIP: u8 = FIVE - 1;
+const DIAGONAL_LINE_COUNT: u8 = (SIZE - DIAGONAL_LINE_SKIP) * 2 - 1; // 21
+
+/// How many lines are stored: every horizontal and vertical line, and the
+/// diagonals long
+/// enough to hold a five.
+pub const LINE_COUNT: usize = (SIZE as usize + DIAGONAL_LINE_COUNT as usize) * 2;
+
+type OrthogonalLines = [Line; SIZE as usize];
+type DiagonalLines = [Line; DIAGONAL_LINE_COUNT as usize];
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+pub struct Grid {
+    vlines: OrthogonalLines,
+    hlines: OrthogonalLines,
+    alines: DiagonalLines,
+    dlines: DiagonalLines,
+}
+
+impl Grid {
+    pub fn new() -> Self {
+        Self {
+            vlines: orthogonal_lines(),
+            hlines: orthogonal_lines(),
+            alines: diagonal_lines(),
+            dlines: diagonal_lines(),
+        }
+    }
+
+    pub fn from_moves(moves: &Points) -> Self {
+        let mut grid = Self::new();
+        let mut player = Black;
+        for &m in moves.0.iter() {
+            grid.put(player, m);
+            player = player.opponent();
+        }
+        grid
+    }
+
+    pub fn from_stones(blacks: &Points, whites: &Points) -> Self {
+        let mut grid = Self::new();
+        for &p in blacks.0.iter() {
+            grid.put(Black, p);
+        }
+        for &p in whites.0.iter() {
+            grid.put(White, p);
+        }
+        grid
+    }
+
+    pub fn put(&mut self, player: Player, p: Point) {
+        self.update_lines_on(p, |line, j| line.put(player, j));
+    }
+
+    pub fn remove(&mut self, p: Point) {
+        self.update_lines_on(p, |line, j| line.remove(j));
+    }
+
+    pub fn stone(&self, p: Point) -> Option<Player> {
+        let vidx = p.to_index(Vertical);
+        self.vlines[vidx.i as usize].stone(vidx.j)
+    }
+
+    pub fn stones(&self, player: Player) -> impl Iterator<Item = Point> + '_ {
+        self.vlines.iter().enumerate().flat_map(move |(i, l)| {
+            l.stones(player)
+                .map(move |j| Index::new(Vertical, i as u8, j).to_point())
+        })
+    }
+
+    pub fn neighbors(
+        &self,
+        p: Point,
+        distance: u8,
+        only_empty: bool,
+    ) -> impl Iterator<Item = Point> + '_ {
+        let d = distance as i8;
+        vec![
+            p.to_index(Vertical),
+            p.to_index(Horizontal),
+            p.to_index(Ascending),
+            p.to_index(Descending),
+        ]
+        .into_iter()
+        .flat_map(move |idx| (-d..=d).flat_map(move |j| idx.checked_offset(j)))
+        .map(|idx| idx.to_point())
+        .filter(move |&p| !only_empty || self.stone(p).is_none())
+    }
+
+    pub fn empty_points(&self) -> impl Iterator<Item = Point> + '_ {
+        self.vlines.iter().enumerate().flat_map(move |(i, l)| {
+            l.empty_cells()
+                .map(move |j| Index::new(Vertical, i as u8, j).to_point())
+        })
+    }
+
+    /// The `i`-th line in direction `d`, or `None` for the diagonals shorter
+    /// than five, which are not stored.
+    pub fn line(&self, d: Direction, i: u8) -> Option<&Line> {
+        let index = Index::new(d, i, 0);
+        Self::line_idx(index).map(|k| match d {
+            Vertical => &self.vlines[k],
+            Horizontal => &self.hlines[k],
+            Ascending => &self.alines[k],
+            Descending => &self.dlines[k],
+        })
+    }
+
+    /// The position of the line `(d, i)` in [`Self::lines`]: a single index
+    /// for it, below [`LINE_COUNT`]. `None` for the diagonals shorter than
+    /// five, which are not stored.
+    pub fn line_key(d: Direction, i: u8) -> Option<usize> {
+        let k = Self::line_idx(Index::new(d, i, 0))?;
+        let (r, n) = (SIZE as usize, DIAGONAL_LINE_COUNT as usize);
+        Some(match d {
+            Vertical => k,
+            Horizontal => r + k,
+            Ascending => 2 * r + k,
+            Descending => 2 * r + n + k,
+        })
+    }
+
+    /// The inverse of [`Self::line_key`].
+    pub fn line_from_key(k: usize) -> (Direction, u8) {
+        let (r, n) = (SIZE as usize, DIAGONAL_LINE_COUNT as usize);
+        if k < r {
+            (Vertical, k as u8)
+        } else if k < 2 * r {
+            (Horizontal, (k - r) as u8)
+        } else if k < 2 * r + n {
+            (Ascending, (k - 2 * r) as u8 + DIAGONAL_LINE_SKIP)
+        } else {
+            (Descending, (k - 2 * r - n) as u8 + DIAGONAL_LINE_SKIP)
+        }
+    }
+
+    /// The line through `p` in direction `d`. `p` itself is at cell
+    /// `p.to_index(d).j` of it.
+    pub fn line_on(&self, p: Point, d: Direction) -> Option<&Line> {
+        self.line(d, p.to_index(d).i)
+    }
+
+    /// Every stored line, as `(direction, i, line)`.
+    pub fn lines(&self) -> impl Iterator<Item = (Direction, u8, &Line)> {
+        let viter = self
+            .vlines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (Vertical, i as u8, l));
+
+        let hiter = self
+            .hlines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (Horizontal, i as u8, l));
+
+        let aiter = self
+            .alines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (Ascending, (i as u8 + DIAGONAL_LINE_SKIP), l));
+
+        let diter = self
+            .dlines
+            .iter()
+            .enumerate()
+            .map(|(i, l)| (Descending, (i as u8 + DIAGONAL_LINE_SKIP), l));
+
+        viter.chain(hiter).chain(aiter).chain(diter)
+    }
+
+    /// The (at most four) stored lines through `p`.
+    pub fn lines_on(&self, p: Point) -> impl Iterator<Item = (Direction, u8, &Line)> {
+        let vidx = p.to_index(Vertical);
+        let viter = Self::line_idx(vidx)
+            .map(|i| (Vertical, vidx.i, &self.vlines[i]))
+            .into_iter();
+
+        let hidx = p.to_index(Horizontal);
+        let hiter = Self::line_idx(hidx)
+            .map(|i| (Horizontal, hidx.i, &self.hlines[i]))
+            .into_iter();
+
+        let aidx = p.to_index(Ascending);
+        let aiter = Self::line_idx(aidx)
+            .map(|i| (Ascending, aidx.i, &self.alines[i]))
+            .into_iter();
+
+        let didx = p.to_index(Descending);
+        let diter = Self::line_idx(didx)
+            .map(|i| (Descending, didx.i, &self.dlines[i]))
+            .into_iter();
+
+        viter.chain(hiter).chain(aiter).chain(diter)
+    }
+
+    pub fn rows(&self, r: Player, k: RowKind) -> impl Iterator<Item = Row> + '_ {
+        self.lines()
+            .filter(move |(_, _, l)| l.score_bound(r) > k.stones())
+            .flat_map(move |(d, i, l)| {
+                l.rows(r, k)
+                    .map(move |(j, s)| Row::new(Index::new(d, i, j), r, k, s))
+            })
+    }
+
+    /// `r`'s rows of kind `k` through `p`: see [`Line::rows_on`].
+    ///
+    /// One row per segment, so a count of [`Four`] rows is not a count of
+    /// fours: White's `xxxx.x` has two segments scoring 4 with the same eye,
+    /// which makes six. To count the points that complete a five, use
+    /// [`Self::four_eyes_on`].
+    pub fn rows_on(&self, p: Point, r: Player, k: RowKind) -> impl Iterator<Item = Row> + '_ {
+        self.lines_on(p)
+            .filter(move |(_, _, l)| l.score_bound(r) > k.stones())
+            .flat_map(move |(d, i, l)| {
+                l.rows_on(p.to_index(d).j, r, k)
+                    .map(move |(j, s)| Row::new(Index::new(d, i, j), r, k, s))
+            })
+    }
+
+    /// Per line through `p`, [`Line::row_starts_on`] for `p`'s cell: where
+    /// the rows of [`Self::rows_on`] start, without building them.
+    pub fn row_starts_on(&self, p: Point, r: Player, k: RowKind) -> impl Iterator<Item = u16> + '_ {
+        self.lines_on(p)
+            .filter(move |(_, _, l)| l.score_bound(r) > k.stones())
+            .map(move |(d, _, l)| l.row_starts_on(p.to_index(d).j, r, k))
+    }
+
+    /// The eyes of `r`'s fours through `p`, line by line: the points
+    /// where `r` makes a five, each once per line, read off the lines'
+    /// bitmasks without building the rows of `rows_on(p, r, Four)`.
+    ///
+    /// Two lines through `p` share no point but `p`, so the points are
+    /// distinct when `p` holds a stone. Two of them mean `r` has two ways to
+    /// a five, a double four or a straight four.
+    ///
+    /// On one line, two fours through `p` give their eyes in the order the
+    /// rows come, as the rows start: were the later row's eye before the
+    /// earlier one's, both would be empty cells of the earlier row, which
+    /// then would have two and be no four.
+    pub fn four_eyes_on(&self, p: Point, r: Player) -> impl Iterator<Item = Point> + '_ {
+        self.lines_on(p)
+            .filter(move |(_, _, l)| l.score_bound(r) > Four.stones())
+            .flat_map(move |(d, i, l)| {
+                let starts = l.row_starts_on(p.to_index(d).j, r, Four);
+                Bits(l.eyes_of(starts, Four.eye_cells()))
+                    .map(move |j| Index::new(d, i, j).to_point())
+            })
+    }
+
+    pub fn to_pretty_string(&self) -> String {
+        let mut result = String::new();
+        for (i, l) in self.hlines.iter().enumerate().rev() {
+            result.push_str(&format!("{: >2}{}\n", i + 1, l));
+        }
+        let xindices = ('A'..='O').map(|c| c.to_string()).collect::<Vec<_>>();
+        result.push_str(&format!("   {}", xindices.join(" ")));
+        result
+    }
+
+    /// Applies `f` to each stored line through `p`, with `p`'s cell on it.
+    fn update_lines_on(&mut self, p: Point, mut f: impl FnMut(&mut Line, u8)) {
+        let vidx = p.to_index(Vertical);
+        if let Some(i) = Self::line_idx(vidx) {
+            f(&mut self.vlines[i], vidx.j)
+        }
+
+        let hidx = p.to_index(Horizontal);
+        if let Some(i) = Self::line_idx(hidx) {
+            f(&mut self.hlines[i], hidx.j)
+        }
+
+        let aidx = p.to_index(Ascending);
+        if let Some(i) = Self::line_idx(aidx) {
+            f(&mut self.alines[i], aidx.j)
+        }
+
+        let didx = p.to_index(Descending);
+        if let Some(i) = Self::line_idx(didx) {
+            f(&mut self.dlines[i], didx.j)
+        }
+    }
+
+    fn line_idx(index: Index) -> Option<usize> {
+        let i = index.i;
+        match index.d {
+            Vertical => Some(i as usize),
+            Horizontal => Some(i as usize),
+            _ => {
+                if (DIAGONAL_LINE_SKIP..DIAGONAL_LINE_SKIP + DIAGONAL_LINE_COUNT).contains(&i) {
+                    Some((i - DIAGONAL_LINE_SKIP) as usize)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Default for Grid {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for Grid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = self
+            .hlines
+            .iter()
+            .rev()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        f.write_str(&s)
+    }
+}
+
+impl FromStr for Grid {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.contains("/") {
+            from_str_stones(s)
+        } else if s.contains(",") {
+            from_str_moves(s)
+        } else {
+            from_str_diagram(s)
+        }
+    }
+}
+
+fn from_str_stones(s: &str) -> Result<Grid, &'static str> {
+    let mut codes = s.trim().split("/");
+    let blacks_str = codes.next().ok_or("Wrong format.")?;
+    let whites_str = codes.next().ok_or("Wrong format.")?;
+    let blacks = blacks_str.parse::<Points>()?;
+    let whites = whites_str.parse::<Points>()?;
+    Ok(Grid::from_stones(&blacks, &whites))
+}
+
+fn from_str_moves(s: &str) -> Result<Grid, &'static str> {
+    let moves = s.trim().parse::<Points>()?;
+    Ok(Grid::from_moves(&moves))
+}
+
+fn from_str_diagram(s: &str) -> Result<Grid, &'static str> {
+    let hlines_rev = s
+        .trim()
+        .split("\n")
+        .map(|ls| ls.trim().parse::<Line>())
+        .collect::<Result<Vec<_>, _>>()?;
+    if hlines_rev.len() != SIZE as usize {
+        return Err("Wrong num of lines");
+    }
+    let mut grid = Grid::new();
+    for (i, hline) in hlines_rev.iter().rev().enumerate() {
+        if hline.size != SIZE {
+            return Err("Wrong line size");
+        }
+        for j in 0..hline.size {
+            if let Some(player) = hline.stone(j) {
+                let point = Index::new(Horizontal, i as u8, j).to_point();
+                grid.put(player, point)
+            }
+        }
+    }
+    Ok(grid)
+}
+
+fn orthogonal_lines() -> OrthogonalLines {
+    [
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+        Line::new(SIZE),
+    ]
+}
+
+fn diagonal_lines() -> DiagonalLines {
+    [
+        Line::new(SIZE - 10),
+        Line::new(SIZE - 9),
+        Line::new(SIZE - 8),
+        Line::new(SIZE - 7),
+        Line::new(SIZE - 6),
+        Line::new(SIZE - 5),
+        Line::new(SIZE - 4),
+        Line::new(SIZE - 3),
+        Line::new(SIZE - 2),
+        Line::new(SIZE - 1),
+        Line::new(SIZE),
+        Line::new(SIZE - 1),
+        Line::new(SIZE - 2),
+        Line::new(SIZE - 3),
+        Line::new(SIZE - 4),
+        Line::new(SIZE - 5),
+        Line::new(SIZE - 6),
+        Line::new(SIZE - 7),
+        Line::new(SIZE - 8),
+        Line::new(SIZE - 9),
+        Line::new(SIZE - 10),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn points(it: impl Iterator<Item = Point>) -> String {
+        Points(it.collect()).to_string()
+    }
+
+    /// Every point is stored once per direction; all four copies must agree
+    /// with `expected` after any sequence of puts and removes.
+    fn assert_lines_agree(grid: &Grid, expected: &[(Point, Player)]) {
+        for x in 0..SIZE {
+            for y in 0..SIZE {
+                let p = Point(x, y);
+                let want = expected.iter().find(|(q, _)| *q == p).map(|&(_, r)| r);
+                for d in Direction::ALL {
+                    if let Some(line) = grid.line_on(p, d) {
+                        assert_eq!(line.stone(p.to_index(d).j), want, "{p} {d:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_put_and_remove() {
+        let mut grid = Grid::new();
+        // The centre, and a stone near each corner, where the diagonals are
+        // short or not stored at all.
+        let stones = [
+            (Point(7, 7), Black),
+            (Point(8, 8), White),
+            (Point(9, 8), Black),
+            (Point(1, 1), Black),
+            (Point(1, 13), White),
+            (Point(13, 1), Black),
+            (Point(13, 13), White),
+            (Point(0, 0), White),
+        ];
+        for (p, r) in stones {
+            grid.put(r, p);
+        }
+        assert_lines_agree(&grid, &stones);
+
+        // Replacing a stone, removing two, and removing from an empty point.
+        grid.put(Black, Point(1, 13));
+        grid.remove(Point(7, 7));
+        grid.remove(Point(8, 8));
+        grid.remove(Point(9, 9));
+        let stones = [
+            (Point(9, 8), Black),
+            (Point(1, 1), Black),
+            (Point(1, 13), Black),
+            (Point(13, 1), Black),
+            (Point(13, 13), White),
+            (Point(0, 0), White),
+        ];
+        assert_lines_agree(&grid, &stones);
+        assert_eq!(points(grid.stones(Black)), "B2,B14,J9,N2");
+        assert_eq!(points(grid.stones(White)), "A1,N14");
+        assert_eq!(grid.empty_points().count(), 225 - 6);
+    }
+
+    #[test]
+    fn test_lines() -> Result<(), String> {
+        let grid = "H8,I9,J9".parse::<Grid>()?;
+
+        // The diagonals shorter than a five are not stored.
+        assert!(grid.line(Ascending, DIAGONAL_LINE_SKIP).is_some());
+        assert!(grid.line(Ascending, DIAGONAL_LINE_SKIP - 1).is_none());
+        assert!(grid.line(Descending, DIAGONAL_LINE_SKIP - 1).is_none());
+        assert!(grid.line_on(Point(0, 0), Descending).is_none());
+
+        // `lines` and `lines_on` agree with `line`.
+        assert_eq!(
+            grid.lines().count(),
+            (SIZE as usize + DIAGONAL_LINE_COUNT as usize) * 2
+        );
+        for (d, i, line) in grid.lines() {
+            assert_eq!(grid.line(d, i), Some(line));
+        }
+        assert_eq!(grid.lines_on(Point(7, 7)).count(), 4);
+        assert_eq!(grid.lines_on(Point(0, 0)).count(), 3);
+        for (d, i, line) in grid.lines_on(Point(7, 7)) {
+            let index = Point(7, 7).to_index(d);
+            assert_eq!(i, index.i);
+            assert_eq!(line.stone(index.j), Some(Black));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_rows() -> Result<(), String> {
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . x x x o . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+
+        // Black's only open two is H6-K9 on the diagonal: H6-H8 is closed
+        // by White's H9.
+        let twos: Vec<_> = grid.rows(Black, Two).collect();
+        assert_eq!(twos.len(), 1);
+        assert_eq!(points(twos[0].eyes()), "I7,J8");
+
+        // White's H9-J9 is closed by K9, so it is a sword (three stones that
+        // can only become a closed four), not a three.
+        assert_eq!(grid.rows(White, Three).count(), 0);
+        let swords: Vec<_> = grid.rows(White, Sword).collect();
+        assert_eq!(swords.len(), 1);
+        assert_eq!(points(swords[0].stones()), "H9,I9,J9");
+        assert_eq!(points(swords[0].eyes()), "F9,G9");
+
+        // `rows_on` is the same search, limited to one point's lines.
+        let on_h9: Vec<_> = grid.rows_on(Point(7, 8), White, Sword).collect();
+        assert_eq!(on_h9, swords);
+        assert_eq!(grid.rows_on(Point(7, 8), Black, Two).count(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_four_eyes_on() -> Result<(), String> {
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         x x x x . x . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . x x x x . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+
+        // White's `xxxx.x`: two segments score 4, both with the eye E8,
+        // which makes six. One four, not a double four.
+        let fours: Vec<_> = grid.rows_on(Point(1, 7), White, Four).collect();
+        assert_eq!(fours.len(), 2);
+        assert_eq!(points(fours[0].eyes()), "E8");
+        assert_eq!(points(fours[1].eyes()), "E8");
+        assert_eq!(points(grid.four_eyes_on(Point(1, 7), White)), "E8");
+
+        // A straight four: two segments scoring 4 too, with distinct eyes.
+        assert_eq!(grid.rows_on(Point(4, 3), White, Four).count(), 2);
+        assert_eq!(points(grid.four_eyes_on(Point(4, 3), White)), "A4,F4");
+
+        // Black's `oooo.o` is no four: the segments have a black margin.
+        let black = grid.to_string().replace('x', "o").parse::<Grid>()?;
+        assert_eq!(black.rows_on(Point(1, 7), Black, Four).count(), 0);
+        assert_eq!(black.four_eyes_on(Point(1, 7), Black).count(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse() -> Result<(), String> {
+        let mut expected = Grid::new();
+        expected.put(Black, Point(7, 7));
+        expected.put(White, Point(8, 8));
+        expected.put(Black, Point(9, 8));
+
+        // Moves, alternating from Black.
+        assert_eq!("H8,I9,J9".parse::<Grid>()?, expected);
+        // Black stones / White stones.
+        assert_eq!("H8,J9/I9".parse::<Grid>()?, expected);
+        // The board as `Display` writes it, horizontal line 15 first.
+        let s = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . x o . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        ";
+        assert_eq!(s.parse::<Grid>()?, expected);
+        assert_eq!(expected.to_string().parse::<Grid>()?, expected);
+
+        assert!(". . .\n. . .".parse::<Grid>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_to_pretty_string() {
+        let mut grid = Grid::new();
+        grid.put(Black, Point(7, 7));
+        grid.put(White, Point(8, 8));
+        grid.put(Black, Point(0, 0));
+        grid.put(White, Point(14, 14));
+        let expected = "
+15 . . . . . . . . . . . . . . x
+14 . . . . . . . . . . . . . . .
+13 . . . . . . . . . . . . . . .
+12 . . . . . . . . . . . . . . .
+11 . . . . . . . . . . . . . . .
+10 . . . . . . . . . . . . . . .
+ 9 . . . . . . . . x . . . . . .
+ 8 . . . . . . . o . . . . . . .
+ 7 . . . . . . . . . . . . . . .
+ 6 . . . . . . . . . . . . . . .
+ 5 . . . . . . . . . . . . . . .
+ 4 . . . . . . . . . . . . . . .
+ 3 . . . . . . . . . . . . . . .
+ 2 . . . . . . . . . . . . . . .
+ 1 o . . . . . . . . . . . . . .
+   A B C D E F G H I J K L M N O
+        "
+        .trim();
+        assert_eq!(grid.to_pretty_string(), expected);
+    }
+}

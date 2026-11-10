@@ -1,214 +1,184 @@
-#include "vcf.h"
+﻿#include "vcf.h"
 
-#include <array>
-#include <vector>
+#include <algorithm>
+#include <cstring>
+
+#include "vcf_bridge.h"
 
 namespace gomoku {
 
 namespace {
 
-using Cells = std::array<Cell, kCells>;
-
-struct Direction {
-  int dx, dy;
-};
-constexpr Direction kDirections[4] = {{1, 0}, {0, 1}, {1, 1}, {1, -1}};
-
-bool inside(int x, int y) {
-  return x >= 0 && x < kBoardSize && y >= 0 && y < kBoardSize;
-}
-
-// Would placing `c` at empty point `e` win immediately?
-bool wouldWin(const Cells& cells, int e, Color c, RuleMode mode) {
-  const Cell target = cellOf(c);
-  const int x = Board::xOf(e);
-  const int y = Board::yOf(e);
-  for (const Direction& d : kDirections) {
-    int count = 1;  // the stone at e itself
-    for (int s = 1; s < kBoardSize; ++s) {
-      const int nx = x + d.dx * s;
-      const int ny = y + d.dy * s;
-      if (!inside(nx, ny) || cells[Board::indexOf(nx, ny)] != target) break;
-      ++count;
-    }
-    for (int s = 1; s < kBoardSize; ++s) {
-      const int nx = x - d.dx * s;
-      const int ny = y - d.dy * s;
-      if (!inside(nx, ny) || cells[Board::indexOf(nx, ny)] != target) break;
-      ++count;
-    }
-    if (mode == RuleMode::Renju && c == Color::Black) {
-      if (count == 5) return true;  // black needs EXACTLY five
-    } else if (count >= 5) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Distinct empty points where `c` would win on the next move.
-int winningPoints(const Board& board, Color c, int* out, int maxOut) {
-  const Cells& cells = board.rawCells();
-  const Cell target = cellOf(c);
-  std::array<bool, kCells> near{};
-  for (int m = 0; m < kCells; ++m) {
-    if (cells[m] != target) continue;
-    const int x = Board::xOf(m);
-    const int y = Board::yOf(m);
-    for (int dy = -1; dy <= 1; ++dy) {
-      for (int dx = -1; dx <= 1; ++dx) {
-        const int nx = x + dx;
-        const int ny = y + dy;
-        if (inside(nx, ny)) near[Board::indexOf(nx, ny)] = true;
-      }
-    }
-  }
-  int n = 0;
-  for (int e = 0; e < kCells; ++e) {
-    if (!near[e] || cells[e] != Cell::Empty) continue;
-    if (wouldWin(cells, e, c, board.ruleMode())) {
-      if (n < maxOut) out[n] = e;
-      ++n;
-    }
-  }
-  return n;
-}
-
-template <typename F>
-void forEachWindowThrough(int move, F&& f) {
-  const int x = Board::xOf(move);
-  const int y = Board::yOf(move);
-  for (const Direction& d : kDirections) {
-    for (int s = -4; s <= 0; ++s) {
-      const int sx = x + d.dx * s;
-      const int sy = y + d.dy * s;
-      const int ex = sx + d.dx * 4;
-      const int ey = sy + d.dy * 4;
-      if (sx < 0 || sx >= kBoardSize || sy < 0 || sy >= kBoardSize ||
-          ex < 0 || ex >= kBoardSize || ey < 0 || ey >= kBoardSize) {
-        continue;
-      }
-      std::array<int, 5> w{};
-      for (int i = 0; i < 5; ++i) {
-        w[i] = Board::indexOf(sx + d.dx * i, sy + d.dy * i);
-      }
-      f(w);
-    }
+VcfEndKind endKindFrom(int kind) {
+  switch (kind) {
+    case VCF_BRIDGE_END_FOURS: return VcfEndKind::Fours;
+    case VCF_BRIDGE_END_FORBIDDEN: return VcfEndKind::Forbidden;
+    case VCF_BRIDGE_END_UNKNOWN: return VcfEndKind::Unknown;
+    default: return VcfEndKind::None;
   }
 }
 
-// Cheap prefilter: does placing `c` at `move` leave a five-window with 4 own
-// stones + 1 empty (i.e. a four)? Avoids the expensive global scan for most
-// candidate moves.
-bool createsFour(const Cells& cells, int move, Color c) {
-  const Cell own = cellOf(c);
-  bool four = false;
-  forEachWindowThrough(move, [&](const std::array<int, 5>& w) {
-    int ownCount = 0;
-    int oppCount = 0;
-    int emptyCount = 0;
-    for (int idx : w) {
-      const Cell cell = idx == move ? own : cells[idx];
-      if (cell == own) {
-        ++ownCount;
-      } else if (cell == Cell::Empty) {
-        ++emptyCount;
-      } else {
-        ++oppCount;
-      }
-    }
-    if (ownCount == 4 && oppCount == 0 && emptyCount == 1) four = true;
-  });
-  return four;
-}
-
-void collectCandidates(const Board& board, std::vector<int>& out) {
-  const Cells& cells = board.rawCells();
-  std::array<bool, kCells> near{};
-  for (int m = 0; m < kCells; ++m) {
-    if (cells[m] == Cell::Empty) continue;
-    const int x = Board::xOf(m);
-    const int y = Board::yOf(m);
-    for (int dy = -1; dy <= 1; ++dy) {
-      for (int dx = -1; dx <= 1; ++dx) {
-        const int nx = x + dx;
-        const int ny = y + dy;
-        if (inside(nx, ny)) near[Board::indexOf(nx, ny)] = true;
-      }
-    }
-  }
-  out.clear();
-  for (int m = 0; m < kCells; ++m) {
-    if (near[m] && board.isPlayable(m)) out.push_back(m);
+VcfStatus statusFrom(int status) {
+  switch (status) {
+    case VCF_BRIDGE_STATUS_PROVEN: return VcfStatus::Proven;
+    case VCF_BRIDGE_STATUS_DISPROVEN: return VcfStatus::Disproven;
+    case VCF_BRIDGE_STATUS_BUDGET_EXHAUSTED:
+      return VcfStatus::BudgetExhausted;
+    case VCF_BRIDGE_STATUS_INTERRUPTED: return VcfStatus::Interrupted;
+    case VCF_BRIDGE_STATUS_UNSUPPORTED: return VcfStatus::UnsupportedRule;
+    default: return VcfStatus::InvalidInput;
   }
 }
 
-bool vcfRecurse(Board& board, Color attacker, int pliesLeft, uint64_t& nodes,
-                const VcfLimits& limits, int* firstMove) {
-  if (pliesLeft <= 0 || nodes >= limits.nodeLimit) return false;
-  std::vector<int> candidates;
-  collectCandidates(board, candidates);
-  const GameResult attackerWin =
-      attacker == Color::Black ? GameResult::BlackWin : GameResult::WhiteWin;
+std::string messageOf(const VcfBridgeResult& raw) {
+  char buffer[VCF_BRIDGE_MESSAGE_LEN + 1];
+  std::memcpy(buffer, raw.message, VCF_BRIDGE_MESSAGE_LEN);
+  buffer[VCF_BRIDGE_MESSAGE_LEN] = '\0';
+  return std::string(buffer);
+}
 
-  for (int move : candidates) {
-    if (nodes >= limits.nodeLimit) return false;
-    ++nodes;
-    const Cells& cells = board.rawCells();
-    if (!createsFour(cells, move, attacker) &&
-        !wouldWin(cells, move, attacker, board.ruleMode())) {
-      continue;
-    }
-    board.place(move);
-    bool win = false;
-    if (board.result() == attackerWin) {
-      win = true;  // immediate five
-    } else {
-      int wp[16];
-      const int n = winningPoints(board, attacker, wp, 16);
-      if (n >= 2) {
-        win = true;  // open four / double four: defender cannot cover both
-      } else if (n == 1) {
-        int dp[16];
-        const int dn = winningPoints(board, opponent(attacker), dp, 16);
-        if (dn == 0) {  // defender has no immediate five of their own
-          const int block = wp[0];
-          if (!board.isPlayable(block)) {
-            win = true;  // Renju: the forced defense is a forbidden point
-          } else {
-            board.place(block);
-            if (board.result() == GameResult::Ongoing) {
-              win = vcfRecurse(board, attacker, pliesLeft - 1, nodes, limits,
-                               nullptr);
-            }
-            board.undo();
-          }
-        }
-      }
-    }
-    board.undo();
-    if (win) {
-      if (firstMove) *firstMove = move;
-      return true;
-    }
-  }
-  return false;
+VcfResult rejected(const VcfLimits& limits, const std::string& message) {
+  VcfResult result;
+  result.status = VcfStatus::InvalidInput;
+  result.limits = limits;
+  result.message = message;
+  return result;
 }
 
 }  // namespace
 
-VcfResult solveVcf(Board& board, const VcfLimits& limits) {
-  VcfResult result;
-  if (board.result() != GameResult::Ongoing) return result;
-  uint64_t nodes = 0;
-  int firstMove = -1;
-  if (vcfRecurse(board, board.sideToMove(), limits.maxAttackPlies, nodes,
-                 limits, &firstMove)) {
-    result.found = true;
-    result.firstMove = firstMove;
+const char* vcfStatusName(VcfStatus status) {
+  switch (status) {
+    case VcfStatus::Proven: return "proven";
+    case VcfStatus::Disproven: return "disproven";
+    case VcfStatus::BudgetExhausted: return "budget_exhausted";
+    case VcfStatus::Interrupted: return "interrupted";
+    case VcfStatus::UnsupportedRule: return "unsupported_rule";
+    case VcfStatus::InvalidInput: return "invalid_input";
   }
-  result.nodes = nodes;
+  return "invalid_input";
+}
+
+const char* vcfEndKindName(VcfEndKind kind) {
+  switch (kind) {
+    case VcfEndKind::Fours: return "fours";
+    case VcfEndKind::Forbidden: return "forbidden";
+    case VcfEndKind::Unknown: return "unknown";
+    case VcfEndKind::None: return "none";
+  }
+  return "none";
+}
+
+const char* vcfUpstreamIdentity() { return vcf_bridge_version(); }
+
+const char* vcfPolicyName(VcfPolicy policy) {
+  switch (policy) {
+    case VcfPolicy::Off: return "off";
+    case VcfPolicy::Root: return "root";
+    case VcfPolicy::RootAndChildren: return "root_and_children";
+  }
+  return "root";
+}
+
+bool vcfPolicyFromName(const std::string& name, VcfPolicy& out) {
+  if (name == "off") {
+    out = VcfPolicy::Off;
+  } else if (name == "root") {
+    out = VcfPolicy::Root;
+  } else if (name == "root_and_children") {
+    out = VcfPolicy::RootAndChildren;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+std::string checkVcfEvidence(const Board& board, const VcfResult& result) {
+  if (!result.proven()) return {};
+  if (result.variation.empty()) {
+    // Upstream reports "already has a four" as a proof without a line.
+    return result.firstMove < 0
+               ? std::string()
+               : std::string("proven line is empty but names a first move");
+  }
+  if (result.firstMove != result.variation.front()) {
+    return "first move does not match the start of the variation";
+  }
+  Board replay = board;
+  for (size_t i = 0; i < result.variation.size(); ++i) {
+    const int move = result.variation[i];
+    if (!Board::inBounds(move)) {
+      return "variation point " + std::to_string(i) + " is out of bounds";
+    }
+    if (replay.result() != GameResult::Ongoing) {
+      return "variation continues after the game was decided at point " +
+             std::to_string(i);
+    }
+    if (!replay.isPlayable(move)) {
+      const bool occupied = !replay.isEmpty(move);
+      return std::string(occupied ? "variation point " : "forbidden variation point ") +
+             std::to_string(i) + " (" + std::to_string(Board::xOf(move)) + "," +
+             std::to_string(Board::yOf(move)) + ") rejected by the board";
+    }
+    replay.place(move);
+  }
+  return {};
+}
+
+VcfResult solveVcf(const Board& board, const VcfLimits& limits) {
+  if (limits.nodeLimit == 0) {
+    return rejected(limits, "nodeLimit must be positive");
+  }
+  if (limits.maxAttackPlies < 1 || limits.maxAttackPlies > 255) {
+    return rejected(limits, "maxAttackPlies must be in 1..32");
+  }
+  if (limits.timeLimitMs < 0) {
+    return rejected(limits, "timeLimitMs must not be negative");
+  }
+  if (board.result() != GameResult::Ongoing) {
+    return rejected(limits, "game is already decided");
+  }
+
+  VcfBridgeQuery query{};
+  const std::array<Cell, kCells>& cells = board.rawCells();
+  for (int m = 0; m < kCells; ++m) {
+    query.cells[m] = static_cast<uint8_t>(cells[m]);
+  }
+  query.side_to_move = static_cast<uint8_t>(board.sideToMove());
+  query.rule = static_cast<uint8_t>(board.ruleMode());
+  query.max_attack_plies = static_cast<uint8_t>(limits.maxAttackPlies);
+  query.max_nodes = limits.nodeLimit;
+  query.time_limit_ms = static_cast<uint32_t>(limits.timeLimitMs);
+
+  VcfBridgeResult raw{};
+  vcf_bridge_solve(&query, &raw);
+
+  VcfResult result;
+  result.status = statusFrom(raw.status);
+  result.limits = limits;
+  result.nodes = raw.nodes;
+  result.elapsedMs = static_cast<int>(raw.elapsed_ms);
+  result.message = messageOf(raw);
+  result.evidence.kind = endKindFrom(raw.end_kind);
+  result.evidence.firstPoint = raw.end_a;
+  result.evidence.secondPoint = raw.end_b;
+  result.firstMove = raw.first_move;
+  const int pathLength = std::clamp(raw.path_len, 0, VCF_BRIDGE_MAX_PATH);
+  result.variation.assign(raw.path, raw.path + pathLength);
+
+  if (result.status == VcfStatus::Proven) {
+    const std::string problem = checkVcfEvidence(board, result);
+    if (!problem.empty()) {
+      // A proven line the authoritative board rejects must not be used.
+      result.status = VcfStatus::InvalidInput;
+      result.message = "upstream evidence rejected: " + problem;
+      result.variation.clear();
+      result.firstMove = -1;
+      result.evidence = VcfEvidence{};
+    }
+  }
   return result;
 }
 
 }  // namespace gomoku
+

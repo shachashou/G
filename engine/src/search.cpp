@@ -79,6 +79,11 @@ bool Search::timeUp() const {
   return std::chrono::steady_clock::now() >= deadline_;
 }
 
+bool Search::isRootVcfLoss(int move) const {
+  return std::find(rootVcfLosses_.begin(), rootVcfLosses_.end(), move) !=
+         rootVcfLosses_.end();
+}
+
 void Search::reset() {
   std::fill(tt_.begin(), tt_.end(), TTEntry{});
   generation_ = 1;
@@ -109,6 +114,7 @@ SearchResult Search::findBestMove(Board& board, const SearchLimits& limits) {
   nodes_ = 0;
   stop_ = false;
   rootBestMove_ = -1;
+  rootVcfLosses_.clear();
   useClock_ = limits.moveTimeMs > 0;
   if (useClock_) {
     deadline_ = std::chrono::steady_clock::now() +
@@ -120,18 +126,51 @@ SearchResult Search::findBestMove(Board& board, const SearchLimits& limits) {
   if (rootMoves.empty()) return result;  // no legal move
   result.move = rootMoves[0].move;       // safe fallback
 
-  // VCF runs once at the root before Alpha-Beta: a continuous-four forced
-  // win is returned immediately with a mate score, regardless of depth.
-  if (limits.useVcf) {
-    const VcfResult vcf = solveVcf(board, VcfLimits{limits.vcfNodeLimit, 10});
-    nodes_ += vcf.nodes;
-    if (vcf.found && board.isPlayable(vcf.firstMove)) {
-      result.move = vcf.firstMove;
+  // VCF: the vendored upstream solver is asked under a node budget. Only a
+  // proven line may replace the search move; "not found", "budget exhausted"
+  // and "interrupted" never do. (ticket 03)
+  if (limits.vcfPolicy != VcfPolicy::Off) {
+    const VcfLimits rootLimits{limits.vcfNodeLimit, limits.vcfMaxAttackPlies, 0};
+    result.vcf = solveVcf(board, rootLimits);
+    nodes_ += result.vcf.nodes;
+    if (result.vcf.proven() && result.vcf.firstMove >= 0 &&
+        board.isPlayable(result.vcf.firstMove)) {
+      result.move = result.vcf.firstMove;
       result.score = kMate - 1;
       result.reachedDepth = 0;
       result.nodes = nodes_;
       result.fromVcf = true;
       return result;
+    }
+
+    // The other call site: a proven opponent VCF after a root move means that
+    // move loses by force, so it is pruned at the root. Budget is per child;
+    // the top candidates only, so the cost stays bounded.
+    if (limits.vcfPolicy == VcfPolicy::RootAndChildren &&
+        !(useClock_ && timeUp())) {
+      const VcfLimits childLimits{limits.vcfChildNodeLimit,
+                                  limits.vcfMaxAttackPlies, 0};
+      const int checks =
+          std::min<int>(limits.vcfChildChecks,
+                        static_cast<int>(rootMoves.size()));
+      for (int i = 0; i < checks && !stop_; ++i) {
+        const int move = rootMoves[i].move;
+        board.place(move);
+        const VcfResult child = solveVcf(board, childLimits);
+        const bool childWins = child.proven() && child.firstMove >= 0 &&
+                               board.isPlayable(child.firstMove);
+        board.undo();
+        nodes_ += child.nodes;
+        ++result.vcfChildChecks;
+        if (childWins) {
+          rootVcfLosses_.push_back(move);
+          ++result.vcfChildLosses;
+        }
+        if (useClock_ && timeUp()) break;
+      }
+      // Never prune every root move: with no non-losing alternative the
+      // search still has to return a legal move.
+      if (rootVcfLosses_.size() >= rootMoves.size()) rootVcfLosses_.clear();
     }
   }
 
@@ -193,6 +232,9 @@ int Search::alphaBeta(Board& board, Evaluator& eval, int depth, int alpha,
   int bestMove = moves.front().move;
   for (size_t i = 0; i < moves.size(); ++i) {
     const int move = moves[i].move;
+    // A root move whose reply position is a proven opponent VCF loses by
+    // force; searching it only burns nodes (ticket 03, RootAndChildren).
+    if (ply == 0 && isRootVcfLoss(move)) continue;
     const Color c = board.sideToMove();
     eval.update(board, move, cellOf(c));
     const uint64_t childHash = hash ^ stoneKey(move, c) ^ zobrist().side;

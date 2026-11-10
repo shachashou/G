@@ -1,0 +1,738 @@
+use super::grid::*;
+use super::player::*;
+use super::point::*;
+use super::row::*;
+
+pub fn forbidden_points(g: &Grid) -> Vec<(ForbiddenKind, Point)> {
+    g.empty_points()
+        .filter_map(|p| forbidden_strict(g, p).map(|k| (k, p)))
+        .collect()
+}
+
+pub fn forbidden_strict(g: &Grid, p: Point) -> Option<ForbiddenKind> {
+    if g.stone(p).is_some() {
+        return None;
+    }
+    if any(g.row_starts_on(p, Black, Four)) {
+        return None;
+    }
+    forbidden(g, p)
+}
+
+pub fn forbidden(g: &Grid, p: Point) -> Option<ForbiddenKind> {
+    // Each line through `p` is read once, for all three kinds of rows.
+    let mut overlinings = [0; 4];
+    let mut swords = [0; 4];
+    let mut twos = [0; 4];
+    for (n, (d, _, l)) in g.lines_on(p).enumerate() {
+        let i = p.to_index(d).j;
+        overlinings[n] = l.row_starts_on(i, Black, Overlining);
+        swords[n] = l.row_starts_on(i, Black, Sword);
+        twos[n] = l.row_starts_on(i, Black, Two);
+    }
+    if overline(overlinings) {
+        Some(Overline)
+    } else if double_four(swords) {
+        Some(DoubleFour)
+    } else if double_three(g, p, twos) {
+        Some(DoubleThree)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ForbiddenKind {
+    DoubleThree,
+    DoubleFour,
+    Overline,
+}
+
+pub use ForbiddenKind::*;
+
+/// The functions below take, per line through `p`, where Black's rows of
+/// one kind through `p` start ([`Grid::row_starts_on`]).
+fn overline(overlinings: [u16; 4]) -> bool {
+    any(overlinings)
+}
+
+fn double_four(swords: [u16; 4]) -> bool {
+    has_multiple_starts(swords)
+}
+
+fn double_three(g: &Grid, p: Point, twos: [u16; 4]) -> bool {
+    if !has_multiple_starts(twos) {
+        return false;
+    }
+    let mut next = g.clone();
+    next.put(Black, p);
+    real_double_three(&next, p)
+}
+
+fn real_double_three(next: &Grid, p: Point) -> bool {
+    let real_threes = next.rows_on(p, Black, Three).filter(|s| {
+        let eye = s.eyes().next().unwrap();
+        forbidden_strict(next, eye).is_none()
+    });
+    has_multiple_rows(&mut real_threes.map(|s| s.start_index()))
+}
+
+/// Whether any line has a row start: [`Grid::row_starts_on`] finds a row.
+fn any(starts: impl IntoIterator<Item = u16>) -> bool {
+    starts.into_iter().any(|s| s != 0)
+}
+
+/// [`has_multiple_rows`] on the rows' starts, line by line: rows on two lines,
+/// or on one line starting other than at the first start and the next cell.
+fn has_multiple_starts(starts: impl IntoIterator<Item = u16>) -> bool {
+    let mut found = false;
+    for s in starts.into_iter().filter(|&s| s != 0) {
+        if found || s & !(0b11 << s.trailing_zeros()) != 0 {
+            return true;
+        }
+        found = true;
+    }
+    false
+}
+
+/// Whether the rows starting at `indices` are more than one: any but the
+/// first and one starting a cell after it.
+fn has_multiple_rows(indices: &mut impl Iterator<Item = Index>) -> bool {
+    let first = indices.next();
+    if first.is_none() {
+        return false;
+    }
+    let next_to_first = first.unwrap().offset(1);
+    for index in indices {
+        if index != next_to_first {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_forbiddens() -> Result<(), String> {
+        let grid = "
+         . . . . . . . . . . . . . . o
+         . . o . . . . . . . . x o o .
+         . o . o . . . . . . . o . o .
+         . . o . . . . . . . . o o x .
+         . . . . . . . . . . o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . o . . . . . . . . . . . . .
+         . . o . . . . . . . . . . . .
+         . . . o . . . . . . . . . . .
+         . o o o . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . o o . o o o . . . o o o o .
+        "
+        .parse::<Grid>()?;
+        // M13 would be a double-three, but it also completes the five
+        // K11-O15, which wins, so it is not reported.
+        let result = forbidden_points(&grid);
+        let expected = [
+            (DoubleThree, Point(2, 12)), // C13
+            (Overline, Point(3, 0)),     // D1
+            (DoubleFour, Point(4, 4)),   // E5
+        ];
+        assert_eq!(result, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_three_eye_makes_five() -> Result<(), String> {
+        // H8 makes two threes. The eye of the horizontal one (G8) is a
+        // double-four, but it also completes a five (G4-G8), so it is a legal
+        // move and the three counts as a real one (rule 9.2 / 9.3).
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o . . . . . . . . . .
+         . . . . . o . o . . . . . . .
+         . . . . . o . . o . . . . . .
+         . . . . . . o o . . . . . . .
+         . . . . . . o . . . . . . . .
+         . . . . . . o . . . . . . . .
+         . . . . . . o . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let mut next = grid.clone();
+        next.put(Black, Point(7, 7));
+        assert_eq!(forbidden(&next, Point(6, 7)), Some(DoubleFour));
+        assert_eq!(forbidden_strict(&next, Point(6, 7)), None);
+
+        assert_eq!(forbidden(&grid, Point(7, 7)), Some(DoubleThree));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_three_nested_eye_makes_five() -> Result<(), String> {
+        // H8 makes a four (E8-H8, eye I8) and two threes (H6-H9 via H7,
+        // F6-I9 via I9). Whether H8 is a double-three depends on the nested
+        // check: H7 would make two threes (H7-K10 via I8, G8-J5 via I6), and
+        // I8 is a double-four but also completes the five E8-I8, so I8 is a
+        // legal move, H7 is a real double-three (forbidden), the vertical
+        // three through H8 is fake, and H8 is a legal four-three.
+        // Checking I8 with `forbidden` instead of `forbidden_strict` flips
+        // every step and wrongly reports H8 as a double-three.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . x . . . . . . . . . .
+         . . . . . o . x . . . . . . .
+         . . . . . . o . . . o . . . .
+         . . . . x . x o . o . . . . .
+         . . . x o o o . . . . . . . .
+         . . . . . x o . . . . . . . .
+         . . . . x o . o . . . . . . .
+         . . . . . . . . x o . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let h8 = Point(7, 7);
+        let h7 = Point(7, 6);
+        let i8 = Point(8, 7);
+
+        let mut after_h8 = grid.clone();
+        after_h8.put(Black, h8);
+        let mut after_h7 = after_h8.clone();
+        after_h7.put(Black, h7);
+        assert_eq!(forbidden(&after_h7, i8), Some(DoubleFour));
+        assert_eq!(forbidden_strict(&after_h7, i8), None);
+        assert_eq!(forbidden(&after_h8, h7), Some(DoubleThree));
+
+        assert_eq!(forbidden(&grid, h8), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_three() -> Result<(), String> {
+        // H8 makes two open threes, H7-H9 and G8-I8.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . o . o . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleThree));
+
+        // Split threes count too: H5-H6-_-H8 and E5-F6-_-H8.
+        let grid = "
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . o . o . . . . . . .
+        . . . . o . . o . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleThree));
+
+        // White's E8 and K8 leave G8-I8 no way to an open four, so H8 only
+        // makes one three.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . x . o . o . x . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // H8 completes the five F8-J8: nothing else is looked at.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . o o . o o . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // E8-F8-_-H8-_-J8-K8: every four H8 could lead to is an overline, so
+        // there is no three.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o o . . . o o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // A three only counts if its open-four point is legal. H8 and I7 each
+        // make two threes, but one of them (H7-H10, I6-I10) can only be
+        // completed at a double-four (H6, I8), so both moves are legal. J7
+        // makes two real threes.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . x . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . o o o x . . . .
+         . . . . . . x . . . . . . . .
+         . . . . . . o o . . . . . . .
+         . . . . . . o . o o x . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+        let result = forbidden(&grid, Point(8, 6));
+        assert_eq!(result, None);
+        let result = forbidden(&grid, Point(9, 6));
+        assert_eq!(result, Some(DoubleThree));
+
+        // following examples are from https://twitter.com/tanaseY/status/944521796585373696
+        //
+        // The two positions differ only in White's O6, which decides three
+        // levels down whether G8 is a double-three. With O6, K6 only makes
+        // one real three (K6-N6 needs J6, a double-four), so K6 is legal, I8
+        // is a double-three, and G8's horizontal three (via I8) is fake.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . x . . . . . . . .
+         . . o . . o . o . . . . . . .
+         . . . . . o . . o o . . . . .
+         . . . . o . . . . . . o o . x
+         . . . . . . . . o x o o . . .
+         . . . . . . . . . . o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(6, 7));
+        assert_eq!(result, None);
+
+        // Without O6, K6-O6 is a second real three: K6 is a double-three, so
+        // I8 is legal and G8 makes two real threes.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . x . . . . . . . .
+         . . o . . o . o . . . . . . .
+         . . . . . o . . o o . . . . .
+         . . . . o . . . . . . o o . .
+         . . . . . . . . o x o o . . .
+         . . . . . . . . . . o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(6, 7));
+        assert_eq!(result, Some(DoubleThree));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_double_four() -> Result<(), String> {
+        // H8 makes fours in two directions, F8-I8 and F10-I7.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . o . . . . . . . . .
+         . . . . . . o . . . . . . . .
+         . . . . . o o . o . . . . . .
+         . . . . . . . . o . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleFour));
+
+        // Two fours on one line: E8-_-G8-H8-I8-_-K8.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o . o . o . o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleFour));
+
+        // Two fours on one line: E8-F8-_-H8-I8-_-K8-L8.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o o . . o . o o . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleFour));
+
+        // Two fours on one line: D8-F8 and J8-L8, eyes G8 and I8.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . o o o . . . o o o . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(DoubleFour));
+
+        // G8 or I8 would each make six, so H8 makes no four at all.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . o o o o . . . o o o o . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // The same in two directions: both fours would complete as overlines.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . o . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . o o o o . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // H8 is too far from either three to make a four.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . o o o . . . . . o o o . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // H8 is next to neither four.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . o o o o . . . . . o o o o .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // A single four is fine.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . o o . o . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        // The first position with D12 and White's J6: the diagonal four could
+        // only be completed as an overline (D12-I7), leaving one four.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . o . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . o . . . . . . . . .
+         . . . . . . o . . . . . . . .
+         . . . . . o o . o . . . . . .
+         . . . . . . . . o . . . . . .
+         . . . . . . . . . x . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_overline() -> Result<(), String> {
+        // H8 fills E8-J8, six in a row.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o o o . o o . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, Some(Overline));
+
+        // Only E8-H8 would be connected: no six.
+        let grid = "
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . o o o . . o o . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+         . . . . . . . . . . . . . . .
+        "
+        .parse::<Grid>()?;
+        let result = forbidden(&grid, Point(7, 7));
+        assert_eq!(result, None);
+
+        Ok(())
+    }
+
+    /// The masks say what the rows themselves say, on random boards, at
+    /// every point and for either player.
+    #[test]
+    fn test_starts_match_rows() {
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        for n in 0..200 {
+            // Stones on 3 points in `spread`, from dense boards to sparse.
+            let spread = 4 + n % 9;
+            let mut grid = Grid::new();
+            for p in (0..SIZE).flat_map(|x| (0..SIZE).map(move |y| Point(x, y))) {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                match x % spread {
+                    0 | 1 => grid.put(Black, p),
+                    2 => grid.put(White, p),
+                    _ => {}
+                }
+            }
+            for p in (0..SIZE).flat_map(|x| (0..SIZE).map(move |y| Point(x, y))) {
+                for r in [Black, White] {
+                    for k in [Two, Three, Sword, Four, Overlining] {
+                        let rows = || grid.rows_on(p, r, k).map(|s| s.start_index());
+                        assert_eq!(
+                            any(grid.row_starts_on(p, r, k)),
+                            rows().next().is_some(),
+                            "{r:?} {k:?} {p}"
+                        );
+                        assert_eq!(
+                            has_multiple_starts(grid.row_starts_on(p, r, k)),
+                            has_multiple_rows(&mut rows()),
+                            "{r:?} {k:?} {p}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

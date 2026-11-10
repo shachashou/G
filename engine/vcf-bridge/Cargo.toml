@@ -1,0 +1,21 @@
+[package]
+name = "vcf-bridge"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "C ABI bridge from the C++ engine to the vendored quintet Renju VCF solver (ticket 03)"
+license = "MIT"
+
+[lib]
+name = "vcf_bridge"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Vendored, unmodified upstream. See vendor/quintet/UPSTREAM.md.
+quintet = { path = "../../vendor/quintet" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

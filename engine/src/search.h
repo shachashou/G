@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <array>
 #include <chrono>
@@ -7,14 +7,19 @@
 
 #include "board.h"
 #include "eval.h"
+#include "vcf.h"
 
 namespace gomoku {
 
 struct SearchLimits {
   int maxDepth = 8;
   int moveTimeMs = 1000;  // 0 => no clock, use maxDepth only
-  bool useVcf = true;
-  uint64_t vcfNodeLimit = 5000;
+  // VCF calls made by the search, their position and budget (ticket 03).
+  VcfPolicy vcfPolicy = VcfPolicy::RootAndChildren;
+  uint64_t vcfNodeLimit = 50000;       // root query budget
+  uint64_t vcfChildNodeLimit = 2000;   // per root child (RootAndChildren)
+  int vcfMaxAttackPlies = 10;
+  int vcfChildChecks = 16;  // top root candidates checked for an opponent win
 };
 
 struct SearchResult {
@@ -23,6 +28,11 @@ struct SearchResult {
   int reachedDepth = 0;
   uint64_t nodes = 0;
   bool fromVcf = false;
+  // Root VCF query of this search, including status, evidence and budget, so
+  // the executor protocol and GUI can show what was proven and what was not.
+  VcfResult vcf;
+  int vcfChildChecks = 0;   // RootAndChildren: children actually queried
+  int vcfChildLosses = 0;   // among them, moves where the opponent proved a VCF
 };
 
 // Negamax Alpha-Beta with Principal Variation Search, a 64MB transposition
@@ -56,6 +66,7 @@ class Search {
   int alphaBeta(Board& board, Evaluator& eval, int depth, int alpha, int beta,
                 int ply, uint64_t hash, int ttMove);
   bool timeUp() const;
+  bool isRootVcfLoss(int move) const;
 
   std::vector<TTEntry> tt_;
   const NnueNetwork* network_ = nullptr;
@@ -68,6 +79,10 @@ class Search {
   bool useClock_ = false;
   int rootBestMove_ = -1;
   std::chrono::steady_clock::time_point deadline_{};
+
+  // Root moves where the opponent has a proven VCF reply (RootAndChildren).
+  std::vector<int> rootVcfLosses_;
 };
 
 }  // namespace gomoku
+

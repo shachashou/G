@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from executor import ExecutorClient, ExecutorError  # noqa: E402
+import vcf_tactics  # noqa: E402
 
 SIZE = 15
 CELL = 36
@@ -186,6 +187,18 @@ class MainWindow(QMainWindow):
         self.chk_markers.toggled.connect(self._on_markers_toggled)
         sv.addWidget(self.chk_markers)
 
+        vcf_row = QHBoxLayout()
+        self.btn_vcf = QPushButton("算杀检查（VCF）")
+        self.btn_vcf.clicked.connect(self._check_vcf)
+        vcf_row.addWidget(self.btn_vcf)
+        vcf_row.addWidget(QLabel("节点预算"))
+        self.spin_vcf = QSpinBox()
+        self.spin_vcf.setRange(100, 5000000)
+        self.spin_vcf.setSingleStep(1000)
+        self.spin_vcf.setValue(50000)
+        vcf_row.addWidget(self.spin_vcf)
+        sv.addLayout(vcf_row)
+
         think = QHBoxLayout()
         think.addWidget(QLabel("引擎思考(ms)"))
         self.spin_think = QSpinBox()
@@ -207,14 +220,20 @@ class MainWindow(QMainWindow):
         self.eval_label.setWordWrap(True)
         self.turn_label = QLabel("行棋方：-")
         self.status_label = QLabel("")
+        self.vcf_label = QLabel("算杀：未检查")
+        self.vcf_label.setWordWrap(True)
+        self.vcf_engine_label = QLabel(
+            "算杀引擎：" + str(self._about.get("vcf_engine", "未加载")))
+        self.vcf_engine_label.setWordWrap(True)
         self.result_label = QLabel("对局进行中")
         self.replay_label = QLabel("")
         self.replay_label.setWordWrap(True)
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
         self.error_label.setStyleSheet("color: #B00020;")
-        for widget in (self.eval_label, self.turn_label, self.status_label,
-                       self.result_label, self.replay_label, self.error_label):
+        for widget in (self.eval_label, self.vcf_engine_label, self.turn_label,
+                       self.status_label, self.vcf_label, self.result_label,
+                       self.replay_label, self.error_label):
             stv.addWidget(widget)
         panel.addWidget(status)
 
@@ -245,6 +264,7 @@ class MainWindow(QMainWindow):
         self._phase = "idle"
         self.replay_label.setText("")
         self.error_label.setText("")
+        self.vcf_label.setText("算杀：未检查")
         self.status_label.setText("新局开始：黑先")
         self._refresh()
         self._maybe_engine_move()
@@ -257,6 +277,7 @@ class MainWindow(QMainWindow):
         self.moves_list.clear()
         self.turn_label.setText("行棋方：-")
         self.result_label.setText("已停止")
+        self.vcf_label.setText("算杀：已停止（结果未知）")
         self.replay_label.setText("")
         self.error_label.setText("")
         self.status_label.setText("已停止；点击「新局」重新开始")
@@ -313,15 +334,51 @@ class MainWindow(QMainWindow):
                 continue  # a stop/new-game interrupted this thinking step
             if kind == "think":
                 self._apply_engine_move(payload)
+            elif kind == "vcf":
+                self._phase = "idle"
+                self._show_vcf(payload.get("vcf"))
+                self.status_label.setText("算杀检查完成")
+                self._refresh()
+                self._maybe_engine_move()
             else:
                 self._phase = "idle"
                 self._show_error(payload)
+
+    def _check_vcf(self) -> None:
+        """Ask the engine's upstream VCF solver about the current position."""
+        if self._state is None or self._phase == "thinking":
+            return
+        if self._state.get("result") != "ongoing":
+            self._show_error("对局已结束，无法进行算杀检查")
+            return
+        self._phase = "thinking"
+        self.status_label.setText("算杀检查中…（可点「停止对局」中断）")
+        self.error_label.setText("")
+        client = self._client
+        generation = self._generation
+        max_nodes = self.spin_vcf.value()
+
+        def worker() -> None:
+            try:
+                response = client.vcf(max_nodes=max_nodes)
+                self._queue.put(("vcf", generation, response))
+            except ExecutorError as exc:
+                self._queue.put(("error", generation, str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_vcf(self, report) -> None:
+        if not isinstance(report, dict):
+            self.vcf_label.setText("算杀：未运行")
+            return
+        self.vcf_label.setText("算杀：" + vcf_tactics.describe(report))
 
     def _apply_engine_move(self, response: dict) -> None:
         if not response.get("ok"):
             self._phase = "idle"
             self._show_error("引擎选点失败：" + str(response.get("error", response)))
             return
+        self._show_vcf(response.get("vcf"))
         x, y = response["move"]
         try:
             result = self._client.play(x, y)

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <iosfwd>
 #include <memory>
@@ -15,7 +15,8 @@ struct EngineConfig {
   bool random = false;    // --random: baseline random legal mover
   int fixedDepth = 0;     // --depth N: fixed depth, no clock
   int moveTimeMs = 1000;  // --movetime N: per-move budget (INFO overrides)
-  bool useVcf = true;     // --no-vcf: M2 baseline for A/B comparisons
+  VcfPolicy vcfPolicy = VcfPolicy::RootAndChildren;  // --vcf-policy: VCF call sites
+  uint64_t vcfNodeLimit = 50000;          // --vcf-nodes: root query budget
   std::string nnueWeights;  // --nnue PATH: NNUE evaluation (ticket 09)
   // --nnue-backend scalar|avx2: inference backend (ticket 10, default avx2).
   std::string nnueBackend = "avx2";
@@ -59,3 +60,4 @@ class Protocol {
 };
 
 }  // namespace gomoku
+

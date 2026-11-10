@@ -25,3 +25,6 @@ match_results*.json
 .vscode/
 .idea/
 .scratch/gomoku-nnue/distillation-tests.log
+
+# Rust build output (vendored VCF bridge, ticket 03)
+engine/vcf-bridge/target/

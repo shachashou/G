@@ -1,0 +1,342 @@
+use std::convert::TryFrom;
+use std::fmt;
+use std::str::FromStr;
+
+pub const SIZE: u8 = 15;
+
+/// How many points the board has, which is also how many `u8` point codes
+/// there are.
+pub const POINT_COUNT: usize = SIZE as usize * SIZE as usize;
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+pub struct Point(pub u8, pub u8);
+
+impl Point {
+    pub fn to_index(&self, d: Direction) -> Index {
+        let (x, y) = (self.0, self.1);
+        let n = SIZE - 1;
+        match d {
+            Vertical => Index::new(Vertical, x, y),
+            Horizontal => Index::new(Horizontal, y, x),
+            Ascending => {
+                let i = x + n - y;
+                let j = if i < n { x } else { y };
+                Index::new(Ascending, i, j)
+            }
+            Descending => {
+                let i = x + y;
+                let j = if i < n { x } else { n - y };
+                Index::new(Descending, i, j)
+            }
+        }
+    }
+}
+
+impl fmt::Display for Point {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let x = char::from_u32((b'A' + self.0) as u32).unwrap();
+        let y = self.1 + 1;
+        write!(f, "{}{}", x, y)
+    }
+}
+
+impl FromStr for Point {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut cs = s.trim().chars();
+        let x = cs
+            .next()
+            .and_then(|c| match c {
+                'A'..='O' => Some(c as u8 - b'A'),
+                'a'..='o' => Some(c as u8 - b'a'),
+                _ => None,
+            })
+            .ok_or("Failed to parse x part.")?;
+        let y = cs
+            .take(2)
+            .collect::<String>()
+            .parse::<u8>()
+            .ok()
+            .and_then(|n| match n {
+                1..=SIZE => Some(n - 1),
+                _ => None,
+            })
+            .ok_or("Failed to parse y part.")?;
+        Ok(Point(x, y))
+    }
+}
+
+// `code = x * 15 + y`. This encoding is the wasm/JS boundary representation
+// of a point (see `src/wasm.rs`) and is public API: do not change it.
+impl TryFrom<u8> for Point {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        let x = value / SIZE;
+        let y = value % SIZE;
+        if x < SIZE && y < SIZE {
+            Ok(Point(x, y))
+        } else {
+            Err("Invalid code")
+        }
+    }
+}
+
+impl From<Point> for u8 {
+    fn from(value: Point) -> u8 {
+        value.0 * SIZE + value.1
+    }
+}
+
+#[derive(Debug)]
+pub struct Points(pub Vec<Point>);
+
+impl Points {
+    pub fn into_vec(self) -> Vec<Point> {
+        self.0
+    }
+}
+
+impl fmt::Display for Points {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let result = self
+            .0
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        f.write_str(&result)
+    }
+}
+
+impl FromStr for Points {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let ps = s
+            .trim()
+            .split(",")
+            .map(|m| m.parse::<Point>())
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Points(ps))
+    }
+}
+
+impl TryFrom<&[u8]> for Points {
+    type Error = &'static str;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let ps = value
+            .iter()
+            .map(|c| Point::try_from(*c))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Points(ps))
+    }
+}
+
+impl From<Points> for Vec<u8> {
+    fn from(value: Points) -> Vec<u8> {
+        value.0.into_iter().map(u8::from).collect()
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct Index {
+    pub d: Direction,
+    pub i: u8,
+    pub j: u8,
+}
+
+impl Index {
+    pub fn new(d: Direction, i: u8, j: u8) -> Self {
+        Self { d, i, j }
+    }
+
+    pub fn to_point(&self) -> Point {
+        let n = SIZE - 1;
+        let (i, j) = (self.i, self.j);
+        match self.d {
+            Vertical => Point(i, j),
+            Horizontal => Point(j, i),
+            Ascending => {
+                let x = if i < n { j } else { i + j - n };
+                let y = if i < n { n - i + j } else { j };
+                Point(x, y)
+            }
+            Descending => {
+                let x = if i < n { j } else { i + j - n };
+                let y = if i < n { i - j } else { n - j };
+                Point(x, y)
+            }
+        }
+    }
+
+    pub fn offset(&self, step: u8) -> Self {
+        Self::new(self.d, self.i, self.j + step)
+    }
+
+    pub fn checked_offset(&self, step: i8) -> Option<Self> {
+        let j = self.j as i8 + step;
+        if 0 <= j && j <= self.max_j() as i8 {
+            Some(Self::new(self.d, self.i, j as u8))
+        } else {
+            None
+        }
+    }
+
+    pub fn offsets<I: Iterator<Item = u8>>(&self, steps: I) -> impl Iterator<Item = Self> + use<I> {
+        let start = *self;
+        steps.map(move |s| start.offset(s))
+    }
+
+    pub fn max_j(&self) -> u8 {
+        let n = SIZE - 1;
+        let i = self.i;
+        match self.d {
+            Vertical | Horizontal => n,
+            Ascending | Descending => {
+                if i < n {
+                    i
+                } else {
+                    2 * n - i
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Debug for Index {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Index::new({:?}, {}, {})", self.d, self.i, self.j)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum Direction {
+    Vertical,
+    Horizontal,
+    Ascending,
+    Descending,
+}
+
+pub use Direction::*;
+
+impl Direction {
+    pub const ALL: [Self; 4] = [Vertical, Horizontal, Ascending, Descending];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_to_index_and_to_point() {
+        fn assert_eq_point_index(p: Point, iv: Index, ih: Index, ia: Index, id: Index) {
+            assert_eq!(p.to_index(Vertical), iv);
+            assert_eq!(p.to_index(Horizontal), ih);
+            assert_eq!(p.to_index(Ascending), ia);
+            assert_eq!(p.to_index(Descending), id);
+            assert_eq!(iv.to_point(), p);
+            assert_eq!(ih.to_point(), p);
+            assert_eq!(ia.to_point(), p);
+            assert_eq!(id.to_point(), p);
+        }
+
+        // lower-left quadrant
+        let p = Point(3, 6);
+        let iv = Index::new(Vertical, 3, 6);
+        let ih = Index::new(Horizontal, 6, 3);
+        let ia = Index::new(Ascending, 11, 3);
+        let id = Index::new(Descending, 9, 3);
+        assert_eq_point_index(p, iv, ih, ia, id);
+
+        // lower-right quadrant
+        let p = Point(9, 6);
+        let iv = Index::new(Vertical, 9, 6);
+        let ih = Index::new(Horizontal, 6, 9);
+        let ia = Index::new(Ascending, 17, 6);
+        let id = Index::new(Descending, 15, 8);
+        assert_eq_point_index(p, iv, ih, ia, id);
+
+        // upper-left quadrant
+        let p = Point(3, 12);
+        let iv = Index::new(Vertical, 3, 12);
+        let ih = Index::new(Horizontal, 12, 3);
+        let ia = Index::new(Ascending, 5, 3);
+        let id = Index::new(Descending, 15, 2);
+        assert_eq_point_index(p, iv, ih, ia, id);
+
+        // upper-right quadrant
+        let p = Point(9, 12);
+        let iv = Index::new(Vertical, 9, 12);
+        let ih = Index::new(Horizontal, 12, 9);
+        let ia = Index::new(Ascending, 11, 9);
+        let id = Index::new(Descending, 21, 2);
+        assert_eq_point_index(p, iv, ih, ia, id);
+    }
+
+    /// Every cell of every line maps back to the point it came from.
+    #[test]
+    fn test_to_index_round_trips_everywhere() {
+        for x in 0..SIZE {
+            for y in 0..SIZE {
+                let p = Point(x, y);
+                for d in Direction::ALL {
+                    let index = p.to_index(d);
+                    assert!(index.j <= index.max_j(), "{p} {d:?}");
+                    assert_eq!(index.to_point(), p, "{p} {d:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_walk_checked_stays_on_the_line() {
+        // The ascending diagonal from A11 to E15 has five cells.
+        let start = Point(0, 10).to_index(Ascending);
+        assert_eq!(start.max_j(), 4);
+        assert_eq!(start.checked_offset(-1), None);
+        assert_eq!(
+            start.checked_offset(4).map(|i| i.to_point()),
+            Some(Point(4, 14))
+        );
+        assert_eq!(start.checked_offset(5), None);
+    }
+
+    #[test]
+    fn test_to_string_and_parse() -> Result<(), String> {
+        assert_eq!(Point(3, 5).to_string(), "D6");
+        assert_eq!(Point(12, 14).to_string(), "M15");
+        assert_eq!("D6".parse::<Point>()?, Point(3, 5));
+        assert_eq!("m15".parse::<Point>()?, Point(12, 14));
+        for wrong in ["", "P1", "A0", "A16", "1A"] {
+            assert!(wrong.parse::<Point>().is_err(), "{wrong:?}");
+        }
+
+        let points = "H8,H9,I9".parse::<Points>()?;
+        assert_eq!(points.0, [Point(7, 7), Point(7, 8), Point(8, 8)]);
+        assert_eq!(points.to_string(), "H8,H9,I9");
+        Ok(())
+    }
+
+    /// The `u8` code is the wasm/JS representation of a point.
+    #[test]
+    fn test_u8_code() -> Result<(), String> {
+        assert_eq!(u8::from(Point(4, 12)), 72);
+        assert_eq!(Point::try_from(72)?, Point(4, 12));
+        for code in 0..SIZE * SIZE {
+            assert_eq!(u8::from(Point::try_from(code)?), code);
+        }
+        assert!(Point::try_from(SIZE * SIZE).is_err());
+
+        let codes = Vec::<u8>::from(Points(vec![Point(0, 0), Point(14, 14)]));
+        assert_eq!(codes, [0, 224]);
+        assert_eq!(
+            Points::try_from(&codes[..])?.0,
+            [Point(0, 0), Point(14, 14)]
+        );
+        assert!(Points::try_from(&[0, 225][..]).is_err());
+        Ok(())
+    }
+}

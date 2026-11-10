@@ -1,4 +1,4 @@
-#include <cstdlib>
+﻿#include <cstdlib>
 #include <iostream>
 #include <string_view>
 
@@ -14,7 +14,10 @@ void printUsage() {
             << "  --random             random legal mover (strength baseline)\n"
             << "  --depth N            fixed search depth N (no clock)\n"
             << "  --movetime N         per-move time budget in ms (default 1000)\n"
-            << "  --no-vcf             disable VCF solver (M2 baseline for A/B)\n"
+            << "  --no-vcf             disable the VCF solver (off; A/B baseline)\n"
+            << "  --vcf-policy NAME    VCF call sites: off | root | root_and_children\n"
+            << "                       (default root_and_children)\n"
+            << "  --vcf-nodes N        root VCF node budget (default 50000)\n"
             << "  --nnue PATH          NNUE evaluation from a GMNNUE01 file\n"
             << "  --nnue-backend NAME  NNUE backend: avx2 (default) | scalar\n"
             << "  --executor           JSON-lines authoritative executor (ticket 02)\n"
@@ -43,7 +46,14 @@ int main(int argc, char* argv[]) {
     } else if (a == "--executor") {
       executorMode = true;
     } else if (a == "--no-vcf") {
-      cfg.useVcf = false;
+      cfg.vcfPolicy = gomoku::VcfPolicy::Off;
+    } else if (a == "--vcf-policy" && i + 1 < argc) {
+      if (!gomoku::vcfPolicyFromName(argv[++i], cfg.vcfPolicy)) {
+        std::cerr << "--vcf-policy must be off, root or root_and_children\n";
+        return 2;
+      }
+    } else if (a == "--vcf-nodes" && i + 1 < argc) {
+      cfg.vcfNodeLimit = static_cast<uint64_t>(std::atoll(argv[++i]));
     } else if (a == "--depth" && i + 1 < argc) {
       cfg.fixedDepth = std::atoi(argv[++i]);
     } else if (a == "--movetime" && i + 1 < argc) {
@@ -65,3 +75,4 @@ int main(int argc, char* argv[]) {
   gomoku::Protocol protocol(cfg);
   return protocol.run(std::cin, std::cout);
 }
+

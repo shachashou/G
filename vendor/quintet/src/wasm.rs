@@ -1,0 +1,147 @@
+use super::board::*;
+use super::mate;
+use super::mate::SolveMode::{self, VCFDFS, VCTAUTO, VCTDFPNS, VCTDFS};
+use std::convert::{From, TryFrom};
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub fn solve(
+    mode: u8,
+    limit: u8,
+    blacks: &[u8],
+    whites: &[u8],
+    black: bool,
+    threat_limit: u8,
+) -> Option<Box<[u8]>> {
+    let mode = SolveMode::try_from(mode).ok()?;
+    solve_mode(mode, limit, blacks, whites, black, threat_limit)
+}
+
+#[wasm_bindgen]
+pub fn solve_vcf(blacks: &[u8], whites: &[u8], black: bool, limit: u8) -> Option<Box<[u8]>> {
+    solve_mode(VCFDFS, limit, blacks, whites, black, limit)
+}
+
+#[wasm_bindgen]
+pub fn solve_vct(blacks: &[u8], whites: &[u8], black: bool, limit: u8) -> Option<Box<[u8]>> {
+    solve_mode(VCTDFS, limit, blacks, whites, black, limit)
+}
+
+#[wasm_bindgen]
+pub fn solve_vct_dfpn(blacks: &[u8], whites: &[u8], black: bool, limit: u8) -> Option<Box<[u8]>> {
+    solve_mode(VCTDFPNS, limit, blacks, whites, black, limit)
+}
+
+/// A VCT by df-pn with no `limit` or `threat_limit`: only `max_nodes` bounds
+/// the search (`SolveMode::VCTAUTO`). `None` is also "gave up".
+#[wasm_bindgen]
+pub fn solve_vct_auto(
+    blacks: &[u8],
+    whites: &[u8],
+    black: bool,
+    max_nodes: u32,
+) -> Option<Box<[u8]>> {
+    let limits = mate::SolveLimits::new(0).with_max_nodes(max_nodes.into());
+    solve_limits(VCTAUTO, limits, blacks, whites, black)
+}
+
+/// [`solve`] with the mode already decoded. Bad point codes are `None`, as
+/// is every result but a proven mate.
+fn solve_mode(
+    mode: SolveMode,
+    limit: u8,
+    blacks: &[u8],
+    whites: &[u8],
+    black: bool,
+    threat_limit: u8,
+) -> Option<Box<[u8]>> {
+    let limits = mate::SolveLimits::new(limit).with_threat_limit(threat_limit);
+    solve_limits(mode, limits, blacks, whites, black)
+}
+
+fn solve_limits(
+    mode: SolveMode,
+    limits: mate::SolveLimits,
+    blacks: &[u8],
+    whites: &[u8],
+    black: bool,
+) -> Option<Box<[u8]>> {
+    let blacks = Points::try_from(blacks).ok()?;
+    let whites = Points::try_from(whites).ok()?;
+    let board = Board::from_stones(&blacks, &whites);
+    let mate = mate::solve(mode, &board, Player::from(black), limits).into_mate()?;
+    Some(<Vec<u8>>::from(Points(mate.path)).into_boxed_slice())
+}
+
+#[wasm_bindgen]
+pub fn encode_xy(x: u8, y: u8) -> u8 {
+    Point(x, y).into()
+}
+
+#[wasm_bindgen]
+pub fn decode_x(code: u8) -> u8 {
+    Point::try_from(code).unwrap().0
+}
+
+#[wasm_bindgen]
+pub fn decode_y(code: u8) -> u8 {
+    Point::try_from(code).unwrap().1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_decode() {
+        // E6: `x * 15 + y`, the same code as `u8::from(Point)`.
+        assert_eq!(encode_xy(4, 5), 65);
+        assert_eq!((decode_x(65), decode_y(65)), (4, 5));
+    }
+
+    #[test]
+    fn test_solve() {
+        // Black H8-I8-J8 with White far away: Black has a VCF.
+        let blacks = [encode_xy(7, 7), encode_xy(8, 7), encode_xy(9, 7)];
+        let whites = [encode_xy(0, 0), encode_xy(0, 1)];
+
+        // The path comes back as point codes, the same as `mate::solve`'s.
+        let board = Board::from_stones(
+            &Points::try_from(&blacks[..]).unwrap(),
+            &Points::try_from(&whites[..]).unwrap(),
+        );
+        let limits = mate::SolveLimits::new(3).with_threat_limit(3);
+        let expected = mate::solve(mate::SolveMode::VCFDFS, &board, Player::Black, limits)
+            .into_mate()
+            .unwrap();
+        let expected = <Vec<u8>>::from(Points(expected.path));
+        let result = solve_vcf(&blacks, &whites, true, 3).unwrap();
+        assert_eq!(result.to_vec(), expected);
+        assert_eq!(solve(0, 3, &blacks, &whites, true, 3), Some(result));
+
+        // The fixed-mode functions are the codes 10 and 16.
+        let vct = solve_vct(&blacks, &whites, true, 3);
+        assert!(vct.is_some());
+        assert_eq!(solve(10, 3, &blacks, &whites, true, 3), vct);
+        let dfpn = solve_vct_dfpn(&blacks, &whites, true, 3);
+        assert!(dfpn.is_some());
+        assert_eq!(solve(16, 3, &blacks, &whites, true, 3), dfpn);
+
+        // Only a budget: the same as the code 17. White has no mate.
+        let auto = solve_vct_auto(&blacks, &whites, true, 100_000);
+        assert!(auto.is_some());
+        assert_eq!(solve(17, 3, &blacks, &whites, true, 3), auto);
+        assert_eq!(solve_vct_auto(&blacks, &whites, false, 1), None);
+
+        // A reserved mode answers nothing.
+        assert_eq!(solve(1, 3, &blacks, &whites, true, 3), None);
+
+        // No mate for White.
+        assert_eq!(solve_vcf(&blacks, &whites, false, 3), None);
+
+        // Bad input is `None` rather than a panic.
+        assert_eq!(solve(2, 3, &blacks, &whites, true, 3), None);
+        assert_eq!(solve(0, 3, &[225], &whites, true, 3), None);
+        assert_eq!(solve(0, 3, &blacks, &[255], true, 3), None);
+    }
+}

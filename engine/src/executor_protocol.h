@@ -26,6 +26,9 @@ class ExecutorProtocol {
   json::Value errorValue(const std::string& message) const;
   void addState(json::Value& target, const PositionState& state) const;
   json::Value think(const json::Value& request) const;
+  // Ticket 03: one standalone VCF query on the current position.
+  json::Value vcfCommand(const json::Value& request) const;
+  json::Value vcfValue(const VcfResult& result) const;
 
   EngineConfig cfg_;
   std::ostream& out_;

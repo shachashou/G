@@ -131,13 +131,40 @@ class ExecutorClient:
         return self.call("candidates", radius=radius)
 
     def think(self, *, depth: int | None = None,
-              movetime_ms: int | None = None) -> dict:
-        params: dict[str, int] = {}
+              movetime_ms: int | None = None,
+              vcf_policy: str | None = None,
+              vcf_nodes: int | None = None,
+              vcf_plies: int | None = None) -> dict:
+        params: dict[str, int | str] = {}
         if depth is not None:
             params["depth"] = depth
         if movetime_ms is not None:
             params["movetime_ms"] = movetime_ms
+        if vcf_policy is not None:
+            params["vcf_policy"] = vcf_policy
+        if vcf_nodes is not None:
+            params["vcf_nodes"] = vcf_nodes
+        if vcf_plies is not None:
+            params["vcf_plies"] = vcf_plies
         return self.call("think", **params)
+
+    def vcf(self, *, max_nodes: int | None = None,
+            max_attack_plies: int | None = None,
+            time_ms: int | None = None) -> dict:
+        """Ask the engine's upstream VCF solver about the current position.
+
+        The response's ``vcf`` object distinguishes ``proven``, ``disproven``,
+        ``budget_exhausted``, ``interrupted``, ``unsupported_rule`` and
+        ``invalid_input``; only ``proven`` carries a re-checked variation.
+        """
+        params: dict[str, int] = {}
+        if max_nodes is not None:
+            params["max_nodes"] = max_nodes
+        if max_attack_plies is not None:
+            params["max_attack_plies"] = max_attack_plies
+        if time_ms is not None:
+            params["time_ms"] = time_ms
+        return self.call("vcf", **params)
 
     def close(self) -> None:
         """Stop the engine process. Safe to call more than once."""

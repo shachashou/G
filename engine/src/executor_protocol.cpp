@@ -1,4 +1,4 @@
-#include "executor_protocol.h"
+﻿#include "executor_protocol.h"
 
 #include <array>
 #include <exception>
@@ -126,13 +126,121 @@ void ExecutorProtocol::addState(Value& target, const PositionState& s) const {
             s.lastMove < 0 ? json::nullValue() : pointValue(s.lastMove));
 }
 
+Value ExecutorProtocol::vcfValue(const VcfResult& result) const {
+  Value out = json::objectValue();
+  json::set(out, "status", json::stringValue(vcfStatusName(result.status)));
+  json::set(out, "proven", json::booleanValue(result.proven()));
+  json::set(out, "unknown", json::booleanValue(result.unknown()));
+  json::set(out, "first_move",
+            result.firstMove < 0 ? json::nullValue()
+                                 : pointValue(result.firstMove));
+  std::vector<Value> variation;
+  variation.reserve(result.variation.size());
+  for (int m : result.variation) variation.push_back(pointValue(m));
+  json::set(out, "variation", json::arrayValue(std::move(variation)));
+  Value end = json::objectValue();
+  json::set(end, "kind", json::stringValue(vcfEndKindName(result.evidence.kind)));
+  json::set(end, "first_point",
+            result.evidence.firstPoint < 0
+                ? json::nullValue()
+                : pointValue(result.evidence.firstPoint));
+  json::set(end, "second_point",
+            result.evidence.secondPoint < 0
+                ? json::nullValue()
+                : pointValue(result.evidence.secondPoint));
+  json::set(out, "end", std::move(end));
+  Value budget = json::objectValue();
+  json::set(budget, "max_nodes",
+            json::numberValue(static_cast<long long>(result.limits.nodeLimit)));
+  json::set(budget, "max_attack_plies",
+            json::numberValue(result.limits.maxAttackPlies));
+  json::set(budget, "time_ms", json::numberValue(result.limits.timeLimitMs));
+  json::set(out, "budget", std::move(budget));
+  json::set(out, "nodes",
+            json::numberValue(static_cast<long long>(result.nodes)));
+  json::set(out, "elapsed_ms", json::numberValue(result.elapsedMs));
+  json::set(out, "message", json::stringValue(result.message));
+  return out;
+}
+
+Value ExecutorProtocol::vcfCommand(const Value& request) const {
+  VcfLimits limits;
+  limits.nodeLimit = cfg_.vcfNodeLimit;
+  limits.maxAttackPlies = 10;
+  limits.timeLimitMs = 0;
+  if (const Value* value = request.find("max_nodes")) {
+    if (value->type != Value::Type::Number) {
+      return errorValue("max_nodes must be a number");
+    }
+    limits.nodeLimit = static_cast<uint64_t>(value->asInt(0));
+  }
+  if (const Value* value = request.find("max_attack_plies")) {
+    if (value->type != Value::Type::Number) {
+      return errorValue("max_attack_plies must be a number");
+    }
+    limits.maxAttackPlies = static_cast<int>(value->asInt(0));
+  }
+  if (const Value* value = request.find("time_ms")) {
+    if (value->type != Value::Type::Number) {
+      return errorValue("time_ms must be a number");
+    }
+    limits.timeLimitMs = static_cast<int>(value->asInt(0));
+  }
+  if (limits.nodeLimit < 1 || limits.nodeLimit > 100000000ull) {
+    return errorValue("max_nodes must be in 1..100000000");
+  }
+  if (limits.maxAttackPlies < 1 || limits.maxAttackPlies > 255) {
+    return errorValue("max_attack_plies must be in 1..255");
+  }
+  if (limits.timeLimitMs < 0 || limits.timeLimitMs > 600000) {
+    return errorValue("time_ms must be in 0..600000");
+  }
+
+  const Board& board = executor_.board();
+  VcfResult result = solveVcf(board, limits);
+  Value response = json::objectValue();
+  json::set(response, "ok", json::booleanValue(true));
+  json::set(response, "rule",
+            json::stringValue(board.ruleMode() == RuleMode::Renju ? "renju"
+                                                                  : "freestyle"));
+  json::set(response, "attacker",
+            json::stringValue(board.sideToMove() == Color::Black ? "black"
+                                                                 : "white"));
+  json::set(response, "vcf", vcfValue(result));
+  // The variation has already been replayed through Board::isPlayable by the
+  // adapter; say so explicitly so clients can tell evidence was checked.
+  json::set(response, "evidence_checked", json::booleanValue(true));
+  return response;
+}
+
 Value ExecutorProtocol::think(const Value& request) const {
   const std::vector<int> legal = executor_.legalMoves();
   if (legal.empty()) {
     return errorValue("no legal move (game over or full board)");
   }
   SearchLimits limits;
-  limits.useVcf = cfg_.useVcf;
+  limits.vcfPolicy = cfg_.vcfPolicy;
+  limits.vcfNodeLimit = cfg_.vcfNodeLimit;
+  if (const Value* value = request.find("vcf_policy")) {
+    if (value->type != Value::Type::String ||
+        !vcfPolicyFromName(value->asString(), limits.vcfPolicy)) {
+      return errorValue("vcf_policy must be off, root or root_and_children");
+    }
+  }
+  if (const Value* value = request.find("vcf_nodes")) {
+    const long long nodes = value->asInt(0);
+    if (value->type != Value::Type::Number || nodes < 1) {
+      return errorValue("vcf_nodes must be a positive number");
+    }
+    limits.vcfNodeLimit = static_cast<uint64_t>(nodes);
+  }
+  if (const Value* value = request.find("vcf_plies")) {
+    const long long plies = value->asInt(0);
+    if (value->type != Value::Type::Number || plies < 1 || plies > 255) {
+      return errorValue("vcf_plies must be in 1..255");
+    }
+    limits.vcfMaxAttackPlies = static_cast<int>(plies);
+  }
   const int depth = request.find("depth")
                         ? static_cast<int>(request.find("depth")->asInt(0))
                         : 0;
@@ -158,6 +266,16 @@ Value ExecutorProtocol::think(const Value& request) const {
   json::set(response, "nodes",
             json::numberValue(static_cast<long long>(result.nodes)));
   json::set(response, "from_vcf", json::booleanValue(result.fromVcf));
+  json::set(response, "vcf_policy",
+            json::stringValue(vcfPolicyName(limits.vcfPolicy)));
+  json::set(response, "vcf",
+            limits.vcfPolicy == VcfPolicy::Off
+                ? json::nullValue()
+                : vcfValue(result.vcf));
+  json::set(response, "vcf_child_checks",
+            json::numberValue(result.vcfChildChecks));
+  json::set(response, "vcf_child_losses",
+            json::numberValue(result.vcfChildLosses));
   json::set(response, "eval",
             json::stringValue(nnueActive_ ? "nnue" : "handcrafted"));
   return response;
@@ -190,6 +308,12 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
                                     : "none"));
     json::set(response, "nnue_path",
               json::stringValue(nnueActive_ ? nnue_->path() : ""));
+    // Ticket 03: which upstream VCF implementation the engine calls and how.
+    json::set(response, "vcf_engine", json::stringValue(vcfUpstreamIdentity()));
+    json::set(response, "vcf_policy",
+              json::stringValue(vcfPolicyName(cfg_.vcfPolicy)));
+    json::set(response, "vcf_nodes",
+              json::numberValue(static_cast<long long>(cfg_.vcfNodeLimit)));
     // A handcrafted evaluation must never be presented as a trained NNUE.
     json::set(response, "eval_description",
               json::stringValue(
@@ -374,8 +498,7 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
     return response;
   }
 
-  if (name == "candidates") {
-    const Value* radiusValue = request.find("radius");
+  if (name == "candidates") {    const Value* radiusValue = request.find("radius");
     const int radius =
         radiusValue ? static_cast<int>(radiusValue->asInt(1)) : 1;
     const std::vector<int> candidates = executor_.candidates(radius);
@@ -395,7 +518,10 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
 
   if (name == "think") return think(request);
 
+  if (name == "vcf") return vcfCommand(request);
+
   return errorValue("unknown cmd: " + name);
 }
 
 }  // namespace gomoku
+

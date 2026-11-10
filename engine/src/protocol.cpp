@@ -231,7 +231,8 @@ void Protocol::playEngineMove(std::ostream& out) {
     move = player_.pickMove(board_);
   } else {
     SearchLimits limits;
-    limits.useVcf = cfg_.useVcf;
+    limits.vcfPolicy = cfg_.vcfPolicy;
+    limits.vcfNodeLimit = cfg_.vcfNodeLimit;
     if (cfg_.fixedDepth > 0) {
       limits.maxDepth = cfg_.fixedDepth;
       limits.moveTimeMs = 0;

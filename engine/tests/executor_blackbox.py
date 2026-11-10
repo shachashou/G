@@ -280,6 +280,119 @@ def test_full_game_replay(client):
           "empty replay is valid")
 
 
+
+def test_vcf_boundary(client):
+    print("[VCF boundary: upstream solver, budgets, evidence]")
+    about = client.about()
+    check(str(about.get("vcf_engine", "")).startswith("quintet@"),
+          "about identifies the vendored upstream VCF implementation")
+    check(about.get("vcf_policy") in ("off", "root", "root_and_children"),
+          "about reports the VCF call-site policy")
+
+    # Counter-four position: Black H8,J8,K8,I7,L7,I6 vs White H9,L8,J7,K6,I5,L5.
+    blacks = [(7, 7), (9, 7), (10, 7), (8, 6), (11, 6), (8, 5)]
+    whites = [(7, 8), (11, 7), (9, 6), (10, 5), (8, 4), (11, 4)]
+    r = client.rebuild(cells_from(blacks, whites), "black", "renju")
+    check(r.get("ok") is True, "VCF position rebuilt")
+    response = client.vcf(max_nodes=50000, max_attack_plies=10)
+    check(response.get("ok") is True, "vcf query accepted")
+    report = response.get("vcf", {})
+    check(report.get("status") == "proven", "counter-four line is proven")
+    check(report.get("proven") is True and report.get("unknown") is False,
+          "proven is not reported as unknown")
+    check(report.get("first_move") == [8, 7], "first move I8 reported")
+    check([tuple(p) for p in report.get("variation", [])]
+          == [(8, 7), (6, 7), (8, 9), (8, 8), (9, 8)],
+          "variation is the full forced line")
+    check(report.get("end", {}).get("kind") == "fours",
+          "evidence names a double/straight four ending")
+    check(report.get("budget", {}).get("max_nodes") == 50000
+          and report.get("budget", {}).get("max_attack_plies") == 10,
+          "budget is echoed in the result")
+    check(report.get("nodes", 0) > 0, "node cost reported")
+    check(response.get("evidence_checked") is True,
+          "evidence is marked as re-checked by the executor")
+    replayed = client.replay([list(p) for p in report["variation"]], "renju")
+    check(replayed.get("ok") is True,
+          "the proven variation replays legally through the executor")
+    after = client.state()
+    check(after["move_count"] == 12 and after["history"] == [],
+          "vcf query does not consume the snapshot")
+
+    # Budget exhaustion is unknown, never "no mate".
+    tight = client.vcf(max_nodes=1, max_attack_plies=10)["vcf"]
+    check(tight.get("status") == "budget_exhausted",
+          "tiny node budget -> budget_exhausted")
+    check(tight.get("unknown") is True and tight.get("proven") is False,
+          "budget exhaustion is reported as unknown")
+    check(tight.get("variation") == [], "no variation without a proof")
+
+    # A quiet position has no VCF at all.
+    client.new_game("renju")
+    client.play(7, 7)
+    client.play(8, 8)
+    quiet = client.vcf()["vcf"]
+    check(quiet.get("status") == "disproven",
+          "quiet position -> disproven within the budget")
+    check(quiet.get("first_move") is None, "disproven has no first move")
+
+    # Freestyle is not modelled by the upstream solver.
+    client.new_game("freestyle")
+    free = client.vcf()["vcf"]
+    check(free.get("status") == "unsupported_rule",
+          "freestyle VCF reports unsupported_rule")
+
+    # Out-of-range parameters are input errors, not tactical verdicts.
+    client.new_game("renju")
+    bad = client.vcf(max_attack_plies=0)
+    check(bad.get("ok") is False and "max_attack_plies" in bad.get("error", ""),
+          "invalid parameter rejected with an input error")
+
+    # Finished position: the adapter refuses to answer.
+    five = cells_from([(3, 7), (4, 7), (5, 7), (6, 7), (7, 7)],
+                      [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1)])
+    client.rebuild(five, "white", "renju")
+    finished = client.vcf()["vcf"]
+    check(finished.get("status") == "invalid_input",
+          "finished position -> invalid_input")
+    check(bool(finished.get("message")), "invalid input explains itself")
+
+    # think reports the VCF state it actually used.
+    client.rebuild(cells_from(blacks, whites), "black", "renju")
+    thought = client.think(depth=2, vcf_policy="root")
+    check(thought.get("vcf_policy") == "root", "think echoes the VCF policy")
+    check(thought.get("from_vcf") is True, "think used the proven VCF line")
+    check(thought.get("move") == [8, 7], "engine plays the proven first move")
+    check(thought.get("vcf", {}).get("status") == "proven",
+          "think reports the VCF status")
+    thought = client.think(depth=2, vcf_policy="off")
+    check(thought.get("vcf") is None, "policy off -> no VCF report")
+
+
+def test_stop_interrupts_work():
+    print("[stop: closing the client kills in-flight engine work]")
+    client = ExecutorClient(EXE)
+    errors = []
+
+    def worker():
+        try:
+            # A fixed deep search has no clock, so it cannot finish before the
+            # stop; the point is the kill, not the answer.
+            client.think(depth=20)
+        except Exception as exc:  # noqa: BLE001 - the point is the failure mode
+            errors.append(exc)
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    thread.join(0.2)
+    check(thread.is_alive(), "long think is still running")
+    proc = client._proc
+    client.close()
+    thread.join(5)
+    check(not thread.is_alive(), "closing the client ends the worker")
+    check(bool(errors), "in-flight request reports an executor error")
+    check(proc.poll() is not None, "engine process is gone after stop")
+
 def test_process_cleanup(client):
     print("[process cleanup]")
     proc = client._proc
@@ -305,6 +418,8 @@ def main():
         test_candidates_distinct(client)
         test_engine_response(client)
         test_full_game_replay(client)
+        test_vcf_boundary(client)
+        test_stop_interrupts_work()
         test_process_cleanup(client)
     finally:
         client.close()

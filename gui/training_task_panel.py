@@ -96,6 +96,9 @@ class TrainingTaskPanel(QGroupBox):
         row.addWidget(self.btn_start)
         row.addWidget(self.btn_stop)
         layout.addLayout(row)
+        self.btn_bootstrap = QPushButton("先建立 v0：切换到教师训练")
+        self.btn_bootstrap.clicked.connect(self._choose_teacher)
+        layout.addWidget(self.btn_bootstrap)
         self.status = QLabel("任务：未开始")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
@@ -113,14 +116,40 @@ class TrainingTaskPanel(QGroupBox):
         mode = self.combo_mode.currentData()
         if self.edit_output.text() in self.default_outputs.values():
             self.edit_output.setText(self.default_outputs[mode])
-        self.hint.setText({
-            "teacher": "采集 → Rapfi 打标 → 候选训练 → 历史测评。尚无模型时可建立 v0；晋级仅影响下一盘。",
-            "transition": "停止新增教师标签；正式版本自对弈得到真实胜负，允许按显式权重混合历史教师样本。需要已有正式版本，这还不是完全无教师更新。",
-            "selfplay": "完全无教师：需要已有正式版本，仅训练/验证完整自对弈的真实胜负；混合池中的教师标签被排除。Rapfi 缺失也可运行，不会自动切回教师。"}[mode])
+        self._refresh_readiness()
         self.btn_start.setText("启动教师训练任务" if mode == "teacher" else "启动自主训练任务")
         self.spin_teacher_weight.setEnabled(mode == "transition")
         self.spin_epsilon.setEnabled(mode != "teacher")
         self.spin_selfplay_ms.setEnabled(mode != "teacher")
+
+    def _refresh_readiness(self):
+        from model_registry import ModelRegistry
+        mode = self.combo_mode.currentData()
+        hint = {
+            "teacher": "采集 → Rapfi 打标 → 候选训练 → 历史测评。尚无模型时可建立 v0；晋级仅影响下一盘。",
+            "transition": "停止新增教师标签；正式版本自对弈得到真实胜负，允许按显式权重混合历史教师样本。需要已有正式版本，这还不是完全无教师更新。",
+            "selfplay": "完全无教师：需要已有正式版本，仅训练/验证完整自对弈的真实胜负；混合池中的教师标签被排除。Rapfi 缺失也可运行，不会自动切回教师。"}[mode]
+        ready, missing = True, False
+        if mode != "teacher":
+            try:
+                missing = ModelRegistry(self.registry).resolve() is None
+                if missing:
+                    ready = False
+                    hint = ("请先建立正式版本 v0：切换到「教师训练」，点击「启动教师训练任务」，"
+                            "等待正式版本显示 v0 后停止任务，再选择自主模式。"
+                            "如已有合格候选，也可在「历史版本测评与晋级」中验证并登记 v0。"
+                            f"\n当前登记目录：{self.registry}")
+            except (OSError, ValueError) as exc:
+                ready = False
+                hint = f"正式版本校验失败，请先在「历史版本测评与晋级」中检查记录与模型：{exc}"
+        self.hint.setText(hint)
+        self.btn_bootstrap.setVisible(missing)
+        self.btn_bootstrap.setEnabled(self.thread is None)
+        return ready
+
+    def _choose_teacher(self):
+        self.combo_mode.setCurrentIndex(self.combo_mode.findData("teacher"))
+        self.status.setText("已选择教师训练；点击「启动教师训练任务」建立首个正式版本 v0。")
 
     @staticmethod
     def _spin(low, high, value):
@@ -151,6 +180,9 @@ class TrainingTaskPanel(QGroupBox):
             return
         from training_task import TrainingTask
         config = self.make_config()
+        if not self._refresh_readiness():
+            self.status.setText(self.hint.text())
+            return
         self.task = TrainingTask(config, progress=lambda value: self.messages.put(("state", value)))
         task = self.task
         self.last_result = None

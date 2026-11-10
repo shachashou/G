@@ -1,0 +1,4 @@
+# Windows x64 / Python 3.12; no GPU runtime required.
+--extra-index-url https://download.pytorch.org/whl/cpu
+-r requirements.txt
+torch==2.6.0+cpu

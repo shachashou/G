@@ -7,15 +7,13 @@
 # No system cmake, Visual Studio, Windows SDK or global ~/.cargo is used.
 # On Linux/macOS the system C++ compiler and Rust toolchain are used.
 #
-#   py -3.12 -m venv .venv
-#   .venv\Scripts\python.exe -m pip install -r requirements.txt ^
-#       --extra-index-url https://download.pytorch.org/whl/cu124
+#   D:\Python312\python.exe -m venv .venv
+#   .venv\Scripts\python.exe -m pip install -r requirements-amd.txt
 #   .venv\Scripts\python.exe tools\build\bootstrap_toolchain.py
 #   .venv\Scripts\python.exe tools\build\build.py --clean
 #
-# The +cu124 torch wheel is the CUDA build for this machine's RTX 4080 SUPER.
-# On a CPU-only machine replace that line with `torch==2.6.0`; the training
-# scripts auto-select CUDA when available and stay fully functional on CPU.
+# Shared dependencies only. Select ONE backend file: requirements-amd.txt,
+# requirements-nvidia.txt or requirements-cpu.txt. See README.md.
 
 # Build & test (cross-platform wheels, no system cmake needed).
 cmake==3.31.10
@@ -27,5 +25,4 @@ PySide6==6.9.3
 
 # Training.
 numpy>=2.0,<3
-torch==2.6.0+cu124
 tqdm>=4.66,<5

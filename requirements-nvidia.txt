@@ -1,0 +1,4 @@
+# Windows x64 / Python 3.12; pinned CUDA backend.
+--extra-index-url https://download.pytorch.org/whl/cu124
+-r requirements.txt
+torch==2.6.0+cu124

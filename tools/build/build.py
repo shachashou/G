@@ -102,7 +102,8 @@ def configured_with_zig() -> bool:
     if not cache.is_file():
         return True
     text = cache.read_text(encoding="utf-8", errors="replace")
-    return "zig-cxx" in text and "zig-cc" in text
+    # The project enables only CXX, so CMake does not cache a C compiler.
+    return "zig-cxx" in text
 
 
 def main() -> int:

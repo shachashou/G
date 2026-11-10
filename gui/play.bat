@@ -6,7 +6,7 @@ set "PY=.venv\Scripts\python.exe"
 if not exist "%PY%" (
   echo [ERROR] venv not found. Create it first:
   echo         py -3.12 -m venv .venv
-  echo         .venv\Scripts\python.exe -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+  echo         Select requirements-amd.txt, requirements-nvidia.txt or requirements-cpu.txt; see README.md.
   pause
   exit /b 1
 )

@@ -43,17 +43,41 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 
 **Windows 上的编译工具链完全收敛在 `.venv` 内，不读取 Visual Studio、Windows SDK 或全局 `~/.cargo`。**
 
-- Python 依赖（含 PySide6、PyTorch）与 `cmake` / `ctest` / `ninja` / `ziglang` 都是 venv 里的包。`ziglang` 自带 clang、libc++、lld 与 mingw-w64 头文件/库，作为 C/C++ 编译器。
+- Python 3.12 安装在项目外的稳定位置（本机为 `D:\Python312`），项目 `.venv` 由它创建；不要删除基础 Python 或把它放在会清理的 `.scratch` 中。Python 依赖（含 PySide6、PyTorch）与 `cmake` / `ctest` / `ninja` / `ziglang` 都是 venv 里的包。`ziglang` 自带 clang、libc++、lld 与 mingw-w64 头文件/库，作为 C/C++ 编译器。
 - VCF 算杀复用 vendored 的开源 quintet；Rust 工具链通过一次性引导安装到 `.venv/rustup` 与 `.venv/cargo`（`stable-x86_64-pc-windows-gnu`，含 proc-macro 所需的 rust-mingw 导入库），链接器使用 venv 内的 `rust-lld`。
 - CMake 通过 `tools/build/zig-cc.cmd` / `zig-cxx.cmd` 调用 venv 中的 Zig，Rust 桥由 CMake 自动执行 `cargo build --release` 生成 `engine/vcf-bridge/target/release/libvcf_bridge.a` 再链接。
 
-首次配置：
+首次配置（Windows x64，Python 3.12）：
 
 ~~~powershell
-py -3.12 -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+D:\Python312\python.exe -m venv .venv
+# 如需代理，先在当前 PowerShell 会话设置（本机代理端口 10808）：
+$env:HTTP_PROXY = "http://127.0.0.1:10808"
+$env:HTTPS_PROXY = $env:HTTP_PROXY
+# 按下表选择一个依赖文件；本机为 AMD。
+.venv\Scripts\python.exe -m pip install -r requirements-amd.txt
 .venv\Scripts\python.exe tools\build\bootstrap_toolchain.py
 ~~~
+
+`requirements.txt` 只包含通用依赖，PyTorch 后端按硬件选择；三种配置使用同一套数据、训练和 `GMVALUE1` 导出流程：
+
+| 运行设备 | 安装文件 | PyTorch 后端 | 前提 |
+|---|---|---|---|
+| AMD GPU（本机 RX 7900 XTX） | `requirements-amd.txt` | 2.9.1 + ROCm 7.2.1，AMD 官方 Windows wheel | Python 3.12，受支持的显卡和驱动 |
+| NVIDIA GPU | `requirements-nvidia.txt` | 2.6.0 + CUDA 12.4 | 支持该 CUDA 版本的 NVIDIA 显卡与驱动 |
+| CPU | `requirements-cpu.txt` | 2.6.0 CPU | 无 GPU 运行时要求 |
+
+AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/windows/windows_compatibility.html)和[安装说明](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/install/installrad/windows/install-pytorch.html)为准；上述 ROCm 7.2.1 发行说明要求 26.2.2 显卡驱动。AMD 配置不安装 NVIDIA CUDA 包。切换后端时重建 `.venv`，再安装所选依赖，避免混装。
+
+**AMD ROCm 也使用 PyTorch 的 `torch.cuda` API 和 `cuda` 设备名。** `--device auto` 对两种 GPU 都会自动选择 `cuda`；`--device cuda` 并不代表只能使用 NVIDIA。用 `torch.version.hip` 区分 ROCm、`torch.version.cuda` 区分 CUDA；CPU 可显式使用 `--device cpu`。安装后先检查实际设备：
+
+~~~powershell
+.venv\Scripts\python.exe -c "import torch; print('torch:', torch.__version__, 'HIP:', torch.version.hip, 'CUDA:', torch.version.cuda); print('GPU:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
+~~~
+
+设备识别后还应运行小规模真实训练验证前向、反向和优化器；可识别显卡不等于训练已经验证。C++ 执行器和部署推理运行在 CPU 上，与训练使用哪种 GPU 无关。
+
+本机环境、从零重置的数据状态及实际测试结果见[环境与数据验收记录](.scratch/gomoku-nnue/environment.md)。
 
 构建与测试：
 

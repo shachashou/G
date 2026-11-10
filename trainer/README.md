@@ -44,7 +44,7 @@
 
 ## 环境与现有命令
 
-Python 使用项目 .venv；依赖列表见[requirements.txt](../requirements.txt)。在已安装依赖的项目环境中，可检查当前入口：
+Python 使用项目 .venv；通用依赖见[requirements.txt](../requirements.txt)，AMD / NVIDIA / CPU 后端安装步骤见[根目录环境说明](../README.md#环境与构建)。AMD ROCm 与 NVIDIA CUDA 都使用 `--device cuda`，默认 `auto` 自动检测；CPU 使用 `--device cpu`。在已安装依赖的项目环境中，可检查当前入口：
 
 ~~~powershell
 ./.venv/Scripts/python.exe trainer/train.py --help

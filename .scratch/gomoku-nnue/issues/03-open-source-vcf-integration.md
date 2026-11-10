@@ -40,7 +40,7 @@
 
 - `SearchLimits.vcfPolicy`：`off` / `root` / `root_and_children`，`vcfNodeLimit`、`vcfChildNodeLimit`、`vcfMaxAttackPlies`、`vcfChildChecks` 可配置；引擎命令行 `--vcf-policy`、`--vcf-nodes`，执行器 `think` 接受 `vcf_policy`/`vcf_nodes`/`vcf_plies`。
 - `root_and_children`（默认）：根节点查询一次；未证明时对排名前 16 的根着法各做一次对手 VCF 查询（预算 2000 节点），把"走完这步对手就有已证明 VCF"的着法在根节点剪掉；若全部着法都必败则不剪，保证仍返回合法着法。
-- 实测（`tools/vcf_bench.py --vcf-plies 12 --repeats 5`，数据存 `.scratch/gomoku-nnue/ticket-03-vcf-bench.json` 的提取值）：
+- 实测（`tools/vcf_bench.py --engine build/engine/gomoku_nnue.exe --vcf-plies 12 --repeats 5`；`--json` 写出的报告属于本地生成产物，已在 `.gitignore` 中忽略，不随仓库提交）：
 
 | 局面 | off | root | root_and_children |
 |---|---|---|---|

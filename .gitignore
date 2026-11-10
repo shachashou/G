@@ -2,11 +2,16 @@
 build/
 build-*/
 out/
+target/
 
 # Python
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
 
 # Data & weights (large binaries; keep dirs via .gitkeep)
 data/*
@@ -15,6 +20,7 @@ weights/*
 !weights/.gitkeep
 *.binpack
 match_results*.json
+*.jsonl
 
 # Model artifacts
 *.pt
@@ -24,7 +30,8 @@ match_results*.json
 .vs/
 .vscode/
 .idea/
-.scratch/gomoku-nnue/distillation-tests.log
 
-# Rust build output (vendored VCF bridge, ticket 03)
-engine/vcf-bridge/target/
+# Generated reports and measurement dumps are local artifacts. Specs and
+# tickets under .scratch are Markdown and stay tracked.
+.scratch/**/*.log
+.scratch/**/*.json

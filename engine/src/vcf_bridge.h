@@ -7,12 +7,6 @@
 
 #include <stdint.h>
 
-#if defined(_WIN32)
-#define VCF_BRIDGE_EXPORT __declspec(dllimport)
-#else
-#define VCF_BRIDGE_EXPORT
-#endif
-
 #ifdef __cplusplus
 extern "C" {
 #endif

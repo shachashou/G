@@ -26,8 +26,8 @@ Usage::
 
 Command line::
 
-    .venv\\Scripts\\python.exe tools/vcf_tactics.py --engine build/engine/gomoku_nnue.exe check H8,H7,I8
-    .venv\\Scripts\\python.exe tools/vcf_tactics.py --engine build/engine/gomoku_nnue.exe filter positions.jsonl
+    .venv\\Scripts\\python.exe tools/vcf_tactics.py --engine build/engine/gomoku_nnue.exe check H8 H7 I9 G7
+    .venv\\Scripts\\python.exe tools/vcf_tactics.py --engine build/engine/gomoku_nnue.exe filter positions.jsonl --output labels.jsonl
 """
 from __future__ import annotations
 

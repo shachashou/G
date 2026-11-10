@@ -9,7 +9,7 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md) 和 [03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md) 和 [04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -85,13 +85,30 @@ Enter-VsDevShell -VsInstallPath "D:\VisualStudio" -DevCmdArguments '-arch=x64 -h
 - **GUI**：状态区显示算杀引擎身份，`think` 结果会显示本轮算杀状态；「算杀检查（VCF）」按钮可在当前局面单独查询并显示状态、首着、变化、预算与实际开销，检查期间「停止对局」可中断。
 - **复用**：`tools/vcf_tactics.py` 提供不依赖 GUI 的查询/打标接口（供工单 05 过滤强制战术局面），`tools/vcf_bench.py` 记录调用点与预算实测。
 
+## 教师打标（Rapfi）
+
+- **本地安装**：Rapfi 250615（`Rapfi-engine.7z`）解压到忽略目录 `tools/rapfi/`（Windows 自带 `tar -xf Rapfi-engine.7z -C tools/rapfi` 即可解 7z）。可执行文件、Renju 权重与 `config.toml` 的 SHA-256 和版本号固定在 `tools/rapfi.lock.json`（入库）；每次运行前逐项核对，缺失或哈希不符立即报错，不产生任何标签。
+- **评分方法**：通过 Gomocup 协议 `BOARD ... DONE` 让教师以固定预算（默认 `INFO timeout_turn 800`、`thread_num 1`、Renju `INFO rule 2`）搜索该局面，从 `MESSAGE ... Eval ...` 读取**搜索评分**；引擎建议着法单独记录，不与评分混为同一契约。已实测：评分视角为**行棋方**（白方必胜局面给正分），mate 记作 `±M<plies>`，以落子回复作为完成同步。
+- **价值契约（teacher-v1）**：原始分（行棋方视角）→ `value = tanh(score / 600)`，范围 [-1,1]。mate、无搜索评分、超时、异常响应不归一化、不计入教师训练队列；VCF 已证明的局面在调用教师前排除，VCF 预算耗尽只记 `vcf_unknown`，不宣称不存在其它强制胜法。
+- **样本存储**：`data/teacher/samples.sqlite3`（SQLite，`application_id` + `user_version=1`）。每行保存棋盘、规则、行棋方、来源（对局/独立采样）、来源 id、ply/末着、采集模型 id、战术状态、过滤原因、教师状态、原始评分/视角/归一化参数/价值、建议着法、搜索深度、预算、线程数、耗时、教师版本与身份哈希、标签版本、可空最终结果。被过滤的请求也保留用于计数，训练只读 `accepted` 行。
+- **完整性**：打开时校验 application id、schema 版本与列；`validate()` 跑 `PRAGMA integrity_check` 并检查行棋方与棋子数一致、accepted 必须有 value、独立采样不得伪造和棋。截断文件、更新版本的库、非 Renju 规则都会明确拒绝。
+- **GUI**：状态区显示教师身份与安装状态；「打标并保存样本」显示原始评分、归一化价值、过滤原因、教师状态、预算与有效样本数；教师缺失时明确报错且不落盘。
+- **命令**：
+
+~~~powershell
+.venv\Scripts\python.exe tools\rapfi_teacher.py about
+.venv\Scripts\python.exe tools\teacher_label.py label "H8,H9,I8,I9"
+.venv\Scripts\python.exe tools\teacher_label.py stats
+.venv\Scripts\python.exe tools\teacher_label.py validate
+~~~
+
 ## 当前代码与目标的差距
 
 | 区域 | 当前情况 | 改造目标 |
 |---|---|---|
 | 执行器 | 已有 C++ 权威执行器、Renju、协议和 Alpha-Beta | 核验规则并统一裁判、采集和对弈 |
 | VCF | 已接入开源 quintet（MIT，固定 commit），适配层区分已证明/未证明/预算耗尽/中断，证据经执行器复查 | 保持上游版本，供工单 05 的战术筛选与打标复用 |
-| 标签 | 自有搜索分、手工静态评估与 WDL | Rapfi 教师标签及独立胜负监督 |
+| 标签 | 已接入 Rapfi 教师（固定版本）与版本化样本存储，区分评分/建议着法/胜负标签 | 持续采集与样本池（工单 05）、结果标签 |
 | 网络 | 旧15维隐藏层及双输出头 | 新64、32隐藏层与单输出 |
 | 推理 | 已有标量、AVX2、增量和对拍基础 | 新架构导出、加载与增量推理 |
 | 数据与编排 | 批处理工具和旧自举流程 | 有容量上限的持续样本池和任务管理 |

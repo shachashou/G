@@ -14,6 +14,7 @@ import os
 import queue
 import sys
 import threading
+import uuid
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -27,7 +28,10 @@ from PySide6.QtWidgets import (
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 from executor import ExecutorClient, ExecutorError  # noqa: E402
+import rapfi_teacher  # noqa: E402
+import teacher_label  # noqa: E402
 import vcf_tactics  # noqa: E402
+from teacher_store import TeacherStore  # noqa: E402
 
 SIZE = 15
 CELL = 36
@@ -146,6 +150,8 @@ class MainWindow(QMainWindow):
         self._state: dict | None = None
         self._phase = "idle"  # idle | thinking | game_over
         self._player_color = "black"
+        self._game_id = uuid.uuid4().hex[:12]
+        self._active_teacher = None
         self._generation = 0
         self._queue: queue.Queue = queue.Queue()
         self._build_ui()
@@ -208,6 +214,27 @@ class MainWindow(QMainWindow):
         sv.addLayout(think)
         panel.addWidget(setup)
 
+        teacher = QGroupBox("教师打标（Rapfi）")
+        tv = QVBoxLayout(teacher)
+        self.teacher_label = QLabel(self._teacher_status_text())
+        self.teacher_label.setWordWrap(True)
+        tv.addWidget(self.teacher_label)
+        teacher_row = QHBoxLayout()
+        self.btn_teacher = QPushButton("打标并保存样本")
+        self.btn_teacher.clicked.connect(self._label_teacher)
+        teacher_row.addWidget(self.btn_teacher)
+        teacher_row.addWidget(QLabel("预算(ms)"))
+        self.spin_teacher_budget = QSpinBox()
+        self.spin_teacher_budget.setRange(100, 10000)
+        self.spin_teacher_budget.setSingleStep(100)
+        self.spin_teacher_budget.setValue(800)
+        teacher_row.addWidget(self.spin_teacher_budget)
+        tv.addLayout(teacher_row)
+        self.teacher_result = QLabel("样本：未打标")
+        self.teacher_result.setWordWrap(True)
+        tv.addWidget(self.teacher_result)
+        panel.addWidget(teacher)
+
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
         if self._about.get("nnue_loaded"):
@@ -252,6 +279,8 @@ class MainWindow(QMainWindow):
     def _new_game(self) -> None:
         self._interrupt()
         self._player_color = "black" if self.radio_black.isChecked() else "white"
+        self._game_id = uuid.uuid4().hex[:12]
+        self.teacher_result.setText("样本：未打标")
         try:
             response = self._client.new_game("renju")
         except ExecutorError as exc:
@@ -287,6 +316,13 @@ class MainWindow(QMainWindow):
         if self._phase != "thinking":
             return
         self._generation += 1
+        teacher = self._active_teacher
+        if teacher is not None:
+            try:
+                teacher.close()
+            except Exception:  # noqa: BLE001 - stop must never raise
+                pass
+        self._active_teacher = None
         self._client.close()
         self._client = ExecutorClient(self._exe)
         self._about = self._client.about()
@@ -340,6 +376,12 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("算杀检查完成")
                 self._refresh()
                 self._maybe_engine_move()
+            elif kind == "teacher":
+                self._phase = "idle"
+                self._show_teacher_report(payload)
+                self.status_label.setText("教师打标完成")
+                self._refresh()
+                self._maybe_engine_move()
             else:
                 self._phase = "idle"
                 self._show_error(payload)
@@ -372,6 +414,92 @@ class MainWindow(QMainWindow):
             self.vcf_label.setText("算杀：未运行")
             return
         self.vcf_label.setText("算杀：" + vcf_tactics.describe(report))
+
+    def _teacher_status_text(self) -> str:
+        try:
+            identity = rapfi_teacher.load_lock()
+            install = rapfi_teacher.check_install(identity)
+        except rapfi_teacher.TeacherError as exc:
+            return "教师：不可用 — " + str(exc)
+        if not install.ok:
+            return "教师：不可用 — " + "；".join(install.problems)
+        return ("教师：" + identity.describe()
+                + "；未安装时不产生任何标签")
+
+    def _label_teacher(self) -> None:
+        """Labels the current position with the local teacher and saves it."""
+        if self._state is None or self._phase == "thinking":
+            return
+        try:
+            identity = rapfi_teacher.load_lock()
+            install = rapfi_teacher.check_install(identity)
+        except rapfi_teacher.TeacherError as exc:
+            self._show_error("教师不可用：" + str(exc))
+            return
+        if not install.ok:
+            self._show_error("教师不可用：" + "；".join(install.problems))
+            return
+        self._phase = "thinking"
+        self.status_label.setText("教师打标中…（可点「停止对局」中断）")
+        self.error_label.setText("")
+        generation = self._generation
+        state = self._state
+        cells = state["cells"]
+        side = state["side_to_move"]
+        history = state.get("history", [])
+        ply = len(history)
+        last_move = None
+        if history:
+            last_move = history[-1][1] * SIZE + history[-1][0]
+        game_id = self._game_id
+        budget_ms = self.spin_teacher_budget.value()
+        store_path = ROOT / "data" / "teacher" / "samples.sqlite3"
+        exe = self._exe
+
+        def worker() -> None:
+            teacher = None
+            try:
+                teacher = rapfi_teacher.RapfiTeacher(identity=identity)
+                self._active_teacher = teacher
+                with ExecutorClient(exe) as executor, teacher, \
+                        TeacherStore(store_path) as store:
+                    report = teacher_label.label_position(
+                        executor=executor, teacher=teacher, store=store,
+                        cells=cells, side=side, source_kind="game",
+                        source_id=game_id, ply=ply, last_move=last_move,
+                        budget_ms=budget_ms)
+                self._queue.put(("teacher", generation, report))
+            except Exception as exc:  # noqa: BLE001 - surfaced in the UI
+                self._queue.put(("error", generation, str(exc)))
+            finally:
+                self._active_teacher = None
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_teacher_report(self, report: dict) -> None:
+        if not isinstance(report, dict):
+            self.teacher_result.setText("样本：未打标")
+            return
+        if report.get("accepted"):
+            value = report.get("value")
+            text = (f"已保存：raw {report.get('raw_eval')} → value "
+                    f"{value:+.3f}" if value is not None else "已保存")
+        else:
+            text = "未入库：" + str(report.get("filter_reason"))
+        counts = report.get("counts") or {}
+        detail = (f"；教师状态 {report.get('teacher_status')}"
+                  f"；预算 {report.get('budget_ms')} ms"
+                  f"；有效 {counts.get('accepted', 0)} / "
+                  f"请求 {counts.get('total', 0)}"
+                  f"（未知 {counts.get('unknown', 0)}，"
+                  f"VCF 未知 {counts.get('vcf_unknown', 0)}）")
+        extra = ""
+        if report.get("suggested_move"):
+            extra = f"；建议着法 {report['suggested_move']}（与评分分开记录）"
+        message = report.get("message")
+        if message and not report.get("accepted"):
+            extra += "；" + str(message)
+        self.teacher_result.setText("样本：" + text + detail + extra)
 
     def _apply_engine_move(self, response: dict) -> None:
         if not response.get("ok"):
@@ -479,6 +607,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self._generation += 1
+        teacher = self._active_teacher
+        if teacher is not None:
+            try:
+                teacher.close()
+            except Exception:  # noqa: BLE001 - shutdown must never raise
+                pass
+        self._active_teacher = None
         self._timer.stop()
         self._client.close()
         event.accept()

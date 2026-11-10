@@ -18,6 +18,9 @@
 | executor.py | 权威执行器 JSON-lines 共享客户端（工单 02） | 供 GUI、采集、算杀证据复查与比赛裁判复用 |
 | vcf_tactics.py | 开源 VCF 算杀的可复用查询/打标边界（工单 03） | 工单 05 用它过滤已识别强制战术局面 |
 | vcf_bench.py | 算杀调用点与节点预算实测（工单 03） | 记录搜索接入位置和开销，供后续调整 |
+| rapfi_teacher.py | 本地 Rapfi 教师适配器（工单 04） | 固定身份、Renju 配置、预算与评分解析 |
+| teacher_store.py | 版本化教师样本存储（工单 04） | 连续性、完整性与来源字段校验 |
+| teacher_label.py | 执行器 → VCF → Rapfi → 落盘流水线（工单 04） | 供工单 05 的持续打标复用 |
 | datagen.py | 多进程自我对弈采集、合并、校验与吞吐统计 | 标签来源、战术筛选、持续入池 |
 | match_runner.py | 双引擎对战、配对开局、结果和异常报告 | 共用完整禁手裁判、冻结版本与新晋级配置 |
 | dataset_profile.py | 数据画像 | 统计新标签来源、过滤原因与数据覆盖 |
@@ -43,6 +46,19 @@
 `filter` 读取 `{cells, side_to_move}` 的 JSONL，逐条输出 `vcf` 与可读说明；是否丢弃已证明局面由调用方（工单 05 的样本池）决定。`budget_exhausted` 与 `interrupted` 必须按未知处理，不能当成"没有杀棋"。
 
 `vcf_bench.py` 用 `think` 的三种 `vcf_policy` 对比根节点、根+子节点与关闭时的用时、节点数和子查询命中数，并扫描根预算；工单 03 的默认配置就是它实测定下的。
+
+## 教师打标（工单 04）
+
+本地安装 Rapfi 250615 到 `tools/rapfi/`（`tar -xf Rapfi-engine.7z -C tools/rapfi`），身份与哈希固定在 `tools/rapfi.lock.json`。`rapfi_teacher.py` 负责启动、`START/INFO rule 2/BOARD` 同步、读取 `MESSAGE ... Eval` 搜索评分并按行棋方视角解释；mate（`±M<plies>`）、无评分、超时和进程异常分别返回状态。评分与建议着法分开记录，raw 分经 `tanh(score/600)` 归一化为 `teacher-v1` 价值。
+
+`teacher_label.py` 按“执行器校验 → 排除终局 → 排除已证明 VCF → Rapfi 评分 → 过滤 mate/超时/异常 → 落盘”的顺序处理；被过滤的请求也写库用于计数，未知（超时、异常）单独统计且默认不进入训练队列。`teacher_store.py` 是 SQLite 存储：`application_id` + `user_version` 固定格式，`validate()` 同时跑完整性检查与语义检查（行棋方与棋子数一致、accepted 必须有 value、独立采样不得伪造和棋）；截断、更新版本、非 Renju 规则都会明确拒绝。
+
+~~~powershell
+.venv\Scripts\python.exe tools\rapfi_teacher.py about
+.venv\Scripts\python.exe tools\teacher_label.py label "H8,H9,I8,I9"
+.venv\Scripts\python.exe tools\teacher_label.py stats
+.venv\Scripts\python.exe tools\teacher_label.py validate
+~~~
 
 ## 数据格式边界
 

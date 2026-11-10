@@ -65,3 +65,8 @@ desktop.ini
 # Installed skills: content is fetched from the sources pinned in
 # skills-lock.json, so it is installed material, not project source.
 .agents/skills/
+
+# Local Rapfi teacher install (binaries + Renju weights; identity pinned in
+# tools/rapfi.lock.json)
+tools/rapfi/
+

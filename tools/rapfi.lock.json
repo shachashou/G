@@ -1,0 +1,56 @@
+{
+  "format": "gomoku-nnue-teacher-lock",
+  "version": 1,
+  "teacher": "rapfi",
+  "purpose": "Local teacher used by ticket 04 to label startup positions for the value network.",
+  "release": {
+    "tag": "250615",
+    "published": "2025-06-15",
+    "asset": "Rapfi-engine.7z",
+    "asset_url": "https://github.com/dotb1ue/rapfi/releases/download/250615/Rapfi-engine.7z"
+  },
+  "install_dir": "tools/rapfi",
+  "engine": {
+    "file": "pbrain-rapfi-windows-avx2.exe",
+    "sha256": "1e02497433fb765626f954c895b0b92e057ac12a76c76318abe74d4050914e8e",
+    "version": "0.43.01 (clang++ 19.1.5 on Windows SSE41 AVX2)"
+  },
+  "weights": {
+    "renju_black": {
+      "file": "mix9svqrenju_bs15_black.bin.lz4",
+      "sha256": "7ab8c974c30da07717ce6a504616a62ac8c981500503f0ced0fadefd3f46c5ec"
+    },
+    "renju_white": {
+      "file": "mix9svqrenju_bs15_white.bin.lz4",
+      "sha256": "a31f318518d3b5630489054d9eb013fd5353c553999640c2bcfd8d95e6fe4e4e"
+    }
+  },
+  "config": {
+    "file": "config.toml",
+    "sha256": "32b9180c91247541d399ceef62906d5ffeb48e34eb5f261612987633820d5d3c"
+  },
+  "protocol": {
+    "start": "START 15",
+    "rule": "INFO rule 2",
+    "threads": "INFO thread_num 1",
+    "budget": "INFO timeout_turn <ms>",
+    "board": "BOARD / x,y,1|2 ... / DONE",
+    "completion": "read lines until a 'x,y' move reply; MESSAGE lines carry the search score",
+    "score_line": "MESSAGE Depth D1-D2 | Eval V | Time T | PV ...",
+    "score_formats": ["<int>", "+M<plies>", "-M<plies>"],
+    "eval_perspective": "side_to_move",
+    "timeout_margin_ms": 6000
+  },
+  "budget": {
+    "timeout_turn_ms": 800,
+    "threads": 1
+  },
+  "value_contract": {
+    "label_version": "teacher-v1",
+    "raw_perspective": "side_to_move",
+    "normalization": "tanh",
+    "normalization_param": 600.0,
+    "range": [-1.0, 1.0],
+    "note": "Only numeric search scores are normalized. Positive value means the side to move is better. Mate scores (+M/-M) are filtered out, never squashed, and the engine's suggested move is recorded separately from the score."
+  }
+}

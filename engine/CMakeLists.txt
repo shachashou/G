@@ -219,6 +219,20 @@ if(GOMOKU_PYTHON)
   set_tests_properties(gui_vcf_smoke PROPERTIES
     TIMEOUT 180 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+  # Ticket 04: real Rapfi teacher + executor + versioned sample store, and the
+  # offscreen GUI panel. Exit code 77 skips when Rapfi is not installed.
+  add_test(NAME teacher_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/teacher_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>"
+            "${CMAKE_SOURCE_DIR}/tools")
+  set_tests_properties(teacher_tests PROPERTIES TIMEOUT 300 SKIP_RETURN_CODE 77)
+
+  add_test(NAME gui_teacher_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_teacher_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_teacher_smoke PROPERTIES
+    TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   # Ticket 09: full self-play game with NNUE evaluation + bad-weight fallback.
   add_test(NAME nnue_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/nnue_blackbox.py"

@@ -193,7 +193,8 @@ class MainWindow(QMainWindow):
                  registry: str | Path = DEFAULT_REGISTRY,
                  evaluations: str | Path = ROOT / "data" / "evaluations",
                  pool: str | Path = ROOT / "data" / "pool" / "pool.sqlite3",
-                 collection_seed: int | None = None) -> None:
+                 collection_seed: int | None = None,
+                 teacher_store: str | Path = ROOT / "data/teacher/samples.sqlite3") -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
         self._exe = exe
@@ -202,6 +203,7 @@ class MainWindow(QMainWindow):
         self._evaluations = evaluations
         self._pool_path = Path(pool)
         self._collection_seed = collection_seed
+        self._teacher_store_path = Path(teacher_store)
         self._model = str(model) if model else None
         self._startup_error = ""
         if model is None:
@@ -1011,7 +1013,7 @@ class MainWindow(QMainWindow):
             last_move = history[-1][1] * SIZE + history[-1][0]
         game_id = self._game_id
         budget_ms = self.spin_teacher_budget.value()
-        store_path = ROOT / "data" / "teacher" / "samples.sqlite3"
+        store_path = self._teacher_store_path
         exe = self._exe
 
         def worker() -> None:

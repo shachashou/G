@@ -2,14 +2,14 @@
 
 Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"玩一把、收集数据、从0训练、自我训练、历史版本测评"。
 
-**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级，以及持续教师训练闭环；完全无教师自主训练和完整任务恢复仍待实现。
+**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级、持续教师训练，以及完全无教师的胜负自主训练；增量/SIMD 优化和完整任务恢复仍待实现。
 
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md) 和 [09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md) 和 [10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -196,7 +196,7 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 ## 持续教师训练（工单 09）
 
-在 GUI 的「持续教师训练闭环」面板设置容量、启动/新增样本量、每轮优化步数、批大小、运行上限及测评资源，点击「启动教师训练任务」。任务会自动持续采集、打标、训练和测评；无正式模型时采集使用手工评估，首个合格候选按工单 08 验证登记 v0，后续候选挑战现任版本，未通过则继续保留现任。
+在 GUI 的「持续训练：教师 / 自主」面板选择「教师训练」，设置容量、启动/新增样本量、每轮优化步数、批大小、运行上限及测评资源，点击「启动教师训练任务」。任务会自动持续采集、打标、训练和测评；无正式模型时采集使用手工评估，首个合格候选按工单 08 验证登记 v0，后续候选挑战现任版本，未通过则继续保留现任。
 
 - 每盘开始读取并核验正式模型身份，盘中不更换；晋级只影响下一盘采集。候选训练与采集模型分开，训练可继续前一候选的 checkpoint；首次从已有正式版本启动时，用其量化权重初始化训练网络并保留累计训练清单。
 - 采集与训练并行，但训练只读取一个完整 WAL 快照。样本池淘汰不会改变已读取的训练数据，数据身份包含实际内容、提交序号、来源对局、采集模型和标签版本。有限快照按样本写入顺序区分新旧，再按配置混合。
@@ -214,7 +214,34 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 .venv\Scripts\python.exe tools\training_task.py --config tools\teacher-task.example.json
 ~~~
 
-实际小规模结果与测试见[工单 09 验收](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)。该模式持续依赖 Rapfi；完全无教师模式属于工单 10。
+实际小规模结果与测试见[工单 09 验收](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)。教师模式持续依赖 Rapfi。
+
+## 无教师自主训练（工单 10）
+
+已有正式版本后，在同一面板选择模式并点击「启动自主训练任务」：
+
+| 模式 | 新数据 | 本轮训练/验证来源 | 是否调用 Rapfi |
+|---|---|---|---|
+| 教师训练 | 教师评分 | 现有已提交监督 | 是 |
+| 自主过渡 | 正式版本自对弈的真实胜负 | 结果样本 + 历史教师样本；教师每样本损失权重默认 0.25，结果为 1 | 否 |
+| 完全无教师 | 正式版本自对弈的真实胜负 | 只允许 `selfplay_result`，包括验证集 | 否 |
+
+两种自主模式都要求已有正式模型，缺失时明确失败；不会偷偷创建手工对手或恢复教师调用。停止后可显式选择教师模式重新启动。原先教师训练得到的 v0 可以作为初始化权重；“完全无教师”指本轮数据与更新不再读取教师监督，不意味着清除模型过去学过的知识。
+
+- **探索与规则**：每盘固定正式模型，默认中心 7×7 随机开局 4 手；前 16 手有 0.1 概率从权威合法落点中探索，其余使用同一模型搜索。默认每步 30 ms；每盘最多 225 手、总预算 60 秒，配置、种子与实际走法写入完整棋谱。
+- **真实结果**：只有权威执行器判定终局并重放一致后，才原子提交结果标签。黑胜/和棋/白胜统一为黑方绝对值 `+1/0/-1`，白方行棋样本也不取反；模型评分不作为标签。截断、中断、超时、崩溃或非法着法均不伪造结果。
+- **战术边界**：默认过滤已证明 VCF 的采样局面；完整对局、终局与过滤位置仍保留。有限搜索未知不冒充无杀棋证明，结果监督仍来自最终胜负。
+- **混合池隔离**：教师样本按原有池策略保留，完全无教师模式在 SQL 读取端先筛选来源再抽样；按来源计已提交训练增量。自主模式默认至少混合 2 盘训练对局（`min_train_games` 可配置）。为自对弈冻结独立的验证对局成员，同时沿用全局 D4 防泄漏，不重抽旧教师验证集。面板分别显示总池容量和当前模式可用样本。
+- **可追溯性**：`games/*.json` 保存模型身份、逐手探索/搜索、完整结果与异常，pool run 绑定棋谱哈希。训练身份记录标签来源、样本数、归一化/视角、尺度与损失权重，checkpoint 和导出保存模式与谱系。
+- **教师退出证据**：事件 `teacher_exit_evidence` 关联无教师运行、实际监督来源与历史测评报告；只有测评确实晋级才记录相对进步已证明。能运行、样本量大或偶然获胜，都不会自动宣告毕业或棋力提升。
+
+命令行复用同一个调度器，[示例配置](tools/selfplay-task.example.json)以完全无教师模式启动。若要过渡，显式改为 `"mode": "transition"` 并记录 `teacher_weight`。默认仍有采集/训练上限、背压与安全停止：
+
+~~~powershell
+.venv\Scripts\python.exe tools\training_task.py --config tools\selfplay-task.example.json
+~~~
+
+数值检查失败、测评未过或证据不足都保留正式版本；详细验收见[工单 10](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)。
 
 ## 当前代码与目标的差距
 
@@ -225,8 +252,8 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 | 标签 | 已接入 Rapfi 教师（固定版本）与版本化样本存储，区分评分/建议着法/胜负标签 | 持续采集与样本池（工单 05）、结果标签 |
 | 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
 | 推理 | `GMVALUE1` 标量全量参照前向已接入搜索；旧 NNUE 保留 | 第一层增量累加、AVX2 与实际搜索吞吐（工单 11） |
-| 数据与编排 | 有容量上限的样本池、并行持续教师训练及周期晋级 | 无教师胜负监督与完整暂停恢复 |
-| GUI | 对弈、采集、教师打标、训练、模型选择、历史测评、原子晋级与一键教师任务已完成 | 无教师自主训练编排与任务恢复 |
+| 数据与编排 | 有容量上限的样本池、教师/过渡/完全无教师任务及周期晋级 | 完整暂停恢复 |
+| GUI | 对弈、采集、教师打标、训练、模型选择、历史测评、原子晋级与自主任务已完成 | 任务恢复与最终工作台整合 |
 
 现有工具可用于检查和迁移基础能力，不能当作新工作台已经交付。旧权重不视为新网络的兼容模型。
 

@@ -16,16 +16,15 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "trainer"))
-from collect import CollectConfig, collect
 from executor import ExecutorClient
 from model_registry import DEFAULT_REGISTRY, ModelRegistry
-from rapfi_teacher import RapfiTeacher, check_install, load_lock
 from run_support import file_identity, source_identity, write_json
 from sample_pool import SamplePool
 
 
 @dataclass(frozen=True)
 class TaskConfig:
+    mode: str = "teacher"
     engine: str = str(ROOT / "build/engine/gomoku_nnue.exe")
     pool: str = str(ROOT / "data/pool/pool.sqlite3")
     registry: str = str(DEFAULT_REGISTRY)
@@ -35,6 +34,7 @@ class TaskConfig:
     validation_games: int = 2
     min_train_samples: int = 32
     min_validation_samples: int = 1
+    min_train_games: int = 2
     min_new_samples: int = 32
     max_pending_samples: int = 128
     training_sample_limit: int = 512
@@ -59,9 +59,22 @@ class TaskConfig:
         "depth": 2, "max_plies": 80, "opening_plies": 3, "opening_region": 7,
         "sample_every": 3, "budget_ms": 200, "vcf_nodes": 5000, "vcf_plies": 4})
     evaluation: dict = field(default_factory=dict)
+    teacher_weight: float = 0.25
+    selfplay: dict = field(default_factory=dict)
+
+    def label_sources(self):
+        return ["selfplay_result"] if self.mode == "selfplay" else (
+            ["teacher", "selfplay_result"] if self.mode == "transition" else None)
+
+    def source_weights(self):
+        if self.mode == "selfplay":
+            return {"selfplay_result": 1.0}
+        return {"teacher": self.teacher_weight, "selfplay_result": 1.0} if self.mode == "transition" else {}
 
     def validate(self):
-        positive = ("capacity", "validation_games", "min_train_samples", "min_validation_samples",
+        if self.mode not in ("teacher", "transition", "selfplay") or not 0 < self.teacher_weight <= 1:
+            raise ValueError("invalid training mode or teacher history weight")
+        positive = ("capacity", "validation_games", "min_train_samples", "min_validation_samples", "min_train_games",
                     "min_new_samples", "max_pending_samples", "training_sample_limit", "train_steps",
                     "batch_size", "cpu_threads", "max_rounds", "max_games", "max_empty_games", "keep_candidates")
         if any(type(getattr(self, name)) is not int or getattr(self, name) < 1 for name in positive):
@@ -69,6 +82,7 @@ class TaskConfig:
         if (self.capacity < self.min_train_samples + self.min_validation_samples
                 or self.max_pending_samples < self.min_new_samples
                 or self.training_sample_limit < self.min_train_samples
+                or (self.mode != "teacher" and self.training_sample_limit < self.min_train_games)
                 or not 0 <= self.new_ratio <= 1 or not 0 < self.lr <= 1
                 or not 0 < self.max_minutes < float("inf") or not 0 < self.max_idle_s < float("inf")
                 or not 0 <= self.min_round_interval_s < float("inf")
@@ -81,17 +95,27 @@ class TaskConfig:
                    "budget_ms", "vcf_nodes", "vcf_plies"}
         if set(self.collection) - allowed:
             raise ValueError("unsupported collection overrides")
-        c = CollectConfig(**self.collection)
-        if (not 1 <= c.depth <= 12 or not 1 <= c.max_plies <= 225
-                or not 1 <= c.opening_plies <= 8 or c.opening_region not in range(1, 16, 2)
-                or c.opening_plies > c.opening_region ** 2 or c.sample_every < 1
-                or c.budget_ms < 1 or c.vcf_nodes < 1 or c.vcf_plies < 1):
-            raise ValueError("invalid collection resource limits")
+        # Teacher adapter validation/initialization stays outside teacher-free paths.
+        if self.mode != "teacher":
+            from selfplay_data import SelfPlayConfig
+            SelfPlayConfig(**self.selfplay).validate()
+        else:
+            from collect import CollectConfig
+            c = CollectConfig(**self.collection)
+            self._validate_teacher_collection(c)
         from history_evaluation import EvaluationConfig
         EvaluationConfig(**self.evaluation).validate()
         paths = [Path(getattr(self, name)).resolve() for name in ("pool", "registry", "output_root", "evaluations")]
         if len(set(paths)) != len(paths):
             raise ValueError("pool, registry, candidates and evaluation paths must be distinct")
+
+    @staticmethod
+    def _validate_teacher_collection(c):
+        if (not 1 <= c.depth <= 12 or not 1 <= c.max_plies <= 225
+                or not 1 <= c.opening_plies <= 8 or c.opening_region not in range(1, 16, 2)
+                or c.opening_plies > c.opening_region ** 2 or c.sample_every < 1
+                or c.budget_ms < 1 or c.vcf_nodes < 1 or c.vcf_plies < 1):
+            raise ValueError("invalid collection resource limits")
 
 
 class Resources:
@@ -134,10 +158,12 @@ class TeacherDataSource:
     label_source = "teacher"
 
     def __init__(self, task):
+        from rapfi_teacher import load_lock
         self.task = task
         self.identity = load_lock()
 
     def preflight(self):
+        from rapfi_teacher import check_install
         installed = check_install(self.identity)
         if not installed.ok:
             raise ValueError("teacher unavailable: " + installed.summary())
@@ -145,9 +171,11 @@ class TeacherDataSource:
                 "lock": file_identity(ROOT / "tools/rapfi.lock.json")}
 
     def teacher(self):
+        from rapfi_teacher import RapfiTeacher
         return RapfiTeacher(identity=self.identity)
 
     def produce(self, pool, index):
+        from collect import CollectConfig, collect
         task, cfg = self.task, self.task.config
         incumbent = ModelRegistry(cfg.registry).resolve()
         args = ["--value-model", incumbent["path"]] if incumbent else []
@@ -184,7 +212,7 @@ class TrainingTask:
     it need not construct a teacher. Training/evaluation retain their existing
     independent public APIs. Full pause/restart recovery belongs to ticket 12.
     """
-    def __init__(self, config: TaskConfig, *, source_factory=TeacherDataSource,
+    def __init__(self, config: TaskConfig, *, source_factory=None,
                  trainer=None, evaluator=None, progress=None):
         self.config = config
         self.source_factory, self.trainer, self.evaluator = source_factory, trainer, evaluator
@@ -198,7 +226,8 @@ class TrainingTask:
             "directory": str(self.directory), "status": "created", "reason": None,
             "data": {}, "trainer": {}, "evaluation": {}, "rounds": [], "games": 0,
             "consumed_training_samples": 0, "resources": {"cpu_threads": config.cpu_threads,
-                "device": config.device, "collector_workers": 1, "teacher_threads": 1}}
+                "device": config.device, "collector_workers": 1,
+                "teacher_threads": 1 if config.mode == "teacher" else 0}, "mode": config.mode}
         self.producer_done = threading.Event()
         self.producer_error = None
         self.started = None
@@ -229,6 +258,11 @@ class TrainingTask:
     def stop(self):
         self.stop_event.set()
 
+    def data_ready(self, stats):
+        return (stats["train_samples"] >= self.config.min_train_samples
+                and stats["validation_samples"] >= self.config.min_validation_samples
+                and (self.config.mode == "teacher" or stats["train_games"] >= self.config.min_train_games))
+
     def _producer(self, source):
         cfg = self.config
         empty = 0
@@ -236,11 +270,10 @@ class TrainingTask:
             with SamplePool(cfg.pool, create=False) as pool:
                 for index in range(cfg.max_games):
                     while not self.stop_event.is_set():
-                        stats = pool.stats()
+                        stats = pool.stats(cfg.label_sources())
                         with self.lock:
                             consumed = self.state["consumed_training_samples"]
-                        if (stats["train_samples"] >= cfg.min_train_samples
-                                and stats["validation_samples"] >= cfg.min_validation_samples
+                        if (self.data_ready(stats)
                                 and stats["committed_training_samples"] - consumed >= cfg.max_pending_samples):
                             self.update("data", phase="backpressure", metrics=stats)
                             self.stop_event.wait(0.1)
@@ -255,11 +288,14 @@ class TrainingTask:
                         self.event("data_interrupted", game=index + 1, run_id=result.get("run_id"))
                         self.update("data", phase="stopped", metrics=result, totals=pool.stats())
                         break
-                    self.event("data_commit", game=index + 1, source_ids=result.get("source_ids", []),
+                    complete = result.get("game_status", "completed") == "completed"
+                    self.event("data_commit" if complete else "data_incomplete", game=index + 1,
+                        game_status=result.get("game_status"), source_ids=result.get("source_ids", []),
                         run_id=result.get("run_id"), model_id=result.get("collection_model_id"),
                         label_source=source.label_source, commit_sequence=result.get("commit_sequence"))
-                    self.update("data", phase="committed", metrics=result, totals=pool.stats())
-                    if result["validation_samples"] + cfg.min_train_samples > cfg.capacity:
+                    self.update("data", phase="committed" if complete else result["game_status"],
+                                metrics=result, totals=pool.stats(cfg.label_sources()))
+                    if result.get("total_validation_samples", result["validation_samples"]) + cfg.min_train_samples > cfg.capacity:
                         raise ValueError("frozen validation data leaves insufficient training capacity")
                     empty = empty + 1 if not result.get("inserted") else 0
                     if empty >= cfg.max_empty_games:
@@ -324,7 +360,14 @@ class TrainingTask:
             except FileExistsError:
                 lease = None
                 raise ValueError("another training task owns this pool")
-            source = self.source_factory(self)
+            factory = self.source_factory
+            if factory is None:
+                if cfg.mode == "teacher":
+                    factory = TeacherDataSource
+                else:
+                    from selfplay_data import SelfPlayDataSource
+                    factory = SelfPlayDataSource
+            source = factory(self)
             provenance = source.preflight()
             (self.directory / "engine").mkdir()
             self.engine = self.directory / "engine" / Path(cfg.engine).name
@@ -337,7 +380,7 @@ class TrainingTask:
                 "implementation": {path: file_identity(ROOT / path) for path in (
                     "tools/training_task.py", "tools/collect.py", "tools/teacher_label.py",
                     "tools/sample_pool.py", "trainer/value_train.py", "trainer/value_data.py",
-                    "trainer/value_model.py", "tools/history_evaluation.py")},
+                    "trainer/value_model.py", "tools/history_evaluation.py", "tools/selfplay_data.py")},
                 "environment": {"python": sys.version, "torch": str(torch.__version__),
                     "hip": torch.version.hip, "cuda": torch.version.cuda,
                     "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None},
@@ -346,11 +389,12 @@ class TrainingTask:
                 for key, value in (("capacity", cfg.capacity), ("new_ratio", cfg.new_ratio),
                                    ("validation_games", cfg.validation_games)):
                     pool.set_config(key, value)
-                stats = pool.stats()
-                if stats["validation_samples"] + cfg.min_train_samples > cfg.capacity:
+                stats = pool.stats(cfg.label_sources())
+                if stats["total_validation_samples"] + cfg.min_train_samples > cfg.capacity:
                     raise ValueError("frozen validation data leaves insufficient training capacity")
             torch.set_num_threads(cfg.cpu_threads)
-            self.update(status="running", supervision=source.label_source)
+            self.update(status="running", supervision=source.label_source,
+                        training_sources=cfg.label_sources(), source_weights=cfg.source_weights())
             watchdog = threading.Thread(target=self._watchdog, args=(finished,), daemon=True)
             watchdog.start()
             producer = threading.Thread(target=self._producer, args=(source,), daemon=True)
@@ -365,19 +409,20 @@ class TrainingTask:
                 bundle = None
                 while not self.stop_event.is_set():
                     with SamplePool(cfg.pool, create=False) as pool:
-                        stats = pool.stats()
+                        stats = pool.stats(cfg.label_sources())
                     if stats["commit_sequence"] != observed_commit:
                         observed_commit = stats["commit_sequence"]
                         last_change = time.monotonic()
-                    ready = (stats["train_samples"] >= cfg.min_train_samples
-                             and stats["validation_samples"] >= cfg.min_validation_samples)
+                    ready = self.data_ready(stats)
                     fresh = index == 0 or stats["committed_training_samples"] - consumed >= cfg.min_new_samples
                     interval = time.monotonic() - last_round >= cfg.min_round_interval_s
                     if ready and fresh and interval:
                         candidate_data = load_pool(cfg.pool, train_limit=cfg.training_sample_limit,
-                            new_ratio=cfg.new_ratio, seed=cfg.seed + index)
+                            new_ratio=cfg.new_ratio, seed=cfg.seed + index,
+                            label_sources=cfg.label_sources(), source_weights=cfg.source_weights())
                         if (len(candidate_data.train) >= cfg.min_train_samples
                                 and len(candidate_data.validation) >= cfg.min_validation_samples
+                                and (cfg.mode == "teacher" or candidate_data.identity["train_games"] >= cfg.min_train_games)
                                 and candidate_data.identity["samples_sha256"] != last_attempt):
                             bundle = candidate_data
                             break
@@ -397,11 +442,14 @@ class TrainingTask:
                 consumed = bundle.identity["committed_training_samples"]
                 self.update(consumed_training_samples=consumed)
                 incumbent = ModelRegistry(cfg.registry).resolve()
+                if cfg.mode != "teacher" and incumbent is None:
+                    raise ValueError("teacher-free training requires an existing incumbent")
                 output = self.directory / "candidates" / f"round-{index:05d}"
                 parent = last_candidate or incumbent
                 checkpoint = last_candidate["checkpoint"] if last_candidate else None
                 start_step = last_candidate["steps"] if last_candidate else 0
                 lineage = {"task_id": self.task_id, "round": index, "supervision": source.label_source,
+                    "mode": cfg.mode, "source_weights": cfg.source_weights(),
                     "parent": parent, "incumbent_at_training": incumbent,
                     "data_commit_sequence": bundle.identity["commit_sequence"]}
                 train_config = TrainConfig(pool=cfg.pool, output_dir=str(output), seed=cfg.seed + index,
@@ -438,6 +486,8 @@ class TrainingTask:
                         "checkpoint": str(output / "last.pt"), "steps": summary["steps"]}
                     current = ModelRegistry(cfg.registry).resolve()
                     bootstrap = current is None
+                    if cfg.mode != "teacher" and bootstrap:
+                        raise ValueError("incumbent disappeared before teacher-free evaluation")
                     eval_config = EvaluationConfig(**cfg.evaluation)
                     eval_config = replace(eval_config, seed=cfg.seed + 100000 + index,
                                           pairs=1 if bootstrap else eval_config.pairs)
@@ -450,6 +500,11 @@ class TrainingTask:
                         record["evaluation"] = {"run": result["run"], "status": result["status"],
                             "statistics": result["statistics"], "publication": result.get("publication"),
                             "publication_error": result.get("publication_error")}
+                    if cfg.mode != "teacher":
+                        self.event("teacher_exit_evidence", mode=cfg.mode,
+                            task_runs_without_teacher=True, training_sources=bundle.identity["label_sources"],
+                            history_report=result["run"], promoted=bool(result.get("publication")),
+                            relative_progress_proven=bool(result.get("publication")))
                     self.update("evaluation", phase="published" if result.get("publication") else "retained_incumbent",
                         result=record["evaluation"])
                     if result["status"] not in ("completed", "interrupted"):

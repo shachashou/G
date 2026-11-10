@@ -99,15 +99,21 @@ def evaluate(model: ValueNet, samples, device: str, batch_size: int,
     total_loss = 0.0
     total_abs = 0.0
     count = 0
+    total_weight = 0.0
     with torch.no_grad():
-        for x, y in value_data.batches(samples, batch_size, device=device):
+        for offset in range(0, len(samples), batch_size):
+            chosen = samples[offset:offset + batch_size]
+            x, y = value_data.tensors(chosen)
+            x, y = x.to(device), y.to(device)
+            weights = torch.tensor([s.weight for s in chosen], device=device)
             prediction = model(x)
-            loss = value_loss(prediction, y, loss_kind, beta)
-            total_loss += float(loss) * x.shape[0]
+            loss = value_loss(prediction, y, loss_kind, beta, weights)
+            total_loss += float(loss) * float(weights.sum())
+            total_weight += float(weights.sum())
             total_abs += float(torch.abs(prediction - y).sum())
             count += x.shape[0]
     model.train()
-    return {"loss": total_loss / max(1, count),
+    return {"loss": total_loss / max(1e-12, total_weight),
             "mae": total_abs / max(1, count),
             "samples": count}
 
@@ -353,7 +359,8 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
         model.train()
         optimizer.zero_grad()
         prediction = model(x)
-        loss = value_loss(prediction, y, config.loss, config.smooth_l1_beta)
+        weights = torch.tensor([s.weight for s in chosen], device=device)
+        loss = value_loss(prediction, y, config.loss, config.smooth_l1_beta, weights)
         loss.backward()
         optimizer.step()
         completed_steps = step + 1

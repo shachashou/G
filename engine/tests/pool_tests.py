@@ -252,7 +252,12 @@ def run(tmp: Path) -> int:
             check(False, "freestyle rule is rejected")
         except PoolError:
             check(True, "freestyle rule is rejected")
-        pool.commit_game(game)
+        try:
+            pool.commit_game(game)
+            check(False, "unfinished game cannot commit result supervision")
+        except PoolError:
+            check(True, "unfinished game cannot commit result supervision")
+        pool.commit_game(game, final_result="black_win")
         check(pool.counts()["validation_samples"] == 1,
               "committed self-play sample is readable")
 

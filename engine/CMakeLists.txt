@@ -384,5 +384,15 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(gui_training_task_smoke PROPERTIES
     TIMEOUT 300 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  add_test(NAME selfplay_task_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/selfplay_task_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(selfplay_task_tests PROPERTIES TIMEOUT 300)
+  add_test(NAME gui_selfplay_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_selfplay_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_selfplay_smoke PROPERTIES
+    TIMEOUT 300 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 

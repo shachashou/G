@@ -99,6 +99,14 @@
 .venv\Scripts\python.exe tools\training_task.py --config tools\teacher-task.example.json
 ~~~
 
+## 结果自对弈与无教师任务（工单 10）
+
+`selfplay_data.py` 的 `SelfPlayDataSource` 替换教师数据生产，不新建调度循环。`TaskConfig.mode` 为 `teacher` / `transition` / `selfplay`；自主模式不初始化教师适配器，必须从已验证正式版本开始。`MatchEngine` 提供可中断、总回复超时的 Gomocup 传输，裁判和终局重放使用权威执行器。
+
+结果只在完整自然终局后入池；SQL 提交和校验拒绝无终局或与最终胜负不一致的 `selfplay_result`。每盘棋谱保存在任务的 `games/`，采样位置、过滤原因、种子、探索与异常可复查。
+
+`SamplePool` 在读取前按标签来源过滤，并按来源累计提交增量；结果组可冻结自己的验证成员，同时保留原验证身份和全局 D4 隔离。过渡模式明确使用历史教师权重，完全无教师模式训练和验证都只读结果标签。详细配置见[自对弈示例](selfplay-task.example.json)和[根目录说明](../README.md#无教师自主训练工单-10)。
+
 ## 数据格式边界
 
 现有 binpack 是64字节文件头加64字节记录，实际旧格式定义以 C++ 写端和 Python 读端为准。它属于当前实现，不是新数据契约；不能假设能完整表示新标签来源与战术状态。
@@ -112,4 +120,4 @@
 ./.venv/Scripts/python.exe tools/match_runner.py --help
 ~~~
 
-现有选项只描述当前实现。完全无教师训练与完整暂停恢复仍按工单 10 / 12 交付。
+现有选项只描述当前实现。完整暂停恢复仍按工单 12 交付。

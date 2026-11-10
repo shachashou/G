@@ -1,4 +1,4 @@
-"""One-click continuous teacher training using the shared task scheduler."""
+"""Teacher, transition and teacher-free modes using the shared scheduler."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,16 +16,24 @@ class TrainingTaskPanel(QGroupBox):
     published = Signal(str)
 
     def __init__(self, exe, pool, registry, evaluations, output_root, can_start):
-        super().__init__("持续教师训练闭环")
+        super().__init__("持续训练：教师 / 自主")
         self.exe, self.pool, self.registry = exe, pool, registry
         self.evaluations, self.output_root = evaluations, output_root
+        self.default_outputs = {"teacher": str(output_root),
+            "transition": str(Path(output_root).parent / "transition-tasks"),
+            "selfplay": str(Path(output_root).parent / "selfplay-tasks")}
         self.can_start = can_start
         self.messages = queue.Queue()
         self.task = self.thread = self.last_result = None
         layout = QVBoxLayout(self)
-        hint = QLabel("一次启动：采集 → 教师打标 → 候选训练 → 历史测评 → 按条件晋级。采集与训练可并行；每盘固定正式模型，只有新增数据达到要求才再训练。停止保留已提交样本与有效模型。")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItem("教师训练（新增 Rapfi 标签）", "teacher")
+        self.combo_mode.addItem("自主过渡（保留历史教师样本）", "transition")
+        self.combo_mode.addItem("完全无教师（仅真实胜负）", "selfplay")
+        layout.addWidget(self.combo_mode)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
         row = QHBoxLayout()
         row.addWidget(QLabel("任务输出"))
         self.edit_output = QLineEdit(str(output_root))
@@ -64,6 +72,22 @@ class TrainingTaskPanel(QGroupBox):
         row.addWidget(self.spin_lr)
         layout.addLayout(row)
         row = QHBoxLayout()
+        row.addWidget(QLabel("自对弈每步 ms"))
+        self.spin_selfplay_ms = self._spin(1, 60000, 30)
+        row.addWidget(self.spin_selfplay_ms)
+        row.addWidget(QLabel("探索概率"))
+        self.spin_epsilon = QDoubleSpinBox()
+        self.spin_epsilon.setRange(0, 1)
+        self.spin_epsilon.setSingleStep(.05)
+        self.spin_epsilon.setValue(.1)
+        row.addWidget(self.spin_epsilon)
+        row.addWidget(QLabel("历史教师权重"))
+        self.spin_teacher_weight = QDoubleSpinBox()
+        self.spin_teacher_weight.setRange(.01, 1)
+        self.spin_teacher_weight.setValue(.25)
+        row.addWidget(self.spin_teacher_weight)
+        layout.addLayout(row)
+        row = QHBoxLayout()
         self.btn_start = QPushButton("启动教师训练任务")
         self.btn_start.clicked.connect(self.start)
         self.btn_stop = QPushButton("停止任务")
@@ -82,6 +106,21 @@ class TrainingTaskPanel(QGroupBox):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(50)
+        self.combo_mode.currentIndexChanged.connect(self._mode_changed)
+        self._mode_changed()
+
+    def _mode_changed(self):
+        mode = self.combo_mode.currentData()
+        if self.edit_output.text() in self.default_outputs.values():
+            self.edit_output.setText(self.default_outputs[mode])
+        self.hint.setText({
+            "teacher": "采集 → Rapfi 打标 → 候选训练 → 历史测评。尚无模型时可建立 v0；晋级仅影响下一盘。",
+            "transition": "停止新增教师标签；正式版本自对弈得到真实胜负，允许按显式权重混合历史教师样本。需要已有正式版本，这还不是完全无教师更新。",
+            "selfplay": "完全无教师：需要已有正式版本，仅训练/验证完整自对弈的真实胜负；混合池中的教师标签被排除。Rapfi 缺失也可运行，不会自动切回教师。"}[mode])
+        self.btn_start.setText("启动教师训练任务" if mode == "teacher" else "启动自主训练任务")
+        self.spin_teacher_weight.setEnabled(mode == "transition")
+        self.spin_epsilon.setEnabled(mode != "teacher")
+        self.spin_selfplay_ms.setEnabled(mode != "teacher")
 
     @staticmethod
     def _spin(low, high, value):
@@ -93,6 +132,8 @@ class TrainingTaskPanel(QGroupBox):
     def make_config(self):
         from training_task import TaskConfig
         return TaskConfig(engine=str(self.exe), pool=str(self.pool), registry=str(self.registry),
+            mode=self.combo_mode.currentData(), teacher_weight=self.spin_teacher_weight.value(),
+            selfplay={"movetime_ms": self.spin_selfplay_ms.value(), "epsilon": self.spin_epsilon.value()},
             evaluations=str(self.evaluations), output_root=self.edit_output.text().strip(),
             capacity=self.spin_capacity.value(), min_train_samples=self.spin_min_train.value(),
             min_new_samples=self.spin_new.value(), max_pending_samples=max(128, self.spin_new.value()),
@@ -143,9 +184,10 @@ class TrainingTaskPanel(QGroupBox):
         metrics = data.get("totals", data.get("metrics", {}))
         progress = train.get("progress", {})
         current = (evaluation.get("result", {}).get("publication") or state.get("current") or {})
-        lines = [f"采集局数 {state['games']}，候选轮数 {len(state['rounds'])}",
+        lines = [f"模式 {state.get('mode', 'teacher')}，训练来源 {state.get('training_sources')}，权重 {state.get('source_weights')}",
+            f"采集局数 {state['games']}，候选轮数 {len(state['rounds'])}",
             f"池累计生成 {metrics.get('generated', 0)}，有效 {metrics.get('valid', 0)}，入池 {metrics.get('inserted', 0)}",
-            f"池容量 {metrics.get('pool_samples', 0)}/{metrics.get('capacity', '?')}，有效/秒 {metrics.get('effective_per_second', 0):.2f}",
+            f"池容量 {metrics.get('total_pool_samples', metrics.get('pool_samples', 0))}/{metrics.get('capacity', '?')}，可用 {metrics.get('pool_samples', 0)}，有效/秒 {metrics.get('effective_per_second', 0):.2f}",
             f"采集模型 {data.get('version') or data.get('model_id', 'handcrafted')}",
             f"训练 step {progress.get('step', '-')}，loss {progress.get('train_loss', '-')}，val MAE {progress.get('val_mae', '-')}",
             f"正式版本 {current.get('version', '尚未建立')}；资源 {state['resources']}",
@@ -167,6 +209,7 @@ class TrainingTaskPanel(QGroupBox):
             self.btn_start.setEnabled(True)
             self.btn_stop.setEnabled(False)
             self._enable_settings(True)
+            self._mode_changed()
             self.busyChanged.emit(False)
             if kind == "error":
                 self.status.setText("任务失败：" + state)

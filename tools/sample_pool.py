@@ -348,34 +348,54 @@ class SamplePool:
         return {row[0]: int(row[1]) for row in
                 self._conn.execute("SELECT name, value FROM counters")}
 
-    def counts(self) -> dict:
+    @staticmethod
+    def _label_clause(label_sources):
+        if label_sources is None:
+            return "", ()
+        sources = tuple(sorted(set(label_sources)))
+        if not sources or set(sources) - {"teacher", "selfplay_result", "none"}:
+            raise PoolError("invalid supervision sources")
+        return " AND s.label_source IN (" + ",".join("?" for _ in sources) + ")", sources
+
+    def counts(self, label_sources=None) -> dict:
+        clause, params = self._label_clause(label_sources)
         rows = self._conn.execute(
-            "SELECT g.split AS split, COUNT(*) AS n FROM samples s "
+            "SELECT g.split AS split, COUNT(*) AS n, COUNT(DISTINCT g.id) AS games FROM samples s "
             "JOIN games g ON g.id = s.game_id "
-            "WHERE g.status = 'committed' GROUP BY g.split")
+            "WHERE g.status = 'committed'" + clause + " GROUP BY g.split", params)
         sizes = {"train": 0, "validation": 0}
+        games = {"train": 0, "validation": 0}
         for row in rows:
             sizes[row["split"]] = int(row["n"])
+            games[row["split"]] = int(row["games"])
         return {
             "pool_samples": sizes["train"] + sizes["validation"],
             "train_samples": sizes["train"],
             "validation_samples": sizes["validation"],
+            "train_games": games["train"],
+            "validation_game_count": games["validation"],
             "capacity": int(self.config()["capacity"]),
         }
 
-    def stats(self) -> dict:
+    def stats(self, label_sources=None) -> dict:
         config = self.config()
         counters = self.counters()
-        counts = self.counts()
+        counts = self.counts(label_sources)
+        total = self.counts()
+        committed = (counters.get("committed_training_samples", 0) if label_sources is None
+                     else sum(counters.get("committed_training_samples:" + s, 0) for s in set(label_sources)))
         validation = config["validation"].get("source_ids", [])
         runs = self._conn.execute(
             "SELECT COUNT(*) FROM runs").fetchone()[0]
         return {
             **counts,
+            "total_pool_samples": total["pool_samples"],
+            "total_validation_samples": total["validation_samples"],
+            "label_sources": sorted(set(label_sources)) if label_sources is not None else None,
             "generated": counters.get("generated", 0),
             "valid": counters.get("valid", 0),
             "inserted": counters.get("inserted", 0),
-            "committed_training_samples": counters.get("committed_training_samples", 0),
+            "committed_training_samples": committed,
             "commit_sequence": counters.get("commit_sequence", 0),
             "duplicate": counters.get("duplicate", 0),
             "d4_duplicate": counters.get("d4_duplicate", 0),
@@ -396,7 +416,7 @@ class SamplePool:
             "effective_per_second": self._last_rate(),
             "d4_augmentations": 0,
             "runs": int(runs),
-            "utilization": (counts["pool_samples"] / counts["capacity"]
+            "utilization": (total["pool_samples"] / counts["capacity"]
                             if counts["capacity"] else 0.0),
         }
 
@@ -509,7 +529,7 @@ class SamplePool:
         return "inserted"
 
     def commit_game(self, game_id: int, *,
-                    final_result: str | None = None) -> dict:
+                    final_result: str | None = None, validation_group: str | None = None) -> dict:
         """Makes a staged source readable and enforces capacity."""
         if final_result is not None and final_result not in (
                 "black_win", "white_win", "draw"):
@@ -525,11 +545,24 @@ class SamplePool:
             sample_count = self._conn.execute(
                 "SELECT COUNT(*) FROM samples WHERE game_id = ?",
                 (int(game_id),)).fetchone()[0]
+            result_rows = self._conn.execute(
+                "SELECT result_value FROM samples WHERE game_id = ? AND label_source = 'selfplay_result'",
+                (int(game_id),)).fetchall()
+            expected_result = {"black_win": 1.0, "white_win": -1.0, "draw": 0.0}.get(final_result)
+            if result_rows and (expected_result is None or any(r[0] != expected_result for r in result_rows)):
+                raise PoolError("result supervision requires a completed game and matching black-absolute outcome")
             config = self.config()
             validation = config["validation"]
             frozen = list(validation.get("source_ids", []))
+            frozen_count = len(frozen)
+            if validation_group is not None:
+                self._label_clause([validation_group])
+                frozen_count = self._conn.execute(
+                    "SELECT COUNT(*) FROM games g WHERE g.status = 'committed' AND g.split = 'validation' "
+                    "AND EXISTS (SELECT 1 FROM samples s WHERE s.game_id = g.id AND s.label_source = ?)",
+                    (validation_group,)).fetchone()[0]
             if (sample_count > 0
-                    and len(frozen) < int(config.get("validation_games", 0))):
+                    and frozen_count < int(config.get("validation_games", 0))):
                 split = "validation"
                 frozen.append(game["source_id"])
                 validation["source_ids"] = frozen
@@ -587,6 +620,10 @@ class SamplePool:
             self._bump("commit_sequence")
             if split == "train":
                 self._bump("committed_training_samples", sample_count)
+                for source, count in self._conn.execute(
+                        "SELECT label_source, COUNT(*) FROM samples WHERE game_id = ? GROUP BY label_source",
+                        (int(game_id),)).fetchall():
+                    self._bump("committed_training_samples:" + source, count)
             self._conn.execute("COMMIT")
             return {"game_id": int(game_id), "split": split,
                     "samples": sample_count, "evicted": evicted}
@@ -623,7 +660,7 @@ class SamplePool:
 
     # -- read ------------------------------------------------------------
 
-    def training_snapshot(self, *, train_limit=None, new_ratio=None, seed=0) -> dict:
+    def training_snapshot(self, *, train_limit=None, new_ratio=None, seed=0, label_sources=None) -> dict:
         """One coherent WAL snapshot, including split and commit counters."""
         self._conn.execute("BEGIN")
         try:
@@ -631,30 +668,31 @@ class SamplePool:
             if problems:
                 raise PoolError("pool failed validation: " + "; ".join(problems))
             return {"train": self.read_batch(split="train", limit=train_limit,
-                                             new_ratio=new_ratio, seed=seed),
-                    "validation": self.read_batch(split="validation"),
-                    "stats": self.stats()}
+                                             new_ratio=new_ratio, seed=seed, label_sources=label_sources),
+                    "validation": self.read_batch(split="validation", label_sources=label_sources),
+                    "stats": self.stats(label_sources)}
         finally:
             self._conn.execute("ROLLBACK")
 
     def read_batch(self, *, split: str = "train", limit: int | None = None,
-                   seed: int = 0, new_ratio: float | None = None) -> list[dict]:
+                   seed: int = 0, new_ratio: float | None = None, label_sources=None) -> list[dict]:
         """Committed samples from one split; mixed new/old when limited."""
         if split not in ("train", "validation"):
             raise PoolError("split must be train or validation")
-        rows = self._fetch(split)
+        rows = self._fetch(split, label_sources)
         if limit is not None and limit < len(rows):
             ratio = (self.config().get("new_ratio", 0.5)
                      if new_ratio is None else new_ratio)
             rows = self._mix(rows, limit, ratio, seed)
         return rows
 
-    def _fetch(self, split: str) -> list[dict]:
+    def _fetch(self, split: str, label_sources=None) -> list[dict]:
+        clause, params = self._label_clause(label_sources)
         cursor = self._conn.execute(
             "SELECT s.*, g.source_id, g.source_kind, g.final_result,"
             " g.model_id FROM samples s JOIN games g ON g.id = s.game_id "
-            "WHERE g.status = 'committed' AND g.split = ? ORDER BY s.id",
-            (split,))
+            "WHERE g.status = 'committed' AND g.split = ?" + clause + " ORDER BY s.id",
+            (split, *params))
         out = []
         for row in cursor:
             record = dict(row)
@@ -737,13 +775,14 @@ class SamplePool:
             if missing:
                 problems.append(f"missing columns: {', '.join(sorted(missing))}")
             games = self._conn.execute("SELECT * FROM games").fetchall()
+            game_by_id = {g["id"]: g for g in games}
             for game in games:
                 if game["status"] == "committed" and not game["split"]:
                     problems.append(f"game {game['id']}: committed without split")
                 if game["status"] == "committed" and not game["committed_at"]:
                     problems.append(f"game {game['id']}: committed without time")
             for sample in self._conn.execute(
-                    "SELECT s.id, s.board, s.side_to_move, s.d4_key, s.label_source,"
+                    "SELECT s.id, s.game_id, s.board, s.side_to_move, s.d4_key, s.label_source,"
                     " s.value, s.result_value, g.status, g.split "
                     "FROM samples s JOIN games g ON g.id = s.game_id"):
                 cells = list(sample["board"])
@@ -759,6 +798,12 @@ class SamplePool:
                 if sample["label_source"] == "selfplay_result" \
                         and sample["result_value"] is None:
                     problems.append(f"sample {sample['id']}: result without value")
+                if sample["label_source"] == "selfplay_result":
+                    game = game_by_id[sample["game_id"]]
+                    if game["status"] == "committed":
+                        expected = {"black_win": 1.0, "white_win": -1.0, "draw": 0.0}.get(game["final_result"])
+                        if expected is None or sample["result_value"] != expected:
+                            problems.append(f"sample {sample['id']}: missing or inconsistent completed outcome")
             leaked = self._conn.execute(
                 "SELECT COUNT(*) FROM samples s JOIN games g ON g.id = s.game_id "
                 "JOIN validation_keys v ON v.d4_key = s.d4_key "

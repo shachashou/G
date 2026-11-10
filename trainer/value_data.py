@@ -47,6 +47,7 @@ class Sample:
     source_id: str
     label_source: str
     label_version: str
+    weight: float = 1.0
 
     def sparse(self) -> list[int]:
         black = [i for i, c in enumerate(self.cells) if c == 1]
@@ -150,13 +151,15 @@ def check_d4_isolation(train: list[Sample], validation: list[Sample]) -> None:
             f"validation split; refusing to train")
 
 
-def load_pool(pool_path: str | Path, *, train_limit=None, new_ratio=None, seed=0) -> DataBundle:
+def load_pool(pool_path: str | Path, *, train_limit=None, new_ratio=None, seed=0,
+              label_sources=None, source_weights=None) -> DataBundle:
     """Reads the frozen train/validation split from a committed sample pool."""
     path = Path(pool_path)
     if not path.is_file():
         raise ValueError(f"sample pool not found: {path}")
     with SamplePool(path, create=False) as pool:
-        snapshot = pool.training_snapshot(train_limit=train_limit, new_ratio=new_ratio, seed=seed)
+        snapshot = pool.training_snapshot(train_limit=train_limit, new_ratio=new_ratio, seed=seed,
+                                          label_sources=label_sources)
         train_rows = snapshot["train"]
         val_rows = snapshot["validation"]
         stats = snapshot["stats"]
@@ -166,6 +169,13 @@ def load_pool(pool_path: str | Path, *, train_limit=None, new_ratio=None, seed=0
         raise ValueError("pool has no committed validation samples")
     train = [_sample_from_record(row) for row in train_rows]
     validation = [_sample_from_record(row) for row in val_rows]
+    weights = source_weights or {}
+    from dataclasses import replace
+    for source, weight in weights.items():
+        if source not in ("teacher", "selfplay_result") or not math.isfinite(weight) or weight <= 0:
+            raise ValueError("supervision weights must be finite and positive")
+    train = [replace(s, weight=float(weights.get(s.label_source, 1.0))) for s in train]
+    validation = [replace(s, weight=float(weights.get(s.label_source, 1.0))) for s in validation]
     check_d4_isolation(train, validation)
     digest = hashlib.sha256()
     for row in sorted(train_rows + val_rows,
@@ -179,6 +189,17 @@ def load_pool(pool_path: str | Path, *, train_limit=None, new_ratio=None, seed=0
         "train_games": len({s.source_id for s in train}),
         "validation_games": len({s.source_id for s in validation}),
         "label_versions": sorted({s.label_version for s in train + validation}),
+        "label_sources": sorted({s.label_source for s in train + validation}),
+        "source_weights": {s: float(weights.get(s, 1.0)) for s in sorted({r.label_source for r in train + validation})},
+        "label_contracts": {source: {"training_view": "black_absolute", "target_range": [-1, 1],
+            "stored_to_target": "side_to_move_sign" if source == "teacher" else "terminal_result",
+            "normalizations": sorted({str((r.get("normalization"), r.get("normalization_param")))
+                                      for r in train_rows + val_rows if r["label_source"] == source})}
+            for source in sorted({s.label_source for s in train + validation})},
+        "source_counts": {split: {source: sum(s.label_source == source for s in samples)
+            for source in sorted({s.label_source for s in samples})}
+            for split, samples in (("train", train), ("validation", validation))},
+        "value_space": "black-absolute-tanh-v1",
         "samples_sha256": digest.hexdigest(),
         "pool_capacity": stats.get("capacity"),
         "commit_sequence": stats["commit_sequence"],

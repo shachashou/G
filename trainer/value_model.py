@@ -109,9 +109,11 @@ class ValueNet(nn.Module):
 
 
 def value_loss(prediction: Tensor, target: Tensor, kind: str = "mse",
-               beta: float = 1.0) -> Tensor:
+               beta: float = 1.0, weights: Tensor | None = None) -> Tensor:
     if kind == "mse":
-        return torch.mean((prediction - target) ** 2)
-    if kind == "smooth_l1":
-        return torch.nn.functional.smooth_l1_loss(prediction, target, beta=beta)
-    raise ValueError(f"unknown loss {kind!r}")
+        losses = (prediction - target) ** 2
+    elif kind == "smooth_l1":
+        losses = torch.nn.functional.smooth_l1_loss(prediction, target, beta=beta, reduction="none")
+    else:
+        raise ValueError(f"unknown loss {kind!r}")
+    return losses.mean() if weights is None else (losses * weights).sum() / weights.sum()

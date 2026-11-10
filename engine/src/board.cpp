@@ -61,6 +61,13 @@ void Board::undo() {
   sideToMove_ = opponent(sideToMove_);
 }
 
+std::vector<int> Board::moveHistory() const {
+  std::vector<int> out;
+  out.reserve(history_.size());
+  for (const HistoryEntry& e : history_) out.push_back(e.move);
+  return out;
+}
+
 void Board::setCell(int move, Cell c) {
   cells_[move] = c;
 }

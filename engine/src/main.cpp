@@ -2,6 +2,7 @@
 #include <iostream>
 #include <string_view>
 
+#include "executor_protocol.h"
 #include "protocol.h"
 #include "version.h"
 
@@ -16,6 +17,7 @@ void printUsage() {
             << "  --no-vcf             disable VCF solver (M2 baseline for A/B)\n"
             << "  --nnue PATH          NNUE evaluation from a GMNNUE01 file\n"
             << "  --nnue-backend NAME  NNUE backend: avx2 (default) | scalar\n"
+            << "  --executor           JSON-lines authoritative executor (ticket 02)\n"
             << "  --help               show this help\n"
             << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
 }
@@ -24,11 +26,12 @@ void printUsage() {
 
 int main(int argc, char* argv[]) {
   gomoku::EngineConfig cfg;
+  bool executorMode = false;
   for (int i = 1; i < argc; ++i) {
     const std::string_view a(argv[i]);
     if (a == "--version") {
       std::cout << gomoku::kEngineName << ' ' << gomoku::kEngineVersion
-                << " (C++20, MSVC, AVX2) - Renju NNUE engine\n";
+                << " (C++20, AVX2) - Renju NNUE engine\n";
       return 0;
     }
     if (a == "--help") {
@@ -37,6 +40,8 @@ int main(int argc, char* argv[]) {
     }
     if (a == "--random") {
       cfg.random = true;
+    } else if (a == "--executor") {
+      executorMode = true;
     } else if (a == "--no-vcf") {
       cfg.useVcf = false;
     } else if (a == "--depth" && i + 1 < argc) {
@@ -48,6 +53,12 @@ int main(int argc, char* argv[]) {
     } else if (a == "--nnue-backend" && i + 1 < argc) {
       cfg.nnueBackend = argv[++i];
     }
+  }
+  if (executorMode) {
+    // One JSON request per line, one JSON response per line. stdout is the
+    // protocol stream; diagnostics go to stderr.
+    gomoku::ExecutorProtocol protocol(cfg, std::cout);
+    return protocol.run(std::cin);
   }
   // Protocol mode: speak Gomocup on stdin/stdout. No banner — extra output
   // would corrupt the protocol stream.

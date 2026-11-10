@@ -7,12 +7,15 @@ set(ENGINE_CORE_SRC
   src/search.cpp
   src/vcf.cpp
   src/random_player.cpp
-  src/binpack.cpp)
+  src/binpack.cpp
+  src/executor.cpp)
 
 # GomokuNNUE engine target
 add_executable(gomoku_nnue
   src/main.cpp
   src/protocol.cpp
+  src/executor_protocol.cpp
+  src/json.cpp
   ${ENGINE_CORE_SRC})
 target_compile_features(gomoku_nnue PRIVATE cxx_std_20)
 target_include_directories(gomoku_nnue PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -33,6 +36,14 @@ add_executable(board_tests tests/board_tests.cpp ${ENGINE_CORE_SRC})
 target_compile_features(board_tests PRIVATE cxx_std_20)
 target_include_directories(board_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME board_tests COMMAND board_tests)
+
+# Authoritative executor unit tests (ticket 02): illegal requests leave the
+# position untouched, terminal rejection, undo, forbidden-move reasons,
+# replay consistency and the legal-set / candidate-pruning distinction.
+add_executable(executor_tests tests/executor_tests.cpp ${ENGINE_CORE_SRC})
+target_compile_features(executor_tests PRIVATE cxx_std_20)
+target_include_directories(executor_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_test(NAME executor_tests COMMAND executor_tests)
 
 # Renju forbidden-move unit tests (ticket 03)
 add_executable(renju_tests tests/renju_tests.cpp ${ENGINE_CORE_SRC})
@@ -72,10 +83,12 @@ target_include_directories(nnue_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 add_test(NAME nnue_tests COMMAND nnue_tests)
 
 # Protocol black-box test: drives the exe via stdin/stdout.
-# Prefer the project venv (py -3.12 -m venv .venv), never the system Python.
-set(GOMOKU_VENV_PYTHON "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
-if(EXISTS "${GOMOKU_VENV_PYTHON}")
-  set(GOMOKU_PYTHON "${GOMOKU_VENV_PYTHON}")
+# Prefer the project venv (py -3.12 -m venv .venv) on Windows (Scripts/) or
+# POSIX (bin/), never the system Python.
+if(EXISTS "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
+  set(GOMOKU_PYTHON "${CMAKE_SOURCE_DIR}/.venv/Scripts/python.exe")
+elseif(EXISTS "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+  set(GOMOKU_PYTHON "${CMAKE_SOURCE_DIR}/.venv/bin/python")
 else()
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_FOUND)
@@ -86,6 +99,14 @@ if(GOMOKU_PYTHON)
   add_test(NAME protocol_blackbox
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/protocol_blackbox.py"
             "$<TARGET_FILE:gomoku_nnue>")
+
+  # Ticket 02: JSON-lines authoritative executor boundary, driven through
+  # the shared Python client (GUI / collection / referee all use it).
+  add_test(NAME executor_blackbox
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/executor_blackbox.py"
+            "$<TARGET_FILE:gomoku_nnue>"
+            "${CMAKE_SOURCE_DIR}/tools/executor.py")
+  set_tests_properties(executor_blackbox PROPERTIES TIMEOUT 180)
 
   # Match runner self-test (ticket 06): real engine vs random baseline plus
   # illegal-move / timeout / crash anomaly paths driven by a fake engine.

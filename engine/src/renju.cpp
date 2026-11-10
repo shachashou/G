@@ -193,14 +193,20 @@ int countThrees(const Cells& cells, int move) {
 
 }  // namespace
 
-bool isForbiddenMove(const Cells& cells, int move) {
+ForbiddenReason classifyForbidden(const Cells& cells, int move) {
   Cells v = cells;
   v[move] = Cell::Black;
-  if (makesExactlyFive(v, move, Color::Black)) return false;  // five beats foul
-  if (makesOverline(v, move, Color::Black)) return true;
-  if (countFours(v, move) >= 2) return true;
-  if (countThrees(v, move) >= 2) return true;
-  return false;
+  if (makesExactlyFive(v, move, Color::Black)) {
+    return ForbiddenReason::None;  // five beats every foul
+  }
+  if (makesOverline(v, move, Color::Black)) return ForbiddenReason::Overline;
+  if (countFours(v, move) >= 2) return ForbiddenReason::DoubleFour;
+  if (countThrees(v, move) >= 2) return ForbiddenReason::DoubleThree;
+  return ForbiddenReason::None;
+}
+
+bool isForbiddenMove(const Cells& cells, int move) {
+  return classifyForbidden(cells, move) != ForbiddenReason::None;
 }
 
 bool isWin(const Cells& cells, int move, Color c, RuleMode mode) {

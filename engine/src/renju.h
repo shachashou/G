@@ -7,10 +7,17 @@
 namespace gomoku {
 namespace renju {
 
-// True if placing a BLACK stone at `move` violates Renju forbidden-move rules
-// (overline, double-four, double-three). Five takes precedence: a move forming
-// exactly five is never a foul. cells[move] must be Empty.
-//
+// Why placing a BLACK stone at `move` would be a Renju foul. This is the
+// single decision procedure: callers (Board::isPlayable, the executor, the
+// GUI) must not implement a second verdict. Five takes precedence: a move
+// forming exactly five is never a foul. cells[move] must be Empty.
+enum class ForbiddenReason {
+  None,
+  Overline,     // 长连 (>= 6)
+  DoubleFour,   // 四四
+  DoubleThree,  // 三三
+};
+
 // Implementation notes (ticket 03):
 // - Fours are counted as distinct four-stone groups, not windows: the two
 //   five-windows of a straight four share the same four stones and count once.
@@ -19,6 +26,12 @@ namespace renju {
 //   Three counting never recurses further, so evaluation is bounded.
 // - Analysis works on a 225-byte copy of the board; search (ticket 04) will
 //   replace this with incremental bitboard logic if it becomes a bottleneck.
+ForbiddenReason classifyForbidden(const std::array<Cell, kCells>& cells,
+                                  int move);
+
+// True iff classifyForbidden() != None. Kept as a thin wrapper so Board and
+// the search path share exactly the same verdict as the reason reported by
+// the executor.
 bool isForbiddenMove(const std::array<Cell, kCells>& cells, int move);
 
 // Win detection under a rule mode. In Renju black needs EXACTLY five

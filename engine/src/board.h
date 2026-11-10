@@ -57,6 +57,12 @@ class Board {
   GameResult result() const { return result_; }
   int moveCount() const { return moveCount_; }
 
+  // Indices of moves played since the last reset/finalizeSync, oldest first.
+  // A rebuilt BOARD snapshot has no move history. Undo is only valid when
+  // this is non-empty.
+  std::vector<int> moveHistory() const;
+  int lastMove() const { return history_.empty() ? -1 : history_.back().move; }
+
   // True if the stone of color c assumed to sit at `move` belongs to a line
   // of >= 5 (freestyle win semantics).
   static bool createsWin(const std::array<Cell, kCells>& cells, int move, Color c);

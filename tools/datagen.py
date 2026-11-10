@@ -35,7 +35,18 @@ import binpack  # noqa: E402  (trainer/ is on sys.path by design)
 
 from run_support import file_identity  # noqa: E402  (tools/ is on sys.path)
 
-DEFAULT_EXE = ROOT / "build" / "engine" / "Release" / "datagen.exe"
+def _default_datagen_exe() -> Path:
+    # Ninja (the cross-platform generator) puts binaries directly in
+    # build/engine; keep the VS-generator and POSIX locations as fallbacks.
+    candidates = [
+        ROOT / "build" / "engine" / "datagen.exe",
+        ROOT / "build" / "engine" / "Release" / "datagen.exe",
+        ROOT / "build" / "engine" / "datagen",
+    ]
+    return next((c for c in candidates if c.is_file()), candidates[0])
+
+
+DEFAULT_EXE = _default_datagen_exe()
 DEFAULT_TARGET = 100_000
 DEFAULT_BUDGET_HOURS = 1.0
 STATS_RE = re.compile(r"(\w+)=([^\s]+)")

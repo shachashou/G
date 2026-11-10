@@ -1,12 +1,27 @@
-# Training-side dependencies (ticket 08). Install into the project venv:
+# Project environment. Build tools, the desktop GUI and training dependencies
+# all live in the venv; no system-installed cmake is used.
+#
 #   py -3.12 -m venv .venv
-#   .venv\Scripts\python.exe -m pip install -r trainer\requirements.txt ^
+#   .venv\Scripts\python.exe -m pip install -r requirements.txt ^
 #       --extra-index-url https://download.pytorch.org/whl/cu124
 #
-# The +cu124 wheel is the CUDA build for this machine's RTX 4080 SUPER.
-# On a CPU-only machine use `pip install torch==2.6.0 numpy` instead; the
-# training scripts auto-select CUDA when available and stay fully functional
-# on CPU (slower, but all tests and the export path are identical).
+# The +cu124 torch wheel is the CUDA build for this machine's RTX 4080 SUPER.
+# On a CPU-only machine replace that line with `torch==2.6.0`; the training
+# scripts auto-select CUDA when available and stay fully functional on CPU.
+#
+# Build toolchain: cmake / ctest / ninja are cross-platform wheels inside the
+# venv. On Windows the C++ compiler (cl.exe) still comes from Visual Studio;
+# activate its vcvars environment before invoking the venv cmake (see README).
+# On Linux/macOS the system C++ compiler is used directly.
+
+# Build & test (cross-platform wheels, no system cmake needed).
+cmake==3.31.10
+ninja==1.13.2
+
+# Desktop GUI (ticket 02).
+PySide6==6.9.3
+
+# Training.
 numpy>=2.0,<3
 torch==2.6.0+cu124
 tqdm>=4.66,<5

@@ -139,6 +139,42 @@ class HistoryTests(unittest.TestCase):
         self.assertIsNone(challenge["publication"])
         self.assertEqual(before, self.pointer())
 
+    def test_live_previews_change_no_report_or_publication(self):
+        self.initial()
+        before = self.pointer()
+        frames = []
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            report = self.run_eval(model=1, on_position=frames.append)
+        self.assertEqual(report["status"], "completed")
+        self.assertTrue(frames)
+        self.assertEqual({frame["kind"] for frame in frames}, {"evaluation"})
+        self.assertEqual({frame["pair"] for frame in frames}, {0})
+        self.assertTrue({frame["game"] for frame in frames}.issubset({0, 1}))
+        for frame in frames:
+            self.assertIsNotNone(frame["game"])
+            self.assertEqual(len(frame["cells"]), 225)
+            self.assertIn(frame["side_to_move"], ("black", "white"))
+            self.assertIn(frame["result"],
+                          ("ongoing", "black_win", "white_win", "draw"))
+            self.assertEqual(sum(1 for c in frame["cells"] if c), frame["ply"])
+            self.assertIn(frame["engine"], ("A", "B", None))
+            if frame["ply"]:
+                x, y = frame["last_move"]
+                self.assertNotEqual(frame["cells"][y * 15 + x], 0,
+                                    "last_move points at the accepted move")
+        # The neutral frozen opening has no engine label; played moves do.
+        self.assertIn(None, {frame["engine"] for frame in frames})
+        self.assertTrue({"A", "B"}.issubset({frame["engine"] for frame in frames}))
+        self.assertTrue(all(frame["model_id"] for frame in frames if frame["engine"]))
+        # Existing report/publication behaviour is unchanged.
+        self.assertEqual(report["statistics"]["v0"]["valid_games"], 2)
+        self.assertEqual(report["statistics"]["v0"]["completed_pairs"], 1)
+        self.assertIsNone(report["publication"])
+        self.assertEqual(before, self.pointer())
+        manifest = he.read_json(Path(report["run"]) / "manifest.json")
+        self.assertNotIn("on_position", manifest["config"])
+        self.assertNotIn('"cells"', Path(report["run"], "manifest.json").read_text())
+
     def test_pass_failure_and_historical_challenge(self):
         self.initial()
         config = replace(self.cfg, pairs=32, workers=4, report_interval_s=3600)

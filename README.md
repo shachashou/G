@@ -7,9 +7,9 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
-- [实施工单](.scratch/gomoku-nnue/issues/)：已发布13张，每张独立记录验收条件和阻塞关系。
+- [实施工单](.scratch/gomoku-nnue/issues/)：已发布14张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)、[11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)、[12：任务恢复与一站式验收](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md) 和 [13：简化界面（接近苹果手机式）](.scratch/gomoku-nnue/issues/13-simplified-apple-like-ui.md)。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)、[11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)、[12：任务恢复与一站式验收](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md) 和 [13：简化界面（接近苹果手机式）](.scratch/gomoku-nnue/issues/13-simplified-apple-like-ui.md) 和 [14：实时棋盘与三模式简化工作台](.scratch/gomoku-nnue/issues/14-live-board-and-simplified-workbench.md)。
 
 ## 设计方向
 
@@ -276,6 +276,20 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 实现与验收记录见[工单 12](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md)，GUI 操作细节见[客户端说明](gui/README.md)。
 
+## 实时棋盘与三模式界面（工单 14）
+
+客户端进一步收为三个模式：**对弈 / 训练 / 测评**。训练页内部用「采集数据 / 从0训练 / 自我训练」三段切换；模型选择在顶部胶囊，高级参数和任务恢复都在右侧设置 sheet。
+
+- **实时棋盘**：采集、自我训练、测评运行时，左侧棋盘实时镜像其中一盘真实对局，显示 `LIVE`、模式/编号、行棋方和手数；只读，不能替后台落子。
+- **跟随规则**：多 worker 固定跟随一盘，结束/暂停后再切换，绝不混合多盘棋子；测评换色对局有独立 game id，`workers>1` 也不会混盘。
+- **不抢占玩家**：玩家正在下自己的棋时保留玩家棋盘，只在顶部显示 `LIVE` 按钮；玩家空闲时自动展示后台棋盘，任务结束/停止后回到玩家棋盘。
+- **暂停与结束**：暂停冻结并淡化最后一帧显示「已暂停」；训练阶段保留上一盘终局淡化 +「训练中 · step N」；停止后短暂停留约 1.2 秒再恢复玩家棋盘。
+- **数据边界**：225-cell 快照只经可选回调和 GUI 主线程传递，不写入任务状态、事件、报告或样本池；回调 best-effort，不影响比赛。
+- **设置 sheet**：右侧滑出，分组对局/采集/训练/测评/任务与资源；所有旧高级控件原样迁入，默认值、绑定和暂停/恢复/晋级逻辑不变。
+- **主界面**：标题下一行状态 + 内联错误，只有一个主操作；着法记录、指标、报告、技术详情默认收起。训练页有可恢复任务时显示「恢复 N 个未完成任务 →」。
+
+验收见[工单 14](.scratch/gomoku-nnue/issues/14-live-board-and-simplified-workbench.md)，GUI 细节见[客户端说明](gui/README.md)。
+
 ## 并发与磁盘写入
 
 GUI 持续训练默认采用「高吞吐预设（本机）」，也可以点击「少量数据快速启动」恢复小规模参数。预设不修改学习率、每轮优化步数、晋级门槛或已运行任务。应用新配置前先停止旧任务，等待结束再启动；代码更新后需重新打开客户端。
@@ -316,7 +330,7 @@ CLI 仍默认单路采集；32 线程机器可使用[高吞吐示例](tools/high
 | 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
 | 推理 | `GMVALUE1` 第一层增量累加 + AVX2 已接入真实搜索与采集；保留全量标量参照和 `--value-backend reference`；旧 NNUE 保留 | 三后端逐位一致，按实测报告推理与搜索性能 |
 | 数据与编排 | 有容量上限的样本池、教师/过渡/完全无教师任务、周期晋级，以及暂停/检查点恢复、lease/staged 清理和测评续跑 | 保持现有冻结契约与可复查报告 |
-| GUI | 统一标签页覆盖对弈、采集、从0训练、自我训练、测评和模型选择；卡片式简洁布局、单一主操作、高级参数默认折叠；持续任务可暂停、继续、停止并从重启后的任务目录恢复 | 保持界面响应与进程回收 |
+| GUI | 三模式（对弈/训练/测评）与训练三段切换；顶部模型胶囊、单行状态、右侧设置 sheet；后台对局实时镜像到棋盘，只读且不抢占玩家；持续任务可暂停、继续、停止并恢复 | 保持界面响应与进程回收 |
 
 现有工具可用于检查和迁移基础能力，不能当作新工作台已经交付。旧权重不视为新网络的兼容模型。
 

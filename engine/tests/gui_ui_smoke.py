@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ticket 13 offscreen acceptance: calm layout, primary actions, disclosure."""
+"""Ticket 13/14 offscreen acceptance: calm three-mode layout and disclosure."""
 from pathlib import Path
 import sys
 import tempfile
@@ -31,10 +31,11 @@ def main():
         style = app.styleSheet()
         for token in ("#F5F5F7", "#007AFF", "#FFFFFF"):
             assert token in style, token
-        assert window.tabs.count() == 4, window.tabs.count()
+        assert window.tabs.count() == 3, window.tabs.count()
         labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert labels == ["玩一把", "收集数据", "从0训练 / 自我训练", "测评"], labels
+        assert labels == ["对弈", "训练", "测评"], labels
         assert window.header_status.text()
+        assert window.combo_model.count() >= 2
         assert window.findChild(QFrame, "BoardCard") is not None
         scroll = window.findChild(QScrollArea)
         assert scroll is not None
@@ -42,44 +43,49 @@ def main():
             scroll.widget().minimumSizeHint().width(), scroll.viewport().width())
         assert scroll.horizontalScrollBar().maximum() == 0
 
-        # Advanced material is quiet by default, but remains fully functional.
-        assert not window.play_advanced.expanded
-        assert not window.train_advanced.expanded
-        assert not window.training_task_panel.settings.expanded
-        assert not window.history_panel.advanced.expanded
+        # Main mode: one primary action and no advanced form.
+        assert window.btn_new.isVisible()
+        assert window.btn_new.objectName() == "Primary"
+        assert window.btn_stop.objectName() == "Danger"
         assert not window.play_advanced.body.isVisible()
-        window.play_advanced.toggle.click()
+
+        # Training has one internal three-way switch and one visible card.
+        window.tabs.setCurrentIndex(1)
         pump(app, 0.05)
+        assert window.training_mode.buttons["collect"].isVisible()
+        assert window.collection_card.isVisible()
+        assert not window.training_card.isVisible()
+        window.training_mode.set_current("selfplay")
+        window._training_mode_changed("selfplay")
+        pump(app, 0.05)
+        assert window.training_task_panel.isVisible()
+        assert not window.collection_card.isVisible()
+        assert window.training_task_panel.btn_start.objectName() == "Primary"
+        assert not window.training_task_panel.settings.body.isVisible()
+
+        # Evaluation keeps one primary action (登记 v0 is enabled without an
+        # incumbent; 开始测评 is disabled in that state).
+        window.tabs.setCurrentIndex(2)
+        pump(app, 0.05)
+        assert window.history_panel.btn_initial.isVisible()
+        assert window.history_panel.btn_initial.objectName() == "Primary"
+        assert not window.history_panel.advanced.body.isVisible()
+
+        # Everything advanced is in the right-side sheet, not the main page.
+        window.btn_settings.click()
+        pump(app, 0.1)
+        assert window.settings_sheet.visible()
         assert window.play_advanced.body.isVisible()
         assert window.spin_think.isVisible()
         window.spin_think.setValue(777)
         assert window.spin_think.value() == 777
-
-        for index, required in (
-                (0, (window.btn_new, window.btn_stop)),
-                (1, (window.btn_collect_start, window.btn_collect_pause,
-                     window.btn_collect_stop)),
-                (2, (window.btn_train_start, window.training_task_panel.btn_start)),
-                (3, (window.history_panel.btn_initial,
-                     window.history_panel.btn_challenge))):
-            window.tabs.setCurrentIndex(index)
-            pump(app, 0.05)
-            for widget in required:
-                assert widget.isVisible(), (index, widget.objectName(), widget.text())
-        # One primary action per visible mode: the primary pill is blue, the
-        # destructive action is red, and the rest stay quiet.
-        assert window.btn_new.objectName() == "Primary"
-        assert window.btn_stop.objectName() == "Danger"
-        assert window.training_task_panel.btn_start.objectName() == "Primary"
-        assert window.history_panel.btn_challenge.objectName() == "Primary"
-
-        window.tabs.setCurrentIndex(2)
-        window.training_task_panel.settings.toggle.click()
+        window.settings_sheet.show("train")
         pump(app, 0.05)
-        assert window.training_task_panel.settings.body.isVisible()
-        assert window.training_task_panel.spin_steps.isVisible()
-        window.training_task_panel.spin_steps.setValue(33)
-        assert window.training_task_panel.spin_steps.value() == 33
+        assert window.train_advanced.body.isVisible()
+        assert window.spin_train_steps.isVisible()
+        window.settings_sheet.hide()
+        pump(app, 0.05)
+        assert not window.settings_sheet.visible()
 
         window.close()
         app.processEvents()

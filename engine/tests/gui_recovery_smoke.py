@@ -66,8 +66,9 @@ def main():
                                        evaluations=root / "evaluations")
         window.show()
         labels = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        for expected in ("玩一把", "收集数据", "从0训练 / 自我训练", "测评"):
-            assert expected in labels, labels
+        assert labels == ["对弈", "训练", "测评"], labels
+        window.tabs.setCurrentIndex(1)
+        assert window.training_mode.current() in ("collect", "fromzero", "selfplay")
         panel = window.training_task_panel
         config = configure(panel, root)
         panel.btn_start.click()

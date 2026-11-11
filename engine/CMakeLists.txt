@@ -405,6 +405,13 @@ if(GOMOKU_PYTHON)
   set_tests_properties(gui_ui_smoke PROPERTIES
     TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+  # Ticket 14: read-only live mirror of a background game.
+  add_test(NAME gui_live_board_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_live_board_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_live_board_smoke PROPERTIES
+    TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   add_test(NAME run_support_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_support_tests.py")
   set_tests_properties(run_support_tests PROPERTIES TIMEOUT 30)

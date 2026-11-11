@@ -19,9 +19,10 @@ from ui_components import CollapsibleSection, mark_button
 class HistoryPanel(QGroupBox):
     busyChanged = Signal(bool)
     published = Signal(str)
+    previewReceived = Signal(dict)
 
     def __init__(self, exe, registry, output_root, can_start):
-        super().__init__("测评与晋级")
+        super().__init__("运行")
         self.exe, self.registry, self.output_root = exe, registry, output_root
         self.can_start = can_start
         self.thread = None
@@ -77,7 +78,7 @@ class HistoryPanel(QGroupBox):
         hint.setObjectName("Caption")
         advanced_layout.addWidget(hint)
         self.advanced = CollapsibleSection("测评参数与对手", advanced_layout)
-        layout.addWidget(self.advanced)
+        self.advanced.embed()
         self.btn_initial = QPushButton("登记 v0")
         self.btn_initial.clicked.connect(lambda: self.start(True))
         self.btn_challenge = QPushButton("开始测评")
@@ -110,8 +111,7 @@ class HistoryPanel(QGroupBox):
         layout.addWidget(self.status)
         self.report = QTextEdit()
         self.report.setReadOnly(True)
-        self.report.setMaximumHeight(170)
-        layout.addWidget(self.report)
+        self.report.setMaximumHeight(320)
         row = QHBoxLayout()
         self.btn_current = QPushButton("使用当前正式版本")
         self.btn_current.clicked.connect(self.use_current)
@@ -192,6 +192,7 @@ class HistoryPanel(QGroupBox):
                     output_root=self.output_root, config=config,
                     opponents=[] if resume_run is not None else opponents,
                     bootstrap=initial, stop_event=stop,
+                    on_position=lambda item: self.messages.put(("preview", item)),
                     progress=lambda item: self.messages.put(("progress", item)))
                 if resume_run is not None:
                     kwargs["resume_run"] = resume_run
@@ -229,6 +230,9 @@ class HistoryPanel(QGroupBox):
                 kind, item = self.messages.get_nowait()
             except queue.Empty:
                 return
+            if kind == "preview":
+                self.previewReceived.emit(item)
+                continue
             if kind == "progress":
                 self.status.setText(f"测评：{item['opponent']}，{item['games']}/{item['total']} 局")
                 continue

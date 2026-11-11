@@ -10,7 +10,7 @@ import threading
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit, QVBoxLayout)
+    QLabel, QLineEdit, QPushButton, QSpinBox, QTextEdit, QVBoxLayout, QWidget)
 
 from ui_components import CollapsibleSection, mark_button
 
@@ -18,9 +18,12 @@ from ui_components import CollapsibleSection, mark_button
 class TrainingTaskPanel(QGroupBox):
     busyChanged = Signal(bool)
     published = Signal(str)
+    previewReceived = Signal(dict)
+    stateChanged = Signal(dict)
+    recoverableChanged = Signal(int)
 
     def __init__(self, exe, pool, registry, evaluations, output_root, can_start):
-        super().__init__("自我训练")
+        super().__init__("运行")
         self.exe, self.pool, self.registry = exe, pool, registry
         self.evaluations, self.output_root = evaluations, output_root
         self.default_outputs = {"teacher": str(output_root),
@@ -118,7 +121,7 @@ class TrainingTaskPanel(QGroupBox):
         row.addWidget(self.spin_teacher_weight)
         settings_layout.addLayout(row)
         self.settings = CollapsibleSection("任务与资源设置", settings_layout)
-        layout.addWidget(self.settings)
+        self.settings.embed()
         row = QHBoxLayout()
         self.btn_start = QPushButton("启动教师训练任务")
         self.btn_start.clicked.connect(self.start)
@@ -137,6 +140,10 @@ class TrainingTaskPanel(QGroupBox):
                        self.btn_stop):
             row.addWidget(button)
         layout.addLayout(row)
+        self.recovery_widget = QWidget()
+        recovery_layout = QVBoxLayout(self.recovery_widget)
+        recovery_layout.setContentsMargins(0, 0, 0, 0)
+        recovery_layout.setSpacing(6)
         row = QHBoxLayout()
         row.addWidget(QLabel("恢复已中断任务"))
         self.combo_recover = QComboBox()
@@ -148,7 +155,7 @@ class TrainingTaskPanel(QGroupBox):
         self.btn_recover = QPushButton("恢复所选任务")
         self.btn_recover.clicked.connect(self.resume_selected)
         row.addWidget(self.btn_recover)
-        layout.addLayout(row)
+        recovery_layout.addLayout(row)
         self.btn_bootstrap = QPushButton("先建立 v0：切换到教师训练")
         self.btn_bootstrap.clicked.connect(self._choose_teacher)
         mark_button(self.btn_bootstrap, "quiet")
@@ -159,8 +166,7 @@ class TrainingTaskPanel(QGroupBox):
         layout.addWidget(self.status)
         self.metrics = QTextEdit()
         self.metrics.setReadOnly(True)
-        self.metrics.setMaximumHeight(170)
-        layout.addWidget(self.metrics)
+        self.metrics.setMaximumHeight(260)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll)
         self.timer.start(50)
@@ -263,6 +269,7 @@ class TrainingTaskPanel(QGroupBox):
 
     def _start_worker(self, task, message: str):
         self.task = task
+        task.preview = lambda payload: self.messages.put(("preview", payload))
         self.last_result = None
         self.busyChanged.emit(True)
         self.btn_start.setEnabled(False)
@@ -340,6 +347,7 @@ class TrainingTaskPanel(QGroupBox):
         self.btn_recover.setEnabled(bool(self._recoverable)
                                     and self.thread is None
                                     and self.can_start())
+        self.recoverableChanged.emit(len(self._recoverable))
 
     def resume_selected(self):
         if self.thread is not None or not self.can_start():
@@ -361,8 +369,18 @@ class TrainingTaskPanel(QGroupBox):
     def _enable_settings(self, enabled):
         self.btn_throughput.setEnabled(enabled)
         self.btn_quick.setEnabled(enabled)
-        for widget in self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox) + self.findChildren(QComboBox) + self.findChildren(QLineEdit):
+        widgets = (self.findChildren(QSpinBox) + self.findChildren(QDoubleSpinBox)
+                   + self.findChildren(QComboBox) + self.findChildren(QLineEdit)
+                   + self.settings.findChildren(QSpinBox)
+                   + self.settings.findChildren(QDoubleSpinBox)
+                   + self.settings.findChildren(QComboBox)
+                   + self.settings.findChildren(QLineEdit)
+                   + self.recovery_widget.findChildren(QComboBox)
+                   + self.recovery_widget.findChildren(QPushButton))
+        for widget in widgets:
             widget.setEnabled(enabled)
+        self.btn_quick.setEnabled(enabled)
+        self.btn_throughput.setEnabled(enabled)
 
     def stop(self):
         if self.task:
@@ -411,9 +429,13 @@ class TrainingTaskPanel(QGroupBox):
                 kind, state = self.messages.get_nowait()
             except queue.Empty:
                 return
+            if kind == "preview":
+                self.previewReceived.emit(state)
+                continue
             if kind != "error":
                 self.show_state(state)
             if kind == "state":
+                self.stateChanged.emit(state)
                 continue
             self.thread = None
             self.btn_start.setEnabled(True)

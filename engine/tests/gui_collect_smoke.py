@@ -72,6 +72,8 @@ def main():
     window.spin_collect_capacity.setValue(60)
     window.spin_collect_budget.setValue(150)
     window._start_collection()
+    check(wait_for(app, lambda: window._preview is not None, 30),
+          "collection publishes a live board preview")
     finished = wait_for(app, lambda: "已完成" in window.collect_label.text()
                         or "已停止" in window.collect_label.text(), 120)
     check(finished, "first collection run finished")

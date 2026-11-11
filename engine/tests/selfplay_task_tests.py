@@ -98,8 +98,8 @@ class SelfPlayTests(unittest.TestCase):
         ResultEngine.mode = "black_win"
     def tearDown(self):
         self.temp.cleanup()
-    def source(self, mode=None):
-        task = TrainingTask(self.cfg)
+    def source(self, mode=None, preview=None):
+        task = TrainingTask(self.cfg, preview=preview)
         task.started = __import__('time').monotonic()
         task.directory.mkdir(parents=True)
         task.engine = Path(EXE)
@@ -173,6 +173,55 @@ class SelfPlayTests(unittest.TestCase):
                 events = [json.loads(line) for line in (Path(result["directory"])/"events.jsonl").read_text().splitlines()]
                 self.assertTrue(any(e["event"] == "data_incomplete" for e in events))
                 self.assertFalse(any(e["event"] == "data_commit" for e in events))
+
+    def test_live_previews_are_optional_and_never_persisted(self):
+        # publish_preview only forwards a copy; it never touches state/events.
+        task = TrainingTask(self.cfg)
+        before = task.snapshot()
+        seen = []
+        task.preview = seen.append
+        payload = {"kind": "selfplay", "cells": [0] * 225, "side_to_move": "black",
+                   "last_move": None, "ply": 0, "result": "ongoing", "game": 1,
+                   "pair": None, "engine": None, "model_id": "m", "worker": None}
+        task.publish_preview(payload)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(task.snapshot(), before)
+        self.assertFalse((task.directory / "state.json").exists())
+        self.assertFalse((task.directory / "events.jsonl").exists())
+        seen[0]["cells"].clear()
+        self.assertEqual(payload["cells"], [0] * 225, "the preview payload is copied")
+
+        frames = []
+        from history_evaluation_tests import ScriptedEngine
+        ScriptedEngine.mode = "win"
+        config = replace(self.cfg, max_games=4, max_rounds=1,
+                         selfplay={**self.cfg.selfplay, "opening_plies": 2,
+                                   "epsilon": 0})
+        with patch.object(sp, "MatchEngine", ResultEngine), \
+                patch.object(he, "MatchEngine", ScriptedEngine):
+            result = TrainingTask(config, preview=frames.append).run()
+        self.assertEqual(result["status"], "completed", result["reason"])
+        kinds = {frame["kind"] for frame in frames}
+        selfplay = [frame for frame in frames if frame["kind"] == "selfplay"]
+        evaluation = [frame for frame in frames if frame["kind"] == "evaluation"]
+        self.assertEqual(kinds, {"selfplay", "evaluation"})
+        self.assertTrue(selfplay)
+        self.assertTrue(evaluation)
+        self.assertTrue({1, 2}.issubset({frame["game"] for frame in selfplay}))
+        for frame in frames:
+            self.assertEqual(len(frame["cells"]), 225)
+            self.assertIn(frame["side_to_move"], ("black", "white"))
+            self.assertEqual(sum(1 for c in frame["cells"] if c), frame["ply"])
+            self.assertIn(frame["result"],
+                          ("ongoing", "black_win", "white_win", "draw"))
+        self.assertTrue(all(frame["model_id"] for frame in selfplay))
+        self.assertTrue(any(frame["engine"] in ("A", "B") for frame in evaluation))
+        self.assertTrue(all(frame["model_id"] for frame in evaluation if frame["engine"]))
+        directory = Path(result["directory"])
+        for name in ("state.json", "events.jsonl"):
+            text = (directory / name).read_text()
+            self.assertNotIn('"cells"', text)
+            self.assertNotIn("side_to_move", text)
 
     def test_requires_existing_incumbent(self):
         result = TrainingTask(replace(self.cfg, registry=str(self.root / "no-registry"))).run()

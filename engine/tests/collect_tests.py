@@ -70,13 +70,17 @@ def run(tmp: Path, identity) -> int:
                            vcf_nodes=5000, vcf_plies=4, seed=5,
                            model_id="test-handcrafted")
     teacher = StubTeacher(identity)
+    previews = []
+    updates = []
     with SamplePool(pool_path, capacity=60) as pool:
         pool.set_config("validation_games", 1)
         pool.set_config("dedup_d4", True)
         game_client = ExecutorClient(EXE)
         label_client = ExecutorClient(EXE)
         try:
-            summary = collect(pool, config, game_client, label_client, teacher)
+            summary = collect(pool, config, game_client, label_client, teacher,
+                              progress=updates.append,
+                              on_position=previews.append)
         finally:
             game_proc = game_client._proc
             label_proc = label_client._proc
@@ -105,6 +109,35 @@ def run(tmp: Path, identity) -> int:
               or summary["pool_samples"] <= summary["capacity"],
               "capacity is respected")
         check(pool.validate() == [], "the collected pool validates")
+
+        print("[live previews]")
+        check(bool(previews), "collect emits optional live board previews")
+        check(all(p["kind"] == "collect" for p in previews),
+              "previews identify the collector source")
+        check(all(len(p["cells"]) == 225 for p in previews),
+              "previews carry the complete executor board")
+        check(all(sum(1 for c in p["cells"] if c) == p["ply"] for p in previews),
+              "preview ply matches the stones on the board")
+        check(all(p["last_move"] and p["cells"][p["last_move"][1] * SIZE + p["last_move"][0]]
+                  for p in previews),
+              "previews carry the move just played")
+        check(all(p["result"] in ("ongoing", "black_win", "white_win", "draw")
+                  for p in previews), "previews use authoritative result names")
+        check(all(p["model_id"] == config.model_id and p["pair"] is None
+                  and p["engine"] is None and p["worker"] is None for p in previews),
+              "collector previews carry model identity only")
+        by_game = {}
+        for frame in previews:
+            by_game.setdefault(frame["game"], []).append(frame)
+        check(set(by_game) == {1, 2},
+              "previews are labelled with the run's 1-based game index")
+        check(all([f["ply"] for f in frames] == list(range(1, len(frames) + 1))
+                  for frames in by_game.values()),
+              "each game's previews count accepted plies from one")
+        check(any(update.get("games_done") == 2 for update in updates),
+              "aggregate progress still reports every completed game")
+        check(all("cells" not in update for update in updates),
+              "aggregate progress never carries board cells")
 
         train = pool.read_batch(split="train")
         validation = pool.read_batch(split="validation")
@@ -137,9 +170,11 @@ def run(tmp: Path, identity) -> int:
 
         game_client = ExecutorClient(EXE)
         label_client = ExecutorClient(EXE)
+        stop_previews = []
         try:
             stopped = collect(pool, second, game_client, label_client, teacher,
-                              stop_event=stop, progress=progress)
+                              stop_event=stop, progress=progress,
+                              on_position=stop_previews.append)
         finally:
             game_proc = game_client._proc
             label_proc = label_client._proc
@@ -153,6 +188,8 @@ def run(tmp: Path, identity) -> int:
               "stop closes both executor processes")
         check(pool.validate() == [], "pool still validates after a stop")
         check(pool.stats()["runs"] == 2, "the stopped run is recorded")
+        check(stop_previews and all(p["game"] == 1 for p in stop_previews),
+              "a stop ends previews with the interrupted game")
 
     print()
     if failures:

@@ -7,7 +7,7 @@ import random
 import time
 
 from executor import ExecutorClient
-from history_evaluation import MatchEngine, verify_about
+from history_evaluation import MatchEngine, position_payload, verify_about
 from match_runner import EngineFailure, EngineSpec
 from model_registry import ModelRegistry
 from run_support import file_identity, write_json
@@ -85,6 +85,10 @@ class SelfPlayDataSource:
         generated = inserted = 0
         game_id = None
         record_written = False
+        # Live snapshots stay best effort: TrainingTask.publish_preview copies
+        # the payload and never stores it. A task-like object without the hook
+        # simply gets no previews.
+        publish_preview = getattr(task, "publish_preview", None)
         task.event("game_snapshot", game=index + 1, model_id=incumbent["model_id"],
                    version=incumbent["version"], sha256=incumbent["sha256"], teacher_calls=0)
         task.update("data", phase="selfplay", game=index + 1,
@@ -135,6 +139,10 @@ class SelfPlayDataSource:
                         raise EngineFailure("illegal-move", str(response.get("reason", response)))
                     state = response
                     record["moves"].append({"move": [x, y], "kind": kind})
+                    if publish_preview is not None:
+                        publish_preview(position_payload(
+                            "selfplay", state, (x, y), game=index + 1,
+                            model_id=incumbent["model_id"]))
                     if state["result"] != "ongoing":
                         record["final_result"] = state["result"]
                         record["result_value"] = RESULTS[state["result"]]

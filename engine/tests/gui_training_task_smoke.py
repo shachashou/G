@@ -57,6 +57,9 @@ def main():
         assert window._phase == "continuous"
         assert not panel.btn_start.isEnabled()
         assert not panel.spin_steps.isEnabled()
+        assert wait(app, lambda: window._preview is not None, 60), \
+            "background collection must publish a live board preview"
+        assert len(window._preview["cells"]) == 225
         window._new_game()
         assert "持续训练运行中" in window.error_label.text()
         window.history_panel.start(False)

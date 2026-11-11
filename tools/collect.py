@@ -51,6 +51,34 @@ from teacher_label import label_position  # noqa: E402
 SIZE = 15
 
 
+def position_payload(kind: str, state: dict, last_move,
+                     *, game: int | None = None, pair: int | None = None,
+                     engine: str | None = None, model_id: str | None = None,
+                     worker: int | None = None) -> dict:
+    """One optional live-board snapshot in the shared ticket-14 shape.
+
+    The payload is derived from an accepted executor response only; it is
+    never stored in the sample pool, task state or task events.
+    """
+    return {"kind": kind, "cells": list(state["cells"]),
+            "side_to_move": state["side_to_move"],
+            "last_move": (None if last_move is None
+                          else [int(last_move[0]), int(last_move[1])]),
+            "ply": int(state["move_count"]), "result": state["result"],
+            "game": game, "pair": pair, "engine": engine,
+            "model_id": model_id, "worker": worker}
+
+
+def emit_position(on_position, payload: dict) -> None:
+    """Best-effort delivery; a preview consumer must never disturb collection."""
+    if on_position is None:
+        return
+    try:
+        on_position(payload)
+    except Exception:
+        pass
+
+
 @dataclass
 class CollectConfig:
     games: int = 4
@@ -78,8 +106,15 @@ class CollectConfig:
 
 def play_game(game_client: ExecutorClient, config: CollectConfig,
               rng: random.Random,
-              stop_event: threading.Event | None) -> tuple[list[tuple], str | None]:
-    """Plays one engine game; returns sampled positions and the result."""
+              stop_event: threading.Event | None,
+              on_position=None) -> tuple[list[tuple], str | None]:
+    """Plays one engine game; returns sampled positions and the result.
+
+    ``on_position`` receives an optional :func:`position_payload` after every
+    accepted move. It is only called from this thread, after the executor has
+    already replied, so it can never re-enter an executor request. The game
+    index is unknown here; :func:`collect` adds it.
+    """
     state = game_client.new_game("renju")
     positions: list[tuple] = []
     legal = [tuple(p) for p in game_client.legal_moves().get("moves", [])]
@@ -102,6 +137,9 @@ def play_game(game_client: ExecutorClient, config: CollectConfig,
         if not response.get("ok"):
             raise ExecutorError(f"engine move rejected: {response}")
         state = response
+        if on_position is not None:
+            emit_position(on_position, position_payload(
+                "collect", state, (x, y), model_id=config.model_id))
         legal = [tuple(p) for p in game_client.legal_moves().get("moves", [])]
         if (ply >= config.opening_plies
                 and (ply - config.opening_plies) % max(1, config.sample_every) == 0):
@@ -114,8 +152,13 @@ def collect(pool: SamplePool, config: CollectConfig,
             game_client: ExecutorClient, label_client: ExecutorClient,
             teacher, stop_event: threading.Event | None = None,
             pause_event: threading.Event | None = None,
-            progress=None) -> dict:
-    """Runs one collection run; caller owns the clients/teacher lifecycle."""
+            progress=None, on_position=None) -> dict:
+    """Runs one collection run; caller owns the clients/teacher lifecycle.
+
+    ``on_position`` receives one :func:`position_payload` per accepted move,
+    tagged with this run's 1-based game index. Snapshots are optional and are
+    never written to the pool, task state or task events.
+    """
     run_id = pool.start_run(config.snapshot())
     started = time.monotonic()
     generated = 0
@@ -167,8 +210,15 @@ def collect(pool: SamplePool, config: CollectConfig,
                      f"{index:04d}-{uuid.uuid4().hex[:8]}")
         game_id = pool.begin_game(source_id, kind="selfplay",
                                   model_id=config.model_id, rule="renju")
+        game_preview = None
+        if on_position is not None:
+            def game_preview(payload, _game=index + 1):
+                # play_game only knows the board; the run knows the game.
+                payload["game"] = _game
+                on_position(payload)
         try:
-            positions, result = play_game(game_client, config, rng, stop_event)
+            positions, result = play_game(game_client, config, rng, stop_event,
+                                          game_preview)
             accepted = []
             for cells, side, ply in positions:
                 generated += 1

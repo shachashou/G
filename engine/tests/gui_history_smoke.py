@@ -45,6 +45,8 @@ def main():
         panel.btn_initial.click()
         assert window._phase == "evaluating"
         assert not panel.btn_initial.isEnabled()
+        assert pump_until(app, lambda: window._preview is not None, 30), \
+            "evaluation must publish a live board preview"
         window._new_game()
         assert "测评运行中" in window.error_label.text()
         assert pump_until(app, lambda: panel.thread is None)

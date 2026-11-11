@@ -95,6 +95,8 @@
 - 暂停在安全边界生效：采集在整盘之间、训练在优化步边界保存含模型/优化器/步数/Python RNG 状态的 `last.pt`、测评在整对边界中断。每轮开始前把实际训练/验证样本与池提交身份冻结为 `rounds/round-NNNNN-bundle.json`；恢复时使用该 bundle，而不是重新从变化的池中抽样，并冻结验证集、价值契约、模型血统和测评配置。
 - `resume_from_directory()` 要求目录内 `manifest.json` 的配置与任务完全一致，引擎副本哈希、检查点架构/数据身份、监督来源兼容；配置或文件变化会明确拒绝。重启时若旧 lease 的 PID 已不存在，由同一任务接管并清理 staged 对局；`next_game` 持久化，避免重复对局身份。
 - 中断的测评复用原 run 目录和冻结开局整对重做；如果同一候选已是现任版本，报告 `candidate already current`，不会重复发布版本。
+- 实时棋盘快照是可选回调：`collect(..., on_position=...)`、`evaluate(..., on_position=...)`，以及 `TrainingTask(preview=...)` / `publish_preview()`。payload 只含 kind/cells/side/last_move/ply/result/game/pair/engine/model_id，不写入 state/event/manifest/report/样本池；回调异常不会影响任务。
+- 采集/自我训练使用 1-based 全局 game；测评使用唯一 `pair*2 + colour` game 编号，并行换色对局不会混淆。GUI 只跟随一盘，多 worker 不混合。
 
 默认值与操作见[根目录说明](../README.md#持续教师训练工单-09)，所有可配置字段见[示例 JSON](teacher-task.example.json)：
 

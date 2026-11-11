@@ -32,6 +32,34 @@ class EvaluationError(ValueError):
     pass
 
 
+def position_payload(kind: str, state: dict, last_move,
+                     *, game: int | None = None, pair: int | None = None,
+                     engine: str | None = None, model_id: str | None = None,
+                     worker: int | None = None) -> dict:
+    """One optional live-board snapshot in the shared ticket-14 shape.
+
+    The payload is derived from an accepted referee response only; it is never
+    written into the sealed manifest/report or any training data.
+    """
+    return {"kind": kind, "cells": list(state["cells"]),
+            "side_to_move": state["side_to_move"],
+            "last_move": (None if last_move is None
+                          else [int(last_move[0]), int(last_move[1])]),
+            "ply": int(state["move_count"]), "result": state["result"],
+            "game": game, "pair": pair, "engine": engine,
+            "model_id": model_id, "worker": worker}
+
+
+def emit_position(on_position, payload: dict) -> None:
+    """Best-effort delivery; a preview consumer must never disturb a match."""
+    if on_position is None:
+        return
+    try:
+        on_position(payload)
+    except Exception:
+        pass
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -227,7 +255,14 @@ def verify_about(line: str, model: dict):
 
 def play_pair_game(engine_path: Path, candidate: dict, opponent: dict,
                    opening: list, config: EvaluationConfig, pair: int,
-                   a_black: bool, stop: threading.Event) -> dict:
+                   a_black: bool, stop: threading.Event,
+                   on_position=None) -> dict:
+    """Plays one colour of a frozen opening pair.
+
+    ``on_position`` receives an optional :func:`position_payload` after every
+    accepted referee move, including the neutral frozen opening (no engine
+    label there). It never persists board cells.
+    """
     started = time.monotonic()
     record = {"pair": pair, "a_color": "black" if a_black else "white",
               "opening": opening, "moves": [], "anomalies": [], "about": {},
@@ -239,10 +274,14 @@ def play_pair_game(engine_path: Path, candidate: dict, opponent: dict,
         with ExecutorClient(engine_path) as referee:
             state = referee.new_game("renju")
             for x, y in opening:
-                state = referee.play(x, y)
-                if not state.get("ok") or state["result"] != "ongoing":
+                response = referee.play(x, y)
+                if not response.get("ok") or response["result"] != "ongoing":
                     raise EvaluationError("invalid or terminal frozen opening")
+                state = response
                 record["moves"].append([x, y])
+                emit_position(on_position, position_payload(
+                    "evaluation", state, (x, y), pair=pair,
+                    game=pair * 2 + (0 if a_black else 1)))
             for label, model in (("A", candidate), ("B", opponent)):
                 active = label
                 args = [str(engine_path), "--value-model", model["path"],
@@ -270,6 +309,10 @@ def play_pair_game(engine_path: Path, candidate: dict, opponent: dict,
                     raise EngineFailure("illegal-move", f"{x},{y}: {response.get('reason', response)}")
                 state = response
                 record["moves"].append([x, y])
+                emit_position(on_position, position_payload(
+                    "evaluation", state, (x, y), pair=pair,
+                    game=pair * 2 + (0 if a_black else 1), engine=active,
+                    model_id=(candidate if active == "A" else opponent).get("model_id")))
                 record.setdefault("move_times_ms", []).append(round((time.monotonic() - before) * 1000, 3))
                 if state["result"] != "ongoing":
                     record["terminal"] = state["result"]
@@ -419,11 +462,14 @@ def verify_publication(run: Path, manifest_sha: str, report_sha: str, stop_event
     return manifest, report
 
 
-def parallel_games(engine, candidate, opponent, openings, config, stop):
+def parallel_games(engine, candidate, opponent, openings, config, stop,
+                   on_position=None):
     """Bounded independent games; callers alone write the report.
 
     An abnormal game cancels in-flight siblings without setting the caller's
     stop event (which would incorrectly classify an engine failure as a user stop).
+    ``on_position`` is forwarded to every game and may therefore be called
+    concurrently from several worker threads.
     """
     halted = threading.Event()
 
@@ -443,7 +489,8 @@ def parallel_games(engine, candidate, opponent, openings, config, stop):
             if job is not None:
                 pair, opening, black = job
                 pending.add(executor.submit(play_pair_game, engine, candidate, opponent,
-                                            opening, config, pair, black, cancelled))
+                                            opening, config, pair, black, cancelled,
+                                            on_position))
         try:
             for _ in range(config.workers):
                 submit()
@@ -473,7 +520,7 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
              output_root: str | Path = ROOT / "data" / "evaluations",
              config: EvaluationConfig | None = None, opponents: list[str] | None = None,
              bootstrap: bool = False, stop_event=None, progress=None,
-             resume_run: str | Path | None = None) -> dict:
+             resume_run: str | Path | None = None, on_position=None) -> dict:
     """Freeze, run, report and atomically publish; never writes training data.
 
     ``resume_run`` reuses an interrupted run directory verbatim: candidate,
@@ -482,6 +529,9 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
     In that mode the candidate/engine/config arguments are ignored, and a
     non-empty ``opponents`` list is rejected.  Interrupted games are never
     carried over.
+
+    ``on_position`` receives optional live-board snapshots tagged with
+    ``kind="evaluation"``; they are not part of the report or manifest.
     """
     stop = stop_event if stop_event is not None else threading.Event()
     store = ModelRegistry(registry)
@@ -619,10 +669,18 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
         started = time.monotonic()
         last_report_write = started
     aborted = False
+    emit = None
+    if on_position is not None:
+        def emit(payload):
+            # Source of truth for evaluation frames is this replay run, never
+            # a persisted report field.
+            payload["kind"] = "evaluation"
+            on_position(payload)
     matches = {"initial": frozen_candidate} if bootstrap else frozen_opponents
     for name, opponent in matches.items():
         games = report["matches"][name] = []
-        for game in parallel_games(engine_path, frozen_candidate, opponent, openings, config, stop):
+        for game in parallel_games(engine_path, frozen_candidate, opponent, openings,
+                                   config, stop, emit):
             games.append(game)
             games.sort(key=lambda g: (g["pair"], g["a_color"] != "black"))
             report["statistics"][name] = pair_statistics(games, config, len(matches))

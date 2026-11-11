@@ -263,6 +263,13 @@ class TeacherDataSource:
                     model_id=model_id, model_sha256=model_sha, version=version)
         task.event("game_snapshot", game=index + 1, model_id=model_id,
                    sha256=model_sha, version=version)
+
+        def on_position(payload):
+            # collect() sees one game per call; replace its local index with
+            # this worker's global game index.
+            task.publish_preview({**payload, "kind": "collect",
+                                  "game": index + 1, "worker": None})
+
         with task.resources.own(ExecutorClient(task.engine, *args)) as game, \
                 task.resources.own(ExecutorClient(task.engine)) as label, \
                 task.resources.own(self.teacher()) as teacher:
@@ -276,7 +283,8 @@ class TeacherDataSource:
                 raise ValueError("startup collector must identify handcrafted evaluation")
             teacher.__enter__()
             result = collect(pool, config, game, label, teacher, stop_event=task.stop_event,
-                progress=lambda progress: task.update("data", phase="collecting", metrics=progress))
+                progress=lambda progress: task.update("data", phase="collecting", metrics=progress),
+                on_position=on_position)
         return {**result, "collection_model_id": model_id, "version": version}
 
 
@@ -290,10 +298,13 @@ class TrainingTask:
     independent public APIs. Full pause/restart recovery belongs to ticket 12.
     """
     def __init__(self, config: TaskConfig, *, source_factory=None,
-                 trainer=None, evaluator=None, progress=None):
+                 trainer=None, evaluator=None, progress=None, preview=None):
         self.config = config
         self.source_factory, self.trainer, self.evaluator = source_factory, trainer, evaluator
         self.progress = progress
+        # Optional external live-board consumer. Never persisted, never part of
+        # state.json/events.jsonl; see publish_preview().
+        self.preview = preview
         self.task_id = uuid.uuid4().hex
         self.directory = Path(config.output_root).resolve() / self.task_id
         self.stop_event = threading.Event()
@@ -329,6 +340,27 @@ class TrainingTask:
     def snapshot(self):
         with self.lock:
             return copy.deepcopy(self.state)
+
+    def publish_preview(self, payload: dict) -> None:
+        """Hand one optional live-board snapshot to the external callback.
+
+        Called from data/evaluation worker threads. The payload is copied so a
+        consumer cannot mutate producer state, and delivery is best effort: a
+        slow or failing callback must never block, re-enter or fail the task.
+        Board cells are deliberately absent from state.json and task events.
+        """
+        callback = self.preview
+        if callback is None:
+            return
+        snapshot = dict(payload)
+        cells = snapshot.get("cells")
+        if cells is not None:
+            snapshot["cells"] = list(cells)
+        try:
+            callback(snapshot)
+        except Exception:
+            # Live previews are advisory; authoritative work continues.
+            pass
 
     def event(self, kind, **values):
         with self.lock:
@@ -398,7 +430,8 @@ class TrainingTask:
     @classmethod
     def resume_from_directory(cls, directory, *, progress=None,
                               source_factory=None, trainer=None,
-                              evaluator=None, config: "TaskConfig | None" = None):
+                              evaluator=None, config: "TaskConfig | None" = None,
+                              preview=None):
         """Reopens a persisted task from its manifest/state, without running it."""
         directory = Path(directory).resolve()
         manifest = read_json(directory / "manifest.json")
@@ -412,7 +445,7 @@ class TrainingTask:
                 "resume with the original configuration")
         config = TaskConfig(**manifest["config"])
         task = cls(config, source_factory=source_factory, trainer=trainer,
-                   evaluator=evaluator, progress=progress)
+                   evaluator=evaluator, progress=progress, preview=preview)
         task.task_id = manifest["task_id"]
         task.directory = directory
         task.resume_mode = True
@@ -858,6 +891,12 @@ class TrainingTask:
                     "evaluation", phase="evaluating", progress=progress))
             if resume_run is not None:
                 kwargs["resume_run"] = resume_run
+            if self.evaluator is None:
+                # Only the default history_evaluation.evaluate accepts the
+                # optional preview keyword; custom evaluator callables are
+                # called exactly as before.
+                kwargs["on_position"] = lambda payload: self.publish_preview(
+                    {**payload, "kind": "evaluation"})
             result = (self.evaluator or evaluate)(
                 Path(record["output"]) / "model.gmvalue", self.engine, **kwargs)
         finally:

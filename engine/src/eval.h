@@ -22,9 +22,9 @@ class Evaluator {
   const NnueNetwork* network() const { return network_; }
 
   // Ticket 07: the new GMVALUE1 value network takes precedence over the
-  // legacy NNUE. Until ticket 11 this path rebuilds the whole first layer on
-  // every evaluation (the numeric reference), which is deliberately not
-  // incremental.
+  // legacy NNUE. Ticket 11: the first layer is maintained incrementally by
+  // update() and only the 64 -> 32 -> 1 half runs per evaluation. The
+  // network's `reference` mode keeps the full-rebuild path available.
   void setValueNetwork(const ValueNetwork* network) { valueNetwork_ = network; }
   const ValueNetwork* valueNetwork() const { return valueNetwork_; }
 
@@ -52,6 +52,9 @@ class Evaluator {
   // Exact (unsaturated) int32 accumulator, incrementally maintained by
   // update() so the NNUE backend stays scalar but cheap during search.
   NnueAccumulator nnueAcc_{};
+  // Ticket 11: exact int64 first layer for the GMVALUE1 network. Kept
+  // unsaturated end to end, so place/undo is an exact inverse.
+  ValueAccumulator valueAcc_{};
 };
 
 }  // namespace gomoku

@@ -217,7 +217,7 @@ class MatchEngine(Engine):
 
 def verify_about(line: str, model: dict):
     fields = dict(re.findall(r'(\w+)="([^"\n]*)"', line))
-    expected = {"eval": "nnue", "eval_engine": "gmvalue1-scalar-full",
+    expected = {"eval": "nnue", "eval_engine": "gmvalue1-incremental-avx2",
                 "value_model_id": model["model_id"], "value_model_arch": "450-1024-64-32-1",
                 "value_model_rule": "renju", "value_model_feature_spec": "absolute-color-450",
                 "value_model_contract": "black-absolute-tanh-v1"}

@@ -19,10 +19,14 @@ Usage: python value_parity_tests.py [path to value_probe.exe]
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import math
+import os
+import platform
 import random
+import re
 import sqlite3
 import subprocess
 import sys
@@ -122,17 +126,159 @@ def pool_positions(count: int = 24) -> list[tuple[int, list[int], str]]:
     return result
 
 
-def run_probe(model: Path, mode: str, lines: list[str]) -> list[str]:
+def run_probe(model: Path, mode: str, lines: list[str],
+              backend: str | None = None) -> list[str]:
+    argv = [PROBE, "--model", str(model)]
+    if backend is not None:
+        argv += ["--backend", backend]
+    argv.append(mode)
     result = subprocess.run(
-        [PROBE, "--model", str(model), mode],
-        input="\n".join(lines) + "\n", capture_output=True, text=True,
+        argv, input="\n".join(lines) + "\n", capture_output=True, text=True,
         timeout=300)
     check(result.returncode == 0,
-          f"probe {mode} exits 0 (stderr={result.stderr.strip()[:160]!r})")
+          f"probe {backend or 'default'}/{mode} exits 0 "
+          f"(stderr={result.stderr.strip()[:160]!r})")
     out = result.stdout.splitlines()
     check(len(out) == len(lines),
-          f"probe {mode} returns {len(lines)} lines (got {len(out)})")
+          f"probe {backend or 'default'}/{mode} returns {len(lines)} lines "
+          f"(got {len(out)})")
     return out
+
+
+def run_walk(model: Path, backend: str,
+             commands: list[str]) -> list[dict]:
+    result = subprocess.run(
+        [PROBE, "--model", str(model), "--backend", backend, "walk"],
+        input="\n".join(commands) + "\n", capture_output=True, text=True,
+        timeout=300)
+    check(result.returncode == 0,
+          f"walk {backend} exits 0 (stderr={result.stderr.strip()[:160]!r})")
+    records = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            check(False, f"walk {backend}: non-JSON output {line[:120]!r}")
+    check(len(records) == len(commands),
+          f"walk {backend} returns {len(records)} records for "
+          f"{len(commands)} commands")
+    return records
+
+
+def check_incremental_parity(model: Path, label: str, positions) -> None:
+    """Drive real place/undo sessions and compare with the full reference."""
+    print(f"[incremental first layer: {label}, place/undo walk]")
+    weights, _ = vf.read_value_weights(model)
+    rng = random.Random(17)
+    commands: list[str] = []
+    segments = []
+    for position_index, (stm, indices, text) in enumerate(positions):
+        empty = [i for i, c in enumerate(text) if c == "."]
+        rng.shuffle(empty)
+        picks = empty[:12]
+        start = len(commands)
+        commands.append(f"load {stm} {text}")
+        for cell in picks:
+            commands.append(f"place {cell}")
+        for _ in picks:
+            commands.append("undo")
+        commands.append("state")
+        segments.append((start, len(commands), stm, indices, len(picks)))
+
+    backend_records: dict[str, list[dict]] = {}
+    for backend in ("scalar", "avx2"):
+        backend_records[backend] = run_walk(model, backend, commands)
+
+    for backend, records in backend_records.items():
+        ok = True
+        for start, end, stm, indices, picks in segments:
+            seg = records[start:end]
+            if len(seg) != end - start:
+                ok = False
+                continue
+            load = seg[0]
+            final = seg[-1]
+            placed = [r for r in seg[1:1 + picks] if r.get("op") == "place"]
+            if (load.get("op") != "load" or final.get("op") != "state"
+                    or not placed):
+                ok = False
+                continue
+            if load.get("z") != vf.infer_int(weights, indices):
+                ok = False
+            if final.get("z") != load.get("z"):
+                ok = False
+            if final.get("side_to_move") != stm:
+                ok = False
+            for record in seg:
+                if record.get("op") == "error":
+                    continue
+                if record.get("match") is not True:
+                    ok = False
+                if record.get("z") != record.get("reference"):
+                    ok = False
+        check(ok, f"{label}/{backend}: every step matches the full reference, "
+                  f"and full undo restores the initial position")
+
+    scalar = backend_records["scalar"]
+    avx2 = backend_records["avx2"]
+    check(len(scalar) == len(avx2),
+          f"{label}: scalar and AVX2 walks produce the same record count")
+    compare_ok = True
+    for a, b in zip(scalar, avx2):
+        if a.get("op") == "error" or b.get("op") == "error":
+            continue
+        if (a.get("z") != b.get("z")
+                or a.get("reference") != b.get("reference")):
+            compare_ok = False
+    check(compare_ok,
+          f"{label}: scalar and AVX2 give identical z at every step")
+
+
+def check_benchmark(model: Path, positions) -> None:
+    """Single-inference timing. Conditions are printed, not assumed."""
+    print("[single-inference timing: incremental vs full rebuild]")
+    stm, _, text = max(
+        positions, key=lambda p: sum(1 for c in p[2] if c != "."))
+    iterations = 20000
+    line = f"{stm} {text} {iterations} incremental"
+    timings: dict[str, float] = {}
+    for backend in ("scalar", "avx2"):
+        out = run_probe(model, "bench", [line], backend=backend)
+        match = re.search(r"ns_per_eval=([0-9.]+)", out[0] if out else "")
+        check(match is not None, f"{backend}: bench reports ns_per_eval")
+        if match:
+            timings[backend] = float(match.group(1))
+    full = run_probe(model, "bench",
+                     [f"{stm} {text} {iterations} full"], backend="reference")
+    match = re.search(r"ns_per_eval=([0-9.]+)", full[0] if full else "")
+    check(match is not None, "reference: bench reports ns_per_eval")
+    if not match:
+        return
+    reference_ns = float(match.group(1))
+    model_bytes = model.read_bytes()
+    print(f"  conditions: {platform.platform()}, CPU={platform.processor() or '?'}, "
+          f"cores={os.cpu_count()}, iterations={iterations}, "
+          f"stones={sum(1 for c in text if c != '.')}, "
+          f"model={model.name} sha256={hashlib.sha256(model_bytes).hexdigest()[:16]}")
+    print(f"  full rebuild (reference): {reference_ns:9.2f} ns/eval")
+    for backend in ("scalar", "avx2"):
+        if backend in timings:
+            speedup = reference_ns / max(1.0, timings[backend])
+            print(f"  incremental {backend:6s}: {timings[backend]:9.2f} ns/eval "
+                  f"({speedup:.2f}x vs full rebuild)")
+    if "scalar" in timings and "avx2" in timings:
+        speedup = timings["scalar"] / max(1.0, timings["avx2"])
+        print(f"  AVX2 vs scalar forward: {speedup:.2f}x")
+        check(timings["avx2"] < reference_ns,
+              "incremental AVX2 is faster than a full rebuild")
+        check(timings["scalar"] < reference_ns,
+              "incremental scalar is faster than a full rebuild")
+        check(timings["avx2"] <= timings["scalar"] * 1.10,
+              f"AVX2 forward is not slower than scalar (ratio {speedup:.2f}x)")
+        check(timings["avx2"] < 20000.0,
+              "incremental AVX2 inference stays microsecond-scale (< 20 us)")
 
 
 def reference_scores(weights: dict, positions) -> list[int]:
@@ -315,15 +461,19 @@ def main() -> int:
         synthetic = synthetic_model(tmp)
         print("[synthetic GMVALUE1]")
         check_integer_reference(synthetic, "synthetic", positions)
+        check_incremental_parity(synthetic, "synthetic", positions)
         check_rejections(tmp, synthetic)
 
         if REAL_MODEL.is_file():
             print("[local demo GMVALUE1]")
             check_integer_reference(REAL_MODEL, "demo", positions)
+            check_incremental_parity(REAL_MODEL, "demo", positions)
             print("[export fidelity: training model vs C++ deployment]")
             check_export_fidelity(positions)
+            check_benchmark(REAL_MODEL, positions)
         else:
             print("demo model not present: real-model parity SKIPPED")
+            check_benchmark(synthetic, positions)
 
     if FAILURES:
         print(f"\n{len(FAILURES)} value parity check(s) failed")

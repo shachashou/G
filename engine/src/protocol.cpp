@@ -93,6 +93,13 @@ Protocol::Protocol(const EngineConfig& cfg) : cfg_(cfg) {
     // exits; it never degrades to a different evaluator while reporting NNUE.
     valueNet_ = std::make_unique<ValueNetwork>();
     valueNet_->load(cfg_.valueModel);
+    ValueBackend backend = ValueBackend::Avx2;
+    ValueAccumulatorMode accumulator = ValueAccumulatorMode::Incremental;
+    if (!valueEvalModeFromName(cfg_.valueBackend, backend, accumulator)) {
+      throw ValueNetError("unknown value backend '" + cfg_.valueBackend + "'");
+    }
+    valueNet_->setBackend(backend);
+    valueNet_->setAccumulatorMode(accumulator);
     if (search_) search_->setValueNetwork(valueNet_.get());
   }
   if (!cfg_.nnueWeights.empty()) {
@@ -181,12 +188,13 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
     handleInfo(arg);
   } else if (cmd == "ABOUT") {
     const bool value_loaded = valueNet_ != nullptr;
+    const std::string eval_engine =
+        value_loaded ? "gmvalue1-" + valueNet_->evalModeName()
+                     : (nnueActive_ ? "gmnnue-legacy" : "handcrafted");
     out << "name=\"" << kEngineName << "\", version=\"" << kEngineVersion
         << "\", author=\"G\", country=\"CN\", eval=\""
         << (value_loaded || nnueActive_ ? "nnue" : "handcrafted")
-        << "\", eval_engine=\""
-        << (value_loaded ? "gmvalue1-scalar-full"
-                         : (nnueActive_ ? "gmnnue-legacy" : "handcrafted"))
+        << "\", eval_engine=\"" << eval_engine
         << "\", nnue_backend=\""
         << (nnueActive_ ? nnueBackendName(nnue_->backend()) : "none")
         << "\"";
@@ -202,7 +210,11 @@ void Protocol::handle(const std::string& line, std::istream& in, std::ostream& o
           << "\""
           << ", value_model_ea=" << info.ea
           << ", value_model_act_max_int=" << info.act_max_int
-          << ", value_model_backend=\"scalar-full-rebuild\""
+          << ", value_model_backend=\"" << valueNet_->evalModeName() << "\""
+          << ", value_model_accumulator=\""
+          << valueAccumulatorModeName(valueNet_->accumulatorMode()) << "\""
+          << ", value_model_compute=\""
+          << valueBackendName(valueNet_->backend()) << "\""
           << ", value_model_promoted=\"false\"";
     }
     out << "\n";

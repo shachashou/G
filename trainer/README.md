@@ -40,7 +40,7 @@
     --output-dir weights\value-run1 --steps 200 --batch-size 32 --lr 1e-3 --loss mse
 ~~~
 
-输出目录包含 `last.pt` / `best.pt`（可恢复）、`train_history.jsonl`、`train_summary.json`、`model.gmvalue`、`fidelity.json` 与 `training_positions.json`。`GMVALUE1` 记录架构、规则、特征、价值契约、标签版本和训练数据身份；加载旧 `GMNNUE01` 或架构不符的元数据会被拒绝。C++ 已能严格加载该格式并在 Alpha-Beta 中实际对弈（工单 07）；第一层增量累加与 AVX2 在工单 11，当前搜索使用全量重建参照路径。
+输出目录包含 `last.pt` / `best.pt`（可恢复）、`train_history.jsonl`、`train_summary.json`、`model.gmvalue`、`fidelity.json` 与 `training_positions.json`。`GMVALUE1` 记录架构、规则、特征、价值契约、标签版本和训练数据身份；加载旧 `GMNNUE01` 或架构不符的元数据会被拒绝。C++ 已能严格加载该格式并在 Alpha-Beta 中实际对弈（工单 07），部署侧默认使用第一层增量累加与 AVX2，并保留全量标量参照（工单 11）。
 
 工单 08 的测评以 `training_positions.json` 排除候选训练/验证局面的 D4 等价开局；清单 SHA-256 写入模型元数据并由保真度报告绑定。checkpoint 保存累计训练清单，换池续训时合并历史身份，池淘汰不会抹掉已用局面。缺少该清单的旧 checkpoint 明确拒绝续训，需从零训练，不能伪造空白训练历史。模型导出通过数值检查后仍是候选；登记 v0 或历史挑战通过后，才进入正式版本登记表，见[测评与晋级说明](../README.md#历史版本测评与晋级工单-08)。
 

@@ -77,9 +77,15 @@ void forEachWindowOnBoard(F&& f) {
 void Evaluator::init(const Board& board) {
   blackScore_ = 0;
   whiteScore_ = 0;
-  // The GMVALUE1 reference path recomputes the whole position in evaluate();
-  // handcrafted window scores would never be read while it is active.
-  if (valueNetwork_) return;
+  // The GMVALUE1 path owns evaluation while it is active. Incremental mode
+  // builds the first layer once here; reference mode rebuilds per evaluation.
+  if (valueNetwork_) {
+    if (valueNetwork_->accumulatorMode() ==
+        ValueAccumulatorMode::Incremental) {
+      valueNetwork_->rebuildAccumulator(board, valueAcc_);
+    }
+    return;
+  }
   const auto& cells = board.rawCells();
   forEachWindowOnBoard([&](const Window& w) {
     blackScore_ += windowValue(cells, w, Color::Black, -1, Cell::Empty);
@@ -89,7 +95,13 @@ void Evaluator::init(const Board& board) {
 }
 
 void Evaluator::update(const Board& board, int move, Cell to) {
-  if (valueNetwork_) return;  // no incremental state on the reference path
+  if (valueNetwork_) {
+    if (valueNetwork_->accumulatorMode() ==
+        ValueAccumulatorMode::Incremental) {
+      valueNetwork_->updateAccumulator(board, move, to, valueAcc_);
+    }
+    return;  // reference mode has no cached first layer
+  }
   const auto& cells = board.rawCells();
   forEachWindowThrough(move, [&](const Window& w) {
     const int b0 = windowValue(cells, w, Color::Black, -1, Cell::Empty);
@@ -123,7 +135,10 @@ int Evaluator::evaluate(const Board& board) const {
     // flipped here; terminal and proven-VCF scores are decided by Search
     // before this function is reached and are never replaced by a network
     // number.
-    const int64_t z = valueNetwork_->evaluateBoard(board);
+    const int64_t z =
+        valueNetwork_->accumulatorMode() == ValueAccumulatorMode::Incremental
+            ? valueNetwork_->inferAccumulator(valueAcc_)
+            : valueNetwork_->evaluateBoard(board);
     return valueNetwork_->sideToMoveScore(z, board.sideToMove());
   }
   if (network_) {

@@ -24,6 +24,9 @@ struct EngineConfig {
   // Ticket 07: strict GMVALUE1 deployment model. When set, a bad file aborts
   // the process instead of silently falling back to a handcrafted evaluator.
   std::string valueModel;  // --value-model PATH
+  // Ticket 11: avx2 (default, incremental first layer) | scalar (incremental,
+  // scalar forward) | reference (full rebuild + scalar forward).
+  std::string valueBackend = "avx2";
 };
 
 // Gomocup/piskvork protocol subset over stdin/stdout:

@@ -48,7 +48,7 @@ class ScriptedEngine:
 
     def recv_line(self):
         ident = "wrong" if self.mode == "identity" else self.meta["model_id"]
-        return (f'eval="nnue", eval_engine="gmvalue1-scalar-full", value_model_id="{ident}", '
+        return (f'eval="nnue", eval_engine="gmvalue1-incremental-avx2", value_model_id="{ident}", '
                 'value_model_arch="450-1024-64-32-1", value_model_rule="renju", '
                 'value_model_feature_spec="absolute-color-450", '
                 'value_model_contract="black-absolute-tanh-v1"')

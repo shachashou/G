@@ -64,6 +64,13 @@ ExecutorProtocol::ExecutorProtocol(const EngineConfig& cfg, std::ostream& out)
     // the response still claims NNUE.
     valueNet_ = std::make_unique<ValueNetwork>();
     valueNet_->load(cfg_.valueModel);
+    ValueBackend backend = ValueBackend::Avx2;
+    ValueAccumulatorMode accumulator = ValueAccumulatorMode::Incremental;
+    if (!valueEvalModeFromName(cfg_.valueBackend, backend, accumulator)) {
+      throw ValueNetError("unknown value backend '" + cfg_.valueBackend + "'");
+    }
+    valueNet_->setBackend(backend);
+    valueNet_->setAccumulatorMode(accumulator);
     search_->setValueNetwork(valueNet_.get());
   }
   if (!cfg_.nnueWeights.empty()) {
@@ -140,7 +147,12 @@ Value ExecutorProtocol::valueModelValue() const {
     labels.push_back(json::stringValue(version));
   }
   json::set(out, "label_versions", json::arrayValue(std::move(labels)));
-  json::set(out, "backend", json::stringValue("scalar-full-rebuild"));
+  json::set(out, "backend", json::stringValue(valueNet_->evalModeName()));
+  json::set(out, "accumulator",
+            json::stringValue(
+                valueAccumulatorModeName(valueNet_->accumulatorMode())));
+  json::set(out, "compute",
+            json::stringValue(valueBackendName(valueNet_->backend())));
   // Ticket 08 owns promotion; a successfully loaded candidate is playable but
   // is never presented as the promoted official version.
   json::set(out, "promoted", json::booleanValue(false));
@@ -323,14 +335,15 @@ Value ExecutorProtocol::think(const Value& request) const {
   json::set(response, "eval",
             json::stringValue(valueNet_ || nnueActive_ ? "nnue" : "handcrafted"));
   json::set(response, "eval_backend",
-            json::stringValue(valueNet_ ? "value-gmvalue1-scalar"
+            json::stringValue(valueNet_ ? "value-gmvalue1-" +
+                                              valueNet_->evalModeName()
                                         : (nnueActive_ ? "legacy-gmnnue"
                                                        : "handcrafted")));
   if (valueNet_) {
     json::set(response, "value_model_id",
               json::stringValue(valueNet_->info().model_id));
     json::set(response, "value_model_backend",
-              json::stringValue("scalar-full-rebuild"));
+              json::stringValue(valueNet_->evalModeName()));
   }
   return response;
 }
@@ -357,7 +370,8 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
               json::stringValue(valueNet_ || nnueActive_ ? "nnue"
                                                          : "handcrafted"));
     json::set(response, "eval_backend",
-              json::stringValue(valueNet_ ? "value-gmvalue1-scalar"
+              json::stringValue(valueNet_ ? "value-gmvalue1-" +
+                                                valueNet_->evalModeName()
                                           : (nnueActive_ ? "legacy-gmnnue"
                                                          : "handcrafted")));
     json::set(response, "nnue_loaded", json::booleanValue(nnueActive_));
@@ -383,8 +397,8 @@ Value ExecutorProtocol::dispatch(const Value& request, bool& quit) {
     if (valueNet_) {
       const ValueModelInfo& info = valueNet_->info();
       description =
-          "new value network (GMVALUE1, " + info.arch() +
-          ", scalar full-rebuild reference), model " + info.model_id +
+          "new value network (GMVALUE1, " + info.arch() + ", " +
+          valueNet_->evalModeName() + "), model " + info.model_id +
           "; candidate for play, not promoted";
     } else if (nnueActive_) {
       description = std::string("legacy NNUE network (GMNNUE), ") +

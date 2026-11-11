@@ -4,12 +4,48 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <immintrin.h>
 #include <limits>
 #include <utility>
 
 #include "json.h"
 
 namespace gomoku {
+
+const char* valueBackendName(ValueBackend backend) {
+  return backend == ValueBackend::Avx2 ? "avx2" : "scalar";
+}
+
+const char* valueAccumulatorModeName(ValueAccumulatorMode mode) {
+  return mode == ValueAccumulatorMode::Incremental ? "incremental"
+                                                   : "full-rebuild";
+}
+
+bool valueEvalModeFromName(const std::string& name, ValueBackend& backend,
+                           ValueAccumulatorMode& accumulator) {
+  if (name == "avx2") {
+    backend = ValueBackend::Avx2;
+    accumulator = ValueAccumulatorMode::Incremental;
+    return true;
+  }
+  if (name == "scalar") {
+    backend = ValueBackend::Scalar;
+    accumulator = ValueAccumulatorMode::Incremental;
+    return true;
+  }
+  if (name == "reference") {
+    backend = ValueBackend::Scalar;
+    accumulator = ValueAccumulatorMode::FullRebuild;
+    return true;
+  }
+  return false;
+}
+
+std::string valueEvalModeName(ValueBackend backend,
+                              ValueAccumulatorMode accumulator) {
+  return std::string(valueAccumulatorModeName(accumulator)) + "-" +
+         valueBackendName(backend);
+}
 
 namespace {
 
@@ -361,25 +397,82 @@ void ValueNetwork::rebuildAccumulator(const Board& board,
   }
 }
 
-int64_t ValueNetwork::inferAccumulator(const ValueAccumulator& acc) const {
+void ValueNetwork::addFeature(int feature, int sign,
+                              ValueAccumulator& acc) const {
+  if (backend_ == ValueBackend::Avx2) {
+    addFeatureAvx2(feature, sign, acc);
+    return;
+  }
+  const int16_t* row = &w0_[static_cast<size_t>(feature) * kValueAcc];
+  for (int j = 0; j < kValueAcc; ++j) {
+    acc[j] += static_cast<int64_t>(sign) * row[j];
+  }
+}
+
+void ValueNetwork::addFeatureAvx2(int feature, int sign,
+                                  ValueAccumulator& acc) const {
+  // 8 int16 weights -> 8 exact int64 lanes (two 4-lane VPMOVSXDQ halves).
+  // Add/sub on int64 lanes has no saturation, so any sequence of updates is
+  // exactly reversible and bit-identical to the scalar path.
+  const int16_t* row = &w0_[static_cast<size_t>(feature) * kValueAcc];
+  int64_t* out = acc.data();
+  for (int j = 0; j < kValueAcc; j += 8) {
+    const __m256i weights = _mm256_cvtepi16_epi32(
+        _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + j)));
+    const __m256i lo_w =
+        _mm256_cvtepi32_epi64(_mm256_castsi256_si128(weights));
+    const __m256i hi_w =
+        _mm256_cvtepi32_epi64(_mm256_extracti128_si256(weights, 1));
+    __m256i lo =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(out + j));
+    __m256i hi =
+        _mm256_loadu_si256(reinterpret_cast<const __m256i*>(out + j + 4));
+    if (sign > 0) {
+      lo = _mm256_add_epi64(lo, lo_w);
+      hi = _mm256_add_epi64(hi, hi_w);
+    } else {
+      lo = _mm256_sub_epi64(lo, lo_w);
+      hi = _mm256_sub_epi64(hi, hi_w);
+    }
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + j), lo);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(out + j + 4), hi);
+  }
+}
+
+void ValueNetwork::updateAccumulator(const Board& board, int move, Cell to,
+                                     ValueAccumulator& acc) const {
   if (!loaded_) throw ValueNetError("value network: model not loaded");
+  if (!Board::inBounds(move)) {
+    throw ValueNetError("value network: accumulator move index out of range " +
+                        std::to_string(move));
+  }
+  if (to != Cell::Empty && to != Cell::Black && to != Cell::White) {
+    throw ValueNetError("value network: accumulator target is not a stone");
+  }
+  const Cell before = board.cell(move);
+  if (before != Cell::Empty && to != Cell::Empty) {
+    throw ValueNetError(
+        "value network: accumulator place onto an occupied point");
+  }
+  if (before == Cell::Empty && to == Cell::Empty) {
+    throw ValueNetError(
+        "value network: accumulator undo of an empty point");
+  }
+  // Validation finished: the two operations below cannot fail, so an invalid
+  // request never leaves the accumulator half-updated.
+  if (before != Cell::Empty) {
+    addFeature(before == Cell::Black ? move : kValueCells + move, -1, acc);
+  }
+  if (to != Cell::Empty) {
+    addFeature(to == Cell::Black ? move : kValueCells + move, 1, acc);
+  }
+}
+
+int64_t ValueNetwork::finishForward(
+    const std::array<int64_t, kValueH1>& z1) const {
   const int act_max = info_.act_max_int;
   const int64_t scale = static_cast<int64_t>(1) << info_.ea;
 
-  std::array<int32_t, kValueAcc> a0{};
-  for (int j = 0; j < kValueAcc; ++j) {
-    a0[j] = static_cast<int32_t>(std::clamp<int64_t>(acc[j], 0, act_max));
-  }
-
-  std::array<int64_t, kValueH1> z1{};
-  for (int j = 0; j < kValueAcc; ++j) {
-    const int32_t value = a0[j];
-    if (value == 0) continue;
-    const int16_t* row = &w1_[static_cast<size_t>(j) * kValueH1];
-    for (int k = 0; k < kValueH1; ++k) {
-      z1[k] += static_cast<int64_t>(value) * row[k];
-    }
-  }
   std::array<int32_t, kValueH1> a1{};
   for (int k = 0; k < kValueH1; ++k) {
     const int64_t value = valueRoundDiv(z1[k], scale) + b1_[k];
@@ -409,6 +502,108 @@ int64_t ValueNetwork::inferAccumulator(const ValueAccumulator& acc) const {
   return valueRoundDiv(z, scale) + b3_[0];
 }
 
+int64_t ValueNetwork::inferAccumulatorScalar(
+    const ValueAccumulator& acc) const {
+  if (!loaded_) throw ValueNetError("value network: model not loaded");
+  const int act_max = info_.act_max_int;
+
+  std::array<int32_t, kValueAcc> a0{};
+  for (int j = 0; j < kValueAcc; ++j) {
+    a0[j] = static_cast<int32_t>(std::clamp<int64_t>(acc[j], 0, act_max));
+  }
+
+  std::array<int64_t, kValueH1> z1{};
+  for (int j = 0; j < kValueAcc; ++j) {
+    const int32_t value = a0[j];
+    if (value == 0) continue;
+    const int16_t* row = &w1_[static_cast<size_t>(j) * kValueH1];
+    for (int k = 0; k < kValueH1; ++k) {
+      z1[k] += static_cast<int64_t>(value) * row[k];
+    }
+  }
+  return finishForward(z1);
+}
+
+int64_t ValueNetwork::inferAccumulatorAvx2(
+    const ValueAccumulator& acc) const {
+  if (!loaded_) throw ValueNetError("value network: model not loaded");
+  const int act_max = info_.act_max_int;
+
+  std::array<int32_t, kValueAcc> a0{};
+  for (int j = 0; j < kValueAcc; ++j) {
+    a0[j] = static_cast<int32_t>(std::clamp<int64_t>(acc[j], 0, act_max));
+  }
+
+  // 1024 x 64 products with a 64-bit running sum. AVX2 has no 64-bit
+  // multiply, so each 8-wide int32 row is split into even/odd 32-bit lanes and
+  // multiplied with VPMULDQ (signed 32x32 -> 64). Exact, not approximate.
+  // Four 8-output blocks are accumulated per pass (32 of 64 outputs), which
+  // keeps the eight accumulators in registers and halves W1 traffic versus
+  // one block at a time.
+  std::array<int64_t, kValueH1> z1{};
+  for (int k0 = 0; k0 < kValueH1; k0 += 32) {
+    __m256i even0 = _mm256_setzero_si256();
+    __m256i odd0 = _mm256_setzero_si256();
+    __m256i even1 = _mm256_setzero_si256();
+    __m256i odd1 = _mm256_setzero_si256();
+    __m256i even2 = _mm256_setzero_si256();
+    __m256i odd2 = _mm256_setzero_si256();
+    __m256i even3 = _mm256_setzero_si256();
+    __m256i odd3 = _mm256_setzero_si256();
+    for (int j = 0; j < kValueAcc; ++j) {
+      const int32_t value = a0[j];
+      if (value == 0) continue;
+      const int16_t* row = &w1_[static_cast<size_t>(j) * kValueH1 + k0];
+      const __m256i factor = _mm256_set1_epi32(value);
+      const __m256i factor_odd = _mm256_srli_epi64(factor, 32);
+
+      const __m256i w0 = _mm256_cvtepi16_epi32(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(row)));
+      even0 = _mm256_add_epi64(even0, _mm256_mul_epi32(w0, factor));
+      odd0 = _mm256_add_epi64(
+          odd0, _mm256_mul_epi32(_mm256_srli_epi64(w0, 32), factor_odd));
+
+      const __m256i w1 = _mm256_cvtepi16_epi32(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + 8)));
+      even1 = _mm256_add_epi64(even1, _mm256_mul_epi32(w1, factor));
+      odd1 = _mm256_add_epi64(
+          odd1, _mm256_mul_epi32(_mm256_srli_epi64(w1, 32), factor_odd));
+
+      const __m256i w2 = _mm256_cvtepi16_epi32(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + 16)));
+      even2 = _mm256_add_epi64(even2, _mm256_mul_epi32(w2, factor));
+      odd2 = _mm256_add_epi64(
+          odd2, _mm256_mul_epi32(_mm256_srli_epi64(w2, 32), factor_odd));
+
+      const __m256i w3 = _mm256_cvtepi16_epi32(
+          _mm_loadu_si128(reinterpret_cast<const __m128i*>(row + 24)));
+      even3 = _mm256_add_epi64(even3, _mm256_mul_epi32(w3, factor));
+      odd3 = _mm256_add_epi64(
+          odd3, _mm256_mul_epi32(_mm256_srli_epi64(w3, 32), factor_odd));
+    }
+    alignas(32) int64_t even_lanes[4];
+    alignas(32) int64_t odd_lanes[4];
+    const auto storeBlock = [&](int offset, __m256i even, __m256i odd) {
+      _mm256_store_si256(reinterpret_cast<__m256i*>(even_lanes), even);
+      _mm256_store_si256(reinterpret_cast<__m256i*>(odd_lanes), odd);
+      for (int n = 0; n < 4; ++n) {
+        z1[offset + 2 * n] = even_lanes[n];
+        z1[offset + 2 * n + 1] = odd_lanes[n];
+      }
+    };
+    storeBlock(k0, even0, odd0);
+    storeBlock(k0 + 8, even1, odd1);
+    storeBlock(k0 + 16, even2, odd2);
+    storeBlock(k0 + 24, even3, odd3);
+  }
+  return finishForward(z1);
+}
+
+int64_t ValueNetwork::inferAccumulator(const ValueAccumulator& acc) const {
+  return backend_ == ValueBackend::Avx2 ? inferAccumulatorAvx2(acc)
+                                        : inferAccumulatorScalar(acc);
+}
+
 int64_t ValueNetwork::inferSparse(const std::vector<int>& features) const {
   if (!loaded_) throw ValueNetError("value network: model not loaded");
   ValueAccumulator acc{};
@@ -421,13 +616,13 @@ int64_t ValueNetwork::inferSparse(const std::vector<int>& features) const {
     const int16_t* row = &w0_[static_cast<size_t>(feature) * kValueAcc];
     for (int j = 0; j < kValueAcc; ++j) acc[j] += row[j];
   }
-  return inferAccumulator(acc);
+  return inferAccumulatorScalar(acc);
 }
 
 int64_t ValueNetwork::evaluateBoard(const Board& board) const {
   ValueAccumulator acc{};
   rebuildAccumulator(board, acc);
-  return inferAccumulator(acc);
+  return inferAccumulatorScalar(acc);
 }
 
 int ValueNetwork::zToSearchScore(int64_t z, int ea) {

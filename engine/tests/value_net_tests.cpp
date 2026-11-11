@@ -8,10 +8,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "board.h"
+#include "eval.h"
 #include "nnue.h"
 #include "search.h"
 #include "value_net.h"
@@ -212,6 +214,49 @@ Board boardWith(const std::vector<std::pair<int, Cell>>& stones, Color side) {
 
 int index(int x, int y) { return Board::indexOf(x, y); }
 
+std::vector<int> legalMoves(const Board& board) {
+  std::vector<int> moves;
+  if (board.result() != GameResult::Ongoing) return moves;
+  for (int m = 0; m < kCells; ++m) {
+    if (board.isPlayable(m)) moves.push_back(m);
+  }
+  return moves;
+}
+
+// Random legal play with per-ply first-layer comparison, then full undo.
+void checkRandomIncremental(ValueNetwork& network, uint32_t seed, int plies,
+                            const Board& start = Board(RuleMode::Renju)) {
+  Board board = start;
+  ValueAccumulator acc{};
+  network.rebuildAccumulator(board, acc);
+  std::mt19937 rng(seed);
+  std::vector<int> played;
+  for (int ply = 0; ply < plies; ++ply) {
+    const std::vector<int> moves = legalMoves(board);
+    if (moves.empty()) break;
+    const int move = moves[rng() % moves.size()];
+    network.updateAccumulator(board, move, cellOf(board.sideToMove()), acc);
+    board.place(move);
+    played.push_back(move);
+    ValueAccumulator full{};
+    network.rebuildAccumulator(board, full);
+    CHECK(acc == full);
+    CHECK(network.inferAccumulator(acc) == network.evaluateBoard(board));
+    CHECK(network.inferAccumulatorAvx2(acc) ==
+          network.inferAccumulatorScalar(acc));
+  }
+  while (!played.empty()) {
+    const int move = board.lastMove();
+    network.updateAccumulator(board, move, Cell::Empty, acc);
+    board.undo();
+    played.pop_back();
+    ValueAccumulator full{};
+    network.rebuildAccumulator(board, full);
+    CHECK(acc == full);
+    CHECK(network.inferAccumulator(acc) == network.evaluateBoard(board));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -298,6 +343,187 @@ int main() {
             network.inferSparse(nnueSparseIndices(board)));
     }
     CHECK(network.evaluateBoard(board) == 3);
+  }
+
+  {
+    std::cout << "[incremental first layer matches full rebuild]\n";
+    ValueNetwork network;
+    network.load(hand_file.path());
+    for (uint32_t seed = 1; seed <= 4; ++seed) {
+      checkRandomIncremental(network, seed, 225);
+    }
+    // The scalar update path must match the same full rebuild.
+    network.setBackend(ValueBackend::Scalar);
+    checkRandomIncremental(network, 7, 150);
+    network.setBackend(ValueBackend::Avx2);
+    // A BOARD-synced midgame position (no move history) must also rebuild and
+    // then support place/undo exactly like a game started from empty.
+    checkRandomIncremental(
+        network, 99, 120,
+        boardWith({{index(7, 7), Cell::Black},
+                   {index(8, 8), Cell::White},
+                   {index(6, 6), Cell::Black},
+                   {index(9, 9), Cell::White},
+                   {index(5, 5), Cell::Black},
+                   {index(10, 10), Cell::White}},
+                  Color::Black));
+  }
+
+  {
+    std::cout << "[illegal first-layer updates leave the accumulator intact]\n";
+    ValueNetwork network;
+    network.load(hand_file.path());
+    Board board = boardWith({{112, Cell::Black}}, Color::Black);
+    ValueAccumulator acc{};
+    network.rebuildAccumulator(board, acc);
+    const ValueAccumulator before = acc;
+    const auto expectThrow = [&](int move, Cell to, const char* label) {
+      bool threw = false;
+      try {
+        network.updateAccumulator(board, move, to, acc);
+      } catch (const ValueNetError&) {
+        threw = true;
+      }
+      CHECK(threw);
+      CHECK(acc == before);
+      if (!threw) std::cerr << "  " << label << " did not throw\n";
+    };
+    expectThrow(112, Cell::Black, "place onto occupied");
+    expectThrow(113, Cell::Empty, "undo of an empty point");
+    expectThrow(-1, Cell::Black, "negative cell");
+    expectThrow(kCells, Cell::Black, "cell past the board");
+    expectThrow(114, static_cast<Cell>(7), "non-stone target");
+  }
+
+  {
+    std::cout << "[wide accumulator is exact and reversible at the limits]\n";
+    Parameters wide = constantParameters(0);
+    wide.b0[0] = 2147483647;
+    wide.b0[1] = -2147483647;
+    for (size_t i = 0; i < wide.w0.size(); ++i) {
+      wide.w0[i] = (i % 2 == 0) ? -32768 : 32767;
+    }
+    TempFile wide_file("gomoku_value_net_wide.gmvalue");
+    wide_file.write(buildBlob(wide, metadata(wide)));
+    ValueNetwork network;
+    network.load(wide_file.path());
+
+    std::vector<std::pair<int, Cell>> stones;
+    for (int i = 0; i < 100; ++i) {
+      stones.push_back({(i * 7 + 3) % kCells,
+                        i % 2 == 0 ? Cell::Black : Cell::White});
+    }
+    Board board = boardWith(stones, Color::Black);
+    // Use the board's final cell colours (duplicates, if any, would otherwise
+    // be subtracted with the wrong feature plane).
+    std::vector<std::pair<int, Cell>> unique;
+    for (int m = 0; m < kCells; ++m) {
+      if (board.cell(m) != Cell::Empty) unique.push_back({m, board.cell(m)});
+    }
+    ValueAccumulator acc{};
+    network.rebuildAccumulator(board, acc);
+    const ValueAccumulator full = acc;
+
+    Board empty(RuleMode::Renju);
+    ValueAccumulator base{};
+    network.rebuildAccumulator(empty, base);
+
+    // Subtract every row in a different order than the rebuild added them.
+    for (const auto& [cell, stone] : unique) {
+      (void)stone;
+      network.updateAccumulator(board, cell, Cell::Empty, acc);
+    }
+    CHECK(acc == base);
+    // Adding them back (to a board that reports those cells empty) restores
+    // the exact full accumulator.
+    for (const auto& [cell, stone] : unique) {
+      network.updateAccumulator(empty, cell, stone, acc);
+    }
+    CHECK(acc == full);
+    CHECK(network.inferAccumulator(acc) ==
+          network.inferAccumulatorScalar(acc));
+  }
+
+  {
+    std::cout << "[Evaluator incremental state matches the reference path]\n";
+    ValueNetwork network;
+    network.load(hand_file.path());
+    Board board(RuleMode::Renju);
+    Evaluator eval;
+    eval.setValueNetwork(&network);
+    eval.init(board);
+    const auto reference = [&]() {
+      return network.sideToMoveScore(network.evaluateBoard(board),
+                                     board.sideToMove());
+    };
+    CHECK(eval.evaluate(board) == reference());
+    const int moves[] = {index(7, 7), index(8, 8), index(6, 6), index(9, 9),
+                         index(5, 5), index(10, 10)};
+    for (int move : moves) {
+      eval.update(board, move, cellOf(board.sideToMove()));
+      board.place(move);
+      CHECK(eval.evaluate(board) == reference());
+    }
+    for (int i = static_cast<int>(sizeof(moves) / sizeof(moves[0])) - 1;
+         i >= 0; --i) {
+      const int move = board.lastMove();
+      eval.update(board, move, Cell::Empty);
+      board.undo();
+      CHECK(eval.evaluate(board) == reference());
+    }
+    CHECK(eval.evaluate(board) == reference());
+  }
+
+  {
+    std::cout << "[search is identical across avx2 / scalar / reference]\n";
+    ValueNetwork network;
+    network.load(hand_file.path());
+    Board position = boardWith({{index(7, 7), Cell::Black},
+                                {index(8, 8), Cell::White},
+                                {index(6, 6), Cell::Black},
+                                {index(9, 9), Cell::White},
+                                {index(5, 5), Cell::Black},
+                                {index(10, 10), Cell::White}},
+                               Color::Black);
+    SearchLimits limits;
+    limits.vcfPolicy = VcfPolicy::Off;
+    limits.maxDepth = 2;
+    limits.moveTimeMs = 0;
+    Search search;
+    search.setValueNetwork(&network);
+    const auto run = [&](ValueBackend backend,
+                         ValueAccumulatorMode accumulator) {
+      network.setBackend(backend);
+      network.setAccumulatorMode(accumulator);
+      search.reset();
+      Board copy = position;
+      return search.findBestMove(copy, limits);
+    };
+    const SearchResult avx2 = run(ValueBackend::Avx2,
+                                  ValueAccumulatorMode::Incremental);
+    const SearchResult scalar = run(ValueBackend::Scalar,
+                                    ValueAccumulatorMode::Incremental);
+    const SearchResult reference = run(ValueBackend::Scalar,
+                                       ValueAccumulatorMode::FullRebuild);
+    CHECK(avx2.move == scalar.move && avx2.move == reference.move);
+    CHECK(avx2.score == scalar.score && avx2.score == reference.score);
+    CHECK(avx2.nodes == scalar.nodes && avx2.nodes == reference.nodes);
+    CHECK(avx2.reachedDepth == reference.reachedDepth);
+  }
+
+  {
+    std::cout << "[backend identity names]\n";
+    ValueBackend backend = ValueBackend::Scalar;
+    ValueAccumulatorMode accumulator = ValueAccumulatorMode::FullRebuild;
+    CHECK(valueEvalModeFromName("avx2", backend, accumulator));
+    CHECK(backend == ValueBackend::Avx2);
+    CHECK(accumulator == ValueAccumulatorMode::Incremental);
+    CHECK(valueEvalModeName(backend, accumulator) == "incremental-avx2");
+    CHECK(valueEvalModeFromName("scalar", backend, accumulator));
+    CHECK(valueEvalModeName(backend, accumulator) == "incremental-scalar");
+    CHECK(valueEvalModeFromName("reference", backend, accumulator));
+    CHECK(valueEvalModeName(backend, accumulator) == "full-rebuild-scalar");
+    CHECK(!valueEvalModeFromName("sse", backend, accumulator));
   }
 
   {

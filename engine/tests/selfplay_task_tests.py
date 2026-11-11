@@ -49,7 +49,7 @@ class ResultEngine:
     def send(self, *args):
         pass
     def recv_line(self):
-        return (f'eval="nnue", eval_engine="gmvalue1-scalar-full", value_model_id="{self.meta["model_id"]}", '
+        return (f'eval="nnue", eval_engine="gmvalue1-incremental-avx2", value_model_id="{self.meta["model_id"]}", '
             'value_model_arch="450-1024-64-32-1", value_model_rule="renju", '
             'value_model_feature_spec="absolute-color-450", value_model_contract="black-absolute-tanh-v1"')
     def move(self, cells):

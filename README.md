@@ -2,14 +2,14 @@
 
 Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"玩一把、收集数据、从0训练、自我训练、历史版本测评"。
 
-**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级、持续教师训练，以及完全无教师的胜负自主训练；增量/SIMD 优化和完整任务恢复仍待实现。
+**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级、持续教师训练、完全无教师的胜负自主训练，以及新模型的增量累加器与 AVX2 部署推理；完整任务恢复（工单 12）仍待实现。
 
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md) 和 [10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)。其余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md) 和 [11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)。剩余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
 
 ## 设计方向
 
@@ -164,13 +164,31 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 ## 新模型实际对弈（工单 07）
 
 - **加载**：`--value-model PATH` 严格读取 `GMVALUE1`。校验 magic/版本、架构、规则、特征、价值契约、固定点参数、元数据一致性与 FNV 校验；损坏、截断、旧 `GMNNUE01` 或元数据不兼容时进程以非零码退出并在 stderr 说明原因，**不会**静默切回手工评估再标成 NNUE。`--value-model` 与旧 `--nnue` 互斥。
-- **推理参照**：`engine/src/value_net.{h,cpp}` 实现 450 → 1024 → 64 → 32 → 1 的标量前向和全量第一层重建（int64 累加，避免饱和后无法撤销）。这是工单 11 增量累加器与 SIMD 的长期数值参照；本工单的搜索评估每次做全量重建。
+- **推理参照**：`engine/src/value_net.{h,cpp}` 保留 450 → 1024 → 64 → 32 → 1 的标量前向和全量第一层重建（int64 累加，避免饱和后无法撤销），作为工单 11 增量与 AVX2 的长期数值参照。
 - **数值契约**：网络输出黑方绝对定点 z；`value = tanh(z / 2^ea)`。搜索使用 `stm_score = ±round(z × 1000 / 2^ea)`（黑方为正、白方取反），并限制在 ±100000，远低于 mate 分。终局与已证明 VCF 分数由搜索先判定，网络分数不能覆盖。
-- **搜索接入**：新模型接入现有 Alpha-Beta 选点；合法落点、终局、开源 VCF 与时间控制共同生效。`about`/`think` 返回实际加载的 `model_id`、架构、规则、特征、价值契约与 `backend=scalar-full-rebuild`；模型只是「候选试玩（未晋级）」，加载成功不会自动晋级。
+- **搜索接入**：新模型接入现有 Alpha-Beta 选点；合法落点、终局、开源 VCF 与时间控制共同生效。`about`/`think` 返回实际加载的 `model_id`、架构、规则、特征、价值契约和实际推理后端（工单 11 默认 `incremental-avx2`）；模型只是「候选试玩（未晋级）」，加载成功不会自动晋级。
 - **GUI**：「模型与评估方式」面板列出/浏览 `weights/` 下的 `*.gmvalue`，应用后重启引擎并显示真实模型身份；加载失败保留当前引擎并明确报错。启动参数 `--model PATH`。
 - **无界面路径**：执行器 `--executor --value-model PATH`、Gomocup 协议模式与 `tools/match_runner.py --engine-a "... --value-model PATH"` 均可完成真实对局；从着法记录 `replay` 得到相同终局。
 - **验证**：`value_net_tests`（加载/拒绝/前向/全量重建/视角/终局与 VCF 优先级）、`value_parity_tests`（C++ 与 `trainer/value_format.infer_int` 逐位一致；本地 demo 模型与训练原模型按冻结容差对拍）、`value_engine_blackbox`（真实完整对局、重放、时间控制、正负视角、严格失败）、`gui_model_smoke`（offscreen 模型选择到落子）。验收记录见[工单 07](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)。
-- **性能**：全量参照推理在 40 子局面实测约 14 µs/次；增量与 AVX2 加速属于工单 11，本工单不以此声称棋力提升。
+- **性能**：本工单的全量参照路径已由工单 11 的增量与 AVX2 路径替代；实测见下节。优化只改变推理成本，不以此声称棋力提升。
+
+## 增量累加器与推理加速（工单 11）
+
+- **第一层增量**：落子加上该特征的 `W0` 行，撤销减去同一行；64 → 32 → 1 仍正常前向，不把整网评估描述成只有向量加减。累加器是 int64 且不做饱和：`int32 bias + 225×int16` 远小于 int64 范围，因此任意顺序的加减都能精确还原；`board + 撤销栈` 与累加器同步，非法落子/撤销在修改前被拒绝。
+- **三个后端**：`--value-backend avx2`（默认，增量第一层 + AVX2 前向）、`scalar`（增量第一层 + 标量前向）、`reference`（全量重建 + 标量前向，工单 07 的数值参照）。`--executor` 与 Gomocup 模式都支持；`about`/`think` 回显 `value_model_backend`、`value_model_accumulator`、`value_model_compute`，其中 `reference` 可作为数值或性能回退路径。
+- **数值一致性**：`value_probe` 新增 `walk` 会话，在真实落子、连续撤销序列上逐步比较增量 z 与全量参照 z；标量与 AVX2 每一步逐位相同。`value_net_tests` 覆盖随机合法序列、深撤销、终局、BOARD 同步、非法操作和极值权重可逆性。
+- **单次推理实测**（2026-11-11，Windows 11，i7-14700KF，Release / Zig 0.17.1，`weights/value-demo/model.gmvalue` SHA-256 `232fa166…5885`，单线程，每配置 20000 次）：
+
+  | 局面子数 | 全量标量参照 | 增量标量 | 增量 AVX2 |
+  |---:|---:|---:|---:|
+  | 6 | 3.69 µs | 3.31 µs | 2.27 µs |
+  | 20 | 5.09 µs | 2.98 µs | 2.32 µs |
+  | 40 | 6.98 µs | 2.86 µs | 2.24 µs |
+
+  40 子时增量 AVX2 约为全量参照的 3.1×；AVX2 相对增量标量约 1.27×。全量重建随棋子数增长，增量路径基本恒定。
+- **搜索吞吐**（同一局面、固定深度 4、关闭 VCF、单线程、5 次中位数）：reference 123.7k nps、scalar 146.7k、avx2 168.2k；AVX2 约为全量参照的 1.36×。三者的着法、分数、节点数完全相同。整机提速小于单次推理提速，因为合法着法生成、胜负判定和搜索本身占主要成本。
+- **配对开局实际表现**：AVX2 与 reference 两个引擎、2 个冻结开局各换色一局共 4 局（深度 2、关闭 VCF）。每对走法序列、胜方颜色与终局完全一致，比分 2:2，无异常。这说明优化没有改变选点；不以该结果声称棋力提升。
+- **验证**：`value_net_tests`、`value_parity_tests`（walk 对拍 + 推理计时）、`value_backend_tests`（真实搜索吞吐 + 配对开局）、`value_engine_blackbox`（真实对局与后端身份）。完整验收记录见[工单 11](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)。
 
 ## 历史版本测评与晋级（工单 08）
 
@@ -283,7 +301,7 @@ CLI 仍默认单路采集；32 线程机器可使用[高吞吐示例](tools/high
 | VCF | 已接入开源 quintet（MIT，固定 commit），适配层区分已证明/未证明/预算耗尽/中断，证据经执行器复查 | 保持上游版本，供工单 05 的战术筛选与打标复用 |
 | 标签 | 已接入 Rapfi 教师（固定版本）与版本化样本存储，区分评分/建议着法/胜负标签 | 持续采集与样本池（工单 05）、结果标签 |
 | 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
-| 推理 | `GMVALUE1` 标量全量参照前向已接入搜索；旧 NNUE 保留 | 第一层增量累加、AVX2 与实际搜索吞吐（工单 11） |
+| 推理 | `GMVALUE1` 第一层增量累加 + AVX2 已接入真实搜索与采集；保留全量标量参照和 `--value-backend reference`；旧 NNUE 保留 | 三后端逐位一致，按实测报告推理与搜索性能 |
 | 数据与编排 | 有容量上限的样本池、教师/过渡/完全无教师任务及周期晋级 | 完整暂停恢复 |
 | GUI | 对弈、采集、教师打标、训练、模型选择、历史测评、原子晋级与自主任务已完成 | 任务恢复与最终工作台整合 |
 

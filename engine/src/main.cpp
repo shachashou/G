@@ -22,6 +22,9 @@ void printUsage() {
             << "  --nnue-backend NAME  legacy NNUE backend: avx2 (default) | scalar\n"
             << "  --value-model PATH   deployed value network (GMVALUE1); a bad\n"
             << "                       file aborts instead of falling back\n"
+            << "  --value-backend NAME value inference: avx2 (default, incremental\n"
+            << "                       first layer) | scalar | reference (full\n"
+            << "                       rebuild + scalar, numeric reference)\n"
             << "  --executor           JSON-lines authoritative executor (ticket 02)\n"
             << "  --help               show this help\n"
             << "Default: Alpha-Beta search over the Gomocup stdin/stdout protocol.\n";
@@ -66,12 +69,24 @@ int main(int argc, char* argv[]) {
       cfg.nnueBackend = argv[++i];
     } else if (a == "--value-model" && i + 1 < argc) {
       cfg.valueModel = argv[++i];
+    } else if (a == "--value-backend" && i + 1 < argc) {
+      cfg.valueBackend = argv[++i];
     }
   }
   if (!cfg.valueModel.empty() && !cfg.nnueWeights.empty()) {
     std::cerr << "--value-model and --nnue are mutually exclusive; choose the "
                  "deployed GMVALUE1 model or the legacy weights\n";
     return 2;
+  }
+  {
+    gomoku::ValueBackend backend = gomoku::ValueBackend::Avx2;
+    gomoku::ValueAccumulatorMode accumulator =
+        gomoku::ValueAccumulatorMode::Incremental;
+    if (!gomoku::valueEvalModeFromName(cfg.valueBackend, backend,
+                                       accumulator)) {
+      std::cerr << "--value-backend must be avx2, scalar or reference\n";
+      return 2;
+    }
   }
   try {
     if (executorMode) {

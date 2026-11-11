@@ -523,8 +523,14 @@ class MainWindow(QMainWindow):
                                    else "冻结历史版本 ") + entry["version"])
             except (ValueError, OSError, KeyError):
                 pass
+            backend = str(value.get("backend", "unknown"))
+            backend_text = {
+                "incremental-avx2": "增量累加 + AVX2",
+                "incremental-scalar": "增量累加 + 标量前向",
+                "full-rebuild-scalar": "全量标量参照",
+            }.get(backend, backend)
             text = (
-                "评估方式：价值网络 GMVALUE1（标量全量参照前向）\n"
+                f"评估方式：价值网络 GMVALUE1（{backend_text}）\n"
                 f"模型：{value.get('model_id', '?')}  "
                 f"{value.get('arch', '')}\n"
                 f"规则/特征/价值：{value.get('rule', '?')} / "

@@ -265,11 +265,20 @@ if(GOMOKU_PYTHON)
   set_tests_properties(nnue_parity_tests PROPERTIES TIMEOUT 300)
 
   # Ticket 07: C++ GMVALUE1 reference forward / full rebuild vs the Python
-  # integer reference and the exported training model.
+  # integer reference and the exported training model. Ticket 11 adds the
+  # incremental place/undo walk (scalar vs AVX2) and single-inference timing.
   add_test(NAME value_parity_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/value_parity_tests.py"
             "$<TARGET_FILE:value_probe>")
   set_tests_properties(value_parity_tests PROPERTIES TIMEOUT 600)
+
+  # Ticket 11: real Alpha-Beta search and paired-opening play across the
+  # avx2 / scalar / full-rebuild backends, plus measured search throughput.
+  add_test(NAME value_backend_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/value_backend_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>"
+            "${CMAKE_SOURCE_DIR}/tools")
+  set_tests_properties(value_backend_tests PROPERTIES TIMEOUT 300)
 
   # Ticket 10: scalar/AVX2 bit-exact parity and single-evaluation timing.
   add_test(NAME nnue_backend_tests

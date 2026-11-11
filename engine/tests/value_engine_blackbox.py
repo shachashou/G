@@ -124,8 +124,8 @@ def test_identity_and_full_game(model: Path, metadata: dict) -> None:
         about = client.about()
         check(about.get("value_model_loaded") is True,
               "about reports the value model as loaded")
-        check(about.get("eval_backend") == "value-gmvalue1-scalar",
-              "about names the scalar GMVALUE1 deployment backend")
+        check(about.get("eval_backend") == "value-gmvalue1-incremental-avx2",
+              "about names the incremental AVX2 GMVALUE1 deployment backend")
         check(about.get("eval") == "nnue",
               "about reports NNUE evaluation, not handcrafted")
         value = about.get("value_model") or {}
@@ -138,6 +138,10 @@ def test_identity_and_full_game(model: Path, metadata: dict) -> None:
         check(value.get("rule") == "renju"
               and value.get("feature_spec") == "absolute-color-450",
               "about shows the Renju rule and absolute-colour features")
+        check(value.get("backend") == "incremental-avx2"
+              and value.get("accumulator") == "incremental"
+              and value.get("compute") == "avx2",
+              "about reports the incremental first layer and AVX2 compute")
         check(value.get("promoted") is False
               and value.get("status") == "candidate-unpromoted",
               "a loaded model is a playable candidate, not an auto-promotion")
@@ -209,6 +213,39 @@ def test_side_to_move_perspective(tmp: Path) -> None:
         check(black_score == -expected,
               f"negative black-absolute z gives -{expected} to black "
               f"(got {black_score})")
+
+
+def test_backend_identity_and_parity(model: Path) -> None:
+    print("[executor: backend identity and bit-identical move selection]")
+    cells = cells_from(
+        [(7, 7), (9, 7), (7, 9), (9, 9), (8, 8)],
+        [(8, 7), (7, 8), (9, 8), (8, 9), (6, 6)])
+    outcomes: dict[str, tuple] = {}
+    for backend, expected in (("avx2", "incremental-avx2"),
+                              ("scalar", "incremental-scalar"),
+                              ("reference", "full-rebuild-scalar")):
+        with ExecutorClient(EXE, "--value-model", str(model),
+                            "--value-backend", backend) as client:
+            about = client.about()
+            value = about.get("value_model") or {}
+            check(value.get("backend") == expected,
+                  f"{backend}: about reports {expected}")
+            client.new_game("renju")
+            state = client.rebuild(cells, "black", "renju")
+            check(state.get("ok") is True, f"{backend}: test position rebuilt")
+            response = client.think(depth=2, vcf_policy="off")
+            check(response.get("ok") is True,
+                  f"{backend}: fixed-depth think succeeds")
+            check(response.get("value_model_backend") == expected,
+                  f"{backend}: think echoes the active backend")
+            outcomes[backend] = (tuple(response["move"]),
+                                 int(response["score"]),
+                                 int(response["nodes"]))
+    check(outcomes["avx2"] == outcomes["scalar"]
+          and outcomes["avx2"] == outcomes["reference"],
+          "avx2 / scalar / reference choose the same move, score and node count")
+    print(f"  shared selection: move={outcomes['avx2'][0]}, "
+          f"score={outcomes['avx2'][1]}, nodes={outcomes['avx2'][2]}")
 
 
 def test_terminal_and_vcf(tmp: Path) -> None:
@@ -330,8 +367,8 @@ def test_protocol_full_game(model: Path, metadata: dict) -> None:
     black.send("ABOUT")
     about = black.recv() or ""
     check('eval="nnue"' in about
-          and 'eval_engine="gmvalue1-scalar-full"' in about,
-          "ABOUT identifies the GMVALUE1 deployment")
+          and 'eval_engine="gmvalue1-incremental-avx2"' in about,
+          "ABOUT identifies the incremental AVX2 GMVALUE1 deployment")
     check(f'value_model_id="{metadata["model_id"]}"' in about,
           "ABOUT reports the loaded model id")
     check('value_model_promoted="false"' in about,
@@ -386,6 +423,7 @@ def main() -> int:
             print("demo model absent: using a synthetic fallback model")
 
         test_identity_and_full_game(model, metadata)
+        test_backend_identity_and_parity(model)
         test_side_to_move_perspective(tmp)
         test_terminal_and_vcf(tmp)
         test_strict_rejection(tmp, model)

@@ -70,11 +70,13 @@ class TrainingTaskPanel(QGroupBox):
         self.spin_pairs = self._spin(1, 10000, 64)
         self.spin_ms = self._spin(10, 60000, 200)
         for fields in (
-            (("池容量", self.spin_capacity), ("启动训练样本", self.spin_min_train), ("新增样本/轮", self.spin_new)),
-            (("优化步/轮", self.spin_steps), ("批", self.spin_batch), ("最多候选", self.spin_rounds)),
+            (("池容量", self.spin_capacity), ("启动训练样本", self.spin_min_train)),
+            (("新增样本/轮", self.spin_new), ("优化步/轮", self.spin_steps)),
+            (("批", self.spin_batch), ("最多候选", self.spin_rounds)),
             (("最多采集局", self.spin_games), ("最长分钟", self.spin_minutes)),
-            (("采集并发", self.spin_workers), ("测评并发", self.spin_eval_workers), ("训练 CPU 线程", self.spin_cpu_threads)),
-            (("训练快照上限", self.spin_sample_limit), ("待训练积压", self.spin_pending), ("验证对局", self.spin_validation_games)),
+            (("采集并发", self.spin_workers), ("测评并发", self.spin_eval_workers)),
+            (("训练 CPU 线程", self.spin_cpu_threads), ("训练快照上限", self.spin_sample_limit)),
+            (("待训练积压", self.spin_pending), ("验证对局", self.spin_validation_games)),
             (("状态写入间隔秒", self.spin_state_seconds), ("检查点最小间隔秒", self.spin_checkpoint_seconds)),
             (("测评开局对", self.spin_pairs), ("每步 ms", self.spin_ms))):
             row = QHBoxLayout()
@@ -114,11 +116,14 @@ class TrainingTaskPanel(QGroupBox):
         self.spin_epsilon.setSingleStep(.05)
         self.spin_epsilon.setValue(.1)
         row.addWidget(self.spin_epsilon)
+        settings_layout.addLayout(row)
+        row = QHBoxLayout()
         row.addWidget(QLabel("历史教师权重"))
         self.spin_teacher_weight = QDoubleSpinBox()
         self.spin_teacher_weight.setRange(.01, 1)
         self.spin_teacher_weight.setValue(.25)
         row.addWidget(self.spin_teacher_weight)
+        row.addStretch(1)
         settings_layout.addLayout(row)
         self.settings = CollapsibleSection("任务与资源设置", settings_layout)
         self.settings.embed()
@@ -148,6 +153,8 @@ class TrainingTaskPanel(QGroupBox):
         row.addWidget(QLabel("恢复已中断任务"))
         self.combo_recover = QComboBox()
         row.addWidget(self.combo_recover, 1)
+        recovery_layout.addLayout(row)
+        row = QHBoxLayout()
         self.btn_refresh_tasks = QPushButton("刷新")
         self.btn_refresh_tasks.clicked.connect(self._refresh_recoverable)
         mark_button(self.btn_refresh_tasks, "quiet")
@@ -155,6 +162,7 @@ class TrainingTaskPanel(QGroupBox):
         self.btn_recover = QPushButton("恢复所选任务")
         self.btn_recover.clicked.connect(self.resume_selected)
         row.addWidget(self.btn_recover)
+        row.addStretch(1)
         recovery_layout.addLayout(row)
         self.btn_bootstrap = QPushButton("先建立 v0：切换到教师训练")
         self.btn_bootstrap.clicked.connect(self._choose_teacher)

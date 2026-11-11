@@ -24,7 +24,7 @@ class SettingsSheet(QObject):
         self.scrim.installEventFilter(self)
         self.frame = QFrame(parent)
         self.frame.setObjectName("Sheet")
-        self.frame.setFixedWidth(620)
+        self.frame.setFixedWidth(520)
         self.frame.hide()
         outer = QVBoxLayout(self.frame)
         outer.setContentsMargins(22, 20, 22, 18)
@@ -36,7 +36,7 @@ class SettingsSheet(QObject):
         header.addStretch(1)
         self.btn_close = QPushButton("关闭")
         self.btn_close.setObjectName("Quiet")
-        self.btn_close.setFixedWidth(52)
+        self.btn_close.setFixedWidth(48)
         self.btn_close.clicked.connect(self.hide)
         header.addWidget(self.btn_close)
         outer.addLayout(header)
@@ -91,7 +91,7 @@ class SettingsSheet(QObject):
 
     def reposition(self) -> None:
         rect = self.parent.rect()
-        width = min(620, max(360, rect.width() - 40))
+        width = min(520, max(340, rect.width() - 40))
         self.frame.setFixedWidth(width)
         self.frame.setGeometry(rect.width() - width - 16, 14,
                                width, max(200, rect.height() - 28))

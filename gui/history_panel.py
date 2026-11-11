@@ -61,6 +61,8 @@ class HistoryPanel(QGroupBox):
         self.spin_ms.setRange(10, 60000)
         self.spin_ms.setValue(200)
         row.addWidget(self.spin_ms)
+        advanced_layout.addLayout(row)
+        row = QHBoxLayout()
         row.addWidget(QLabel("并发对局"))
         self.spin_workers = QSpinBox()
         self.spin_workers.setRange(1, 256)

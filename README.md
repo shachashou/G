@@ -97,7 +97,7 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 .\gui\play.bat
 ~~~
 
-或 `.venv\Scripts\python.exe gui\gomoku_gui.py --help`。客户端通过 JSON-lines 协议调用权威执行器：完整合法落点、禁手原因、落子结果和终局都由 C++ 执行器给出，界面与 Python 裁判不另写规则。详见 [客户端说明](gui/README.md)。
+或 `.venv\Scripts\python.exe gui\gomoku_gui.py --help`。客户端通过 JSON-lines 协议调用权威执行器：完整合法落点、禁手原因、落子结果和终局都由 C++ 执行器给出，界面与 Python 裁判不另写规则。窗口可自由拖动缩放，棋盘按窗口尺寸等比重绘（15×15 网格始终居中，棋子与标记随格距缩放）；关闭时记住大小，下次启动沿用。详见 [客户端说明](gui/README.md)。
 
 **直接双击 `gui/play.bat` 默认加载 `weights/registry/state.json` 指向的当前正式模型。** 尚未登记 v0 时，显示手工威胁评估 + Alpha-Beta + VCF；`--model PATH` 可显式试玩候选。登记或晋级后，GUI 显示真实正式版本身份，后续启动沿用该版本。
 

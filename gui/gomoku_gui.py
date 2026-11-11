@@ -18,13 +18,13 @@ import time
 import uuid
 from pathlib import Path
 
-from PySide6.QtCore import QRect, Qt, QTimer, Signal
+from PySide6.QtCore import QPointF, QRect, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGraphicsDropShadowEffect, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QListWidget, QMainWindow, QMessageBox, QPushButton, QRadioButton,
-    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,10 +47,7 @@ from ui_components import (  # noqa: E402
 from settings_sheet import SettingsSheet  # noqa: E402
 
 SIZE = 15
-CELL = 36
-MARGIN = 30
-STONE_R = 15
-BOARD_PX = MARGIN * 2 + CELL * (SIZE - 1)
+BOARD_MIN_SIDE = 260
 
 RESULT_TEXT = {
     "ongoing": "对局进行中",
@@ -82,6 +79,19 @@ def model_args(model: str | None) -> list[str]:
     return ["--value-model", str(model)] if model else []
 
 
+def short_identity(text: str, keep: int = 8) -> str:
+    """Shorten a long ``name@40-char-commit`` token so labels can wrap."""
+    head, sep, rest = text.partition("@")
+    if not sep:
+        return text
+    parts = rest.split(" ", 1)
+    commit = parts[0]
+    if len(commit) <= keep:
+        return text
+    tail = " " + parts[1] if len(parts) > 1 else ""
+    return f"{head}@{commit[:keep]}…{tail}"
+
+
 def start_executor(exe: str, model: str | None) -> tuple[ExecutorClient, dict]:
     """Start the engine and return (client, about).
 
@@ -110,20 +120,14 @@ def start_executor(exe: str, model: str | None) -> tuple[ExecutorClient, dict]:
     return client, about
 
 
-def px(x: int) -> int:
-    return MARGIN + x * CELL
-
-
-def py(y: int) -> int:
-    return MARGIN + y * CELL
-
-
 class BoardWidget(QWidget):
     moveClicked = Signal(int, int)
 
     def __init__(self) -> None:
         super().__init__()
-        self.setFixedSize(BOARD_PX, BOARD_PX)
+        self.setMinimumSize(BOARD_MIN_SIDE, BOARD_MIN_SIDE)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.PointingHandCursor)
         self.cells: list[int] = [0] * (SIZE * SIZE)
         self.legal: set[tuple[int, int]] = set()
@@ -161,52 +165,85 @@ class BoardWidget(QWidget):
         self.dim = dim
         self.update()
 
+    def _metrics(self) -> tuple[float, float, float]:
+        """Cell spacing and grid origin for the current widget size.
+
+        The grid always stays square and centred while the board surface
+        fills the card, so dragging the window resizes it instead of
+        stretching or clipping it.
+        """
+        side = min(self.width(), self.height())
+        margin = max(10.0, side * 0.05)
+        cell = (side - 2 * margin) / (SIZE - 1)
+        return (cell,
+                (self.width() - side) / 2 + margin,
+                (self.height() - side) / 2 + margin)
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.fillRect(self.rect(), QColor(233, 224, 207))
 
-        painter.setPen(QPen(QColor(190, 176, 153), 1))
+        cell, ox, oy = self._metrics()
+        end = (SIZE - 1) * cell
+        painter.setPen(QPen(QColor(190, 176, 153), max(1.0, cell / 30)))
         for i in range(SIZE):
-            painter.drawLine(px(0), py(i), px(SIZE - 1), py(i))
-            painter.drawLine(px(i), py(0), px(i), py(SIZE - 1))
+            offset = i * cell
+            painter.drawLine(QPointF(ox, oy + offset),
+                             QPointF(ox + end, oy + offset))
+            painter.drawLine(QPointF(ox + offset, oy),
+                             QPointF(ox + offset, oy + end))
+
+        dot = max(2.0, cell * 0.09)
         painter.setBrush(QColor(150, 136, 114))
         painter.setPen(QPen(Qt.NoPen))
         for sx, sy in ((3, 3), (11, 3), (3, 11), (11, 11), (7, 7)):
-            painter.drawEllipse(px(sx) - 3, py(sy) - 3, 6, 6)
+            painter.drawEllipse(QPointF(ox + sx * cell, oy + sy * cell),
+                                dot, dot)
 
         if self.markers:
             painter.setPen(QPen(Qt.NoPen))
             painter.setBrush(QColor(0, 122, 255, 72))
+            marker = max(1.5, cell * 0.11)
             for x, y in self.legal:
-                painter.drawEllipse(px(x) - 3, py(y) - 3, 6, 6)
-            painter.setPen(QPen(QColor(255, 59, 48, 190), 2))
+                painter.drawEllipse(QPointF(ox + x * cell, oy + y * cell),
+                                    marker, marker)
+            painter.setPen(QPen(QColor(255, 59, 48, 190),
+                                max(1.0, cell * 0.07)))
+            cross = max(2.0, cell * 0.16)
             for x, y in self.forbidden:
-                painter.drawLine(px(x) - 4, py(y) - 4, px(x) + 4, py(y) + 4)
-                painter.drawLine(px(x) - 4, py(y) + 4, px(x) + 4, py(y) - 4)
+                cx, cy = ox + x * cell, oy + y * cell
+                painter.drawLine(QPointF(cx - cross, cy - cross),
+                                 QPointF(cx + cross, cy + cross))
+                painter.drawLine(QPointF(cx - cross, cy + cross),
+                                 QPointF(cx + cross, cy - cross))
 
+        radius = cell * 0.42
+        outline = QPen(QColor(60, 60, 67, 70), max(1.0, cell * 0.04))
         for m, c in enumerate(self.cells):
             if c == 0:
                 continue
             x, y = m % SIZE, m // SIZE
+            cx, cy = ox + x * cell, oy + y * cell
             # A soft, low-contrast shadow keeps the stones feeling placed on
             # the board instead of drawn on top of it.
             painter.setPen(QPen(Qt.NoPen))
             painter.setBrush(QColor(0, 0, 0, 34))
-            painter.drawEllipse(px(x) - STONE_R + 2, py(y) - STONE_R + 3,
-                                2 * STONE_R, 2 * STONE_R)
+            painter.drawEllipse(QPointF(cx + radius * 0.08,
+                                        cy + radius * 0.12),
+                                radius, radius)
             painter.setBrush(QColor(28, 28, 30) if c == 1
                              else QColor(255, 255, 255))
-            painter.setPen(QPen(QColor(60, 60, 67, 70), 1))
-            painter.drawEllipse(px(x) - STONE_R, py(y) - STONE_R,
-                                2 * STONE_R, 2 * STONE_R)
+            painter.setPen(outline)
+            painter.drawEllipse(QPointF(cx, cy), radius, radius)
 
         if self.last_move is not None:
             x, y = self.last_move
-            painter.setPen(QPen(QColor(0, 122, 255), 2))
+            ring = radius + max(2.0, cell * 0.1)
+            painter.setPen(QPen(QColor(0, 122, 255), max(1.5, cell * 0.08)))
             painter.setBrush(QBrush())
-            painter.drawEllipse(px(x) - STONE_R - 3, py(y) - STONE_R - 3,
-                                2 * STONE_R + 6, 2 * STONE_R + 6)
+            painter.drawEllipse(QPointF(ox + x * cell, oy + y * cell),
+                                ring, ring)
 
         if self.preview_mode and self.banner:
             if self.dim:
@@ -255,11 +292,13 @@ class BoardWidget(QWidget):
         if event.button() != Qt.LeftButton:
             return
         pos = event.position()
-        x = round((pos.x() - MARGIN) / CELL)
-        y = round((pos.y() - MARGIN) / CELL)
+        cell, ox, oy = self._metrics()
+        x = round((pos.x() - ox) / cell)
+        y = round((pos.y() - oy) / cell)
         if 0 <= x < SIZE and 0 <= y < SIZE:
-            if ((pos.x() - px(x)) ** 2 + (pos.y() - py(y)) ** 2
-                    <= (CELL * 0.48) ** 2):
+            if ((pos.x() - (ox + x * cell)) ** 2
+                    + (pos.y() - (oy + y * cell)) ** 2
+                    <= (cell * 0.45) ** 2):
                 self.moveClicked.emit(x, y)
 
 
@@ -269,9 +308,12 @@ class MainWindow(QMainWindow):
                  evaluations: str | Path = ROOT / "data" / "evaluations",
                  pool: str | Path = ROOT / "data" / "pool" / "pool.sqlite3",
                  collection_seed: int | None = None,
-                 teacher_store: str | Path = ROOT / "data/teacher/samples.sqlite3") -> None:
+                 teacher_store: str | Path = ROOT / "data/teacher/samples.sqlite3",
+                 restore_geometry: bool = False) -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
+        self._restore_geometry = restore_geometry
+        self._settings = QSettings("GomokuNNUE", "DesktopClient")
         app = QApplication.instance()
         if app is not None:
             apply_theme(app)
@@ -339,8 +381,8 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("Root")
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(28, 20, 28, 22)
-        outer.setSpacing(10)
+        outer.setContentsMargins(20, 14, 20, 16)
+        outer.setSpacing(8)
 
         header = QWidget()
         header_row = QHBoxLayout(header)
@@ -352,9 +394,9 @@ class MainWindow(QMainWindow):
         self.combo_model.setObjectName("ModelCapsule")
         self.combo_model.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.combo_model.setMinimumContentsLength(16)
-        self.combo_model.setMinimumWidth(210)
-        self.combo_model.setMaximumWidth(360)
+        self.combo_model.setMinimumContentsLength(14)
+        self.combo_model.setMinimumWidth(170)
+        self.combo_model.setMaximumWidth(280)
         self._reload_model_choices()
         self.combo_model.activated.connect(self._model_capsule_activated)
         header_row.addWidget(self.combo_model)
@@ -390,24 +432,26 @@ class MainWindow(QMainWindow):
         content = QWidget()
         root = QHBoxLayout(content)
         root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(24)
+        root.setSpacing(18)
 
         self.board = BoardWidget()
         self.board.moveClicked.connect(self._on_player_move)
         board_card = QFrame()
         board_card.setObjectName("BoardCard")
+        board_card.setSizePolicy(QSizePolicy.Policy.Expanding,
+                                 QSizePolicy.Policy.Expanding)
         board_layout = QVBoxLayout(board_card)
-        board_layout.setContentsMargins(18, 18, 18, 18)
-        board_layout.addWidget(self.board, 0, Qt.AlignCenter)
+        board_layout.setContentsMargins(12, 12, 12, 12)
+        board_layout.addWidget(self.board, 1)
         shadow = QGraphicsDropShadowEffect(board_card)
-        shadow.setBlurRadius(34)
-        shadow.setOffset(0, 10)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 8)
         shadow.setColor(QColor(0, 0, 0, 26))
         board_card.setGraphicsEffect(shadow)
-        root.addWidget(board_card, 0, Qt.AlignTop)
+        root.addWidget(board_card, 1)
 
         panel = QVBoxLayout()
-        panel.setSpacing(14)
+        panel.setSpacing(12)
         tabs = QTabWidget()
         self.tabs = tabs
         play_page = QWidget()
@@ -482,9 +526,11 @@ class MainWindow(QMainWindow):
         self.result_label = QLabel("对局进行中")
         self.vcf_label = QLabel("算杀：未检查")
         self.vcf_label.setWordWrap(True)
+        engine_identity = str(self._about.get("vcf_engine", "未加载"))
         self.vcf_engine_label = QLabel(
-            "算杀引擎：" + str(self._about.get("vcf_engine", "未加载")))
+            "算杀引擎：" + short_identity(engine_identity))
         self.vcf_engine_label.setWordWrap(True)
+        self.vcf_engine_label.setToolTip(engine_identity)
         self.replay_label = QLabel("")
         self.replay_label.setWordWrap(True)
         details_layout = QVBoxLayout()
@@ -501,7 +547,7 @@ class MainWindow(QMainWindow):
         record_layout = QVBoxLayout()
         record_layout.setContentsMargins(0, 0, 0, 0)
         self.moves_list = QListWidget()
-        self.moves_list.setMaximumHeight(220)
+        self.moves_list.setMaximumHeight(180)
         record_layout.addWidget(self.moves_list)
         self.record_section = CollapsibleSection("着法记录", record_layout)
         play_layout.addWidget(self.record_section)
@@ -550,14 +596,18 @@ class MainWindow(QMainWindow):
         self.spin_collect_capacity.setSingleStep(50)
         self.spin_collect_capacity.setValue(200)
         collect_row.addWidget(self.spin_collect_capacity)
+        collect_row.addStretch(1)
+        collect_advanced_layout = QVBoxLayout()
+        collect_advanced_layout.setContentsMargins(0, 0, 0, 0)
+        collect_advanced_layout.addLayout(collect_row)
+        collect_row = QHBoxLayout()
         collect_row.addWidget(QLabel("预算(ms)"))
         self.spin_collect_budget = QSpinBox()
         self.spin_collect_budget.setRange(100, 2000)
         self.spin_collect_budget.setSingleStep(100)
         self.spin_collect_budget.setValue(300)
         collect_row.addWidget(self.spin_collect_budget)
-        collect_advanced_layout = QVBoxLayout()
-        collect_advanced_layout.setContentsMargins(0, 0, 0, 0)
+        collect_row.addStretch(1)
         collect_advanced_layout.addLayout(collect_row)
         self.collect_advanced = CollapsibleSection("采集参数",
                                                    collect_advanced_layout)
@@ -617,6 +667,9 @@ class MainWindow(QMainWindow):
         self.spin_train_batch.setRange(1, 512)
         self.spin_train_batch.setValue(16)
         train_row.addWidget(self.spin_train_batch)
+        train_row.addStretch(1)
+        train_advanced_layout.addLayout(train_row)
+        train_row = QHBoxLayout()
         train_row.addWidget(QLabel("lr"))
         self.spin_train_lr = QDoubleSpinBox()
         self.spin_train_lr.setDecimals(5)
@@ -627,6 +680,7 @@ class MainWindow(QMainWindow):
         self.combo_train_loss = QComboBox()
         self.combo_train_loss.addItems(["MSE", "SmoothL1"])
         train_row.addWidget(self.combo_train_loss)
+        train_row.addStretch(1)
         train_advanced_layout.addLayout(train_row)
         self.train_advanced = CollapsibleSection("训练参数",
                                                  train_advanced_layout)
@@ -678,12 +732,12 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll.setMinimumWidth(420)
+        scroll.setMinimumWidth(360)
         scroll.setWidget(panel_widget)
         root.addWidget(scroll, 1)
         outer.addWidget(content, 1)
         self.setCentralWidget(central)
-        self.resize(BOARD_PX + 700, BOARD_PX + 170)
+        self._apply_window_size()
 
         # ---- model details + settings sheet ---------------------------
         teacher_layout = QVBoxLayout()
@@ -761,6 +815,27 @@ class MainWindow(QMainWindow):
         self.settings_sheet.add_section("eval", "测评报告",
                                         self.history_panel.report)
         self.btn_settings.clicked.connect(lambda: self.settings_sheet.show())
+
+    def _default_window_size(self) -> tuple[int, int]:
+        """A small first launch; the window is freely resizable afterwards."""
+        screen = self.screen()
+        if screen is None:
+            return 880, 520
+        available = screen.availableGeometry()
+        return (max(700, min(900, int(available.width() * 0.48))),
+                max(420, min(560, int(available.height() * 0.48))))
+
+    def _apply_window_size(self) -> None:
+        self.setMinimumSize(700, 420)
+        if self._restore_geometry:
+            saved = self._settings.value("window/geometry")
+            if saved is not None and self.restoreGeometry(saved):
+                screen = self.screen()
+                if screen is not None and screen.availableGeometry().intersects(
+                        self.frameGeometry()):
+                    return
+        width, height = self._default_window_size()
+        self.resize(width, height)
 
     def _training_mode_changed(self, key: str | None = None) -> None:
         key = key or self.training_mode.current()
@@ -1765,6 +1840,12 @@ class MainWindow(QMainWindow):
         self.error_label.setText("错误：" + message)
         self.error_label.show()
 
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        sheet = getattr(self, "settings_sheet", None)
+        if sheet is not None and sheet.visible():
+            sheet.reposition()
+
     def closeEvent(self, event) -> None:
         self.training_task_panel.shutdown()
         self.history_panel.shutdown()
@@ -1790,6 +1871,8 @@ class MainWindow(QMainWindow):
         self._active_teacher = None
         self._timer.stop()
         self._client.close()
+        if self._restore_geometry:
+            self._settings.setValue("window/geometry", self.saveGeometry())
         event.accept()
 
 
@@ -1826,7 +1909,8 @@ def main() -> int:
             "或通过 --engine / GOMOKU_ENGINE 指定路径。")
         return 1
     window = MainWindow(exe, args.movetime, model=args.model,
-                        pool=args.pool, collection_seed=args.collection_seed)
+                        pool=args.pool, collection_seed=args.collection_seed,
+                        restore_geometry=True)
     window.show()
     return app.exec()
 

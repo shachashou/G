@@ -21,10 +21,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
-    QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
-    QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
+    QGraphicsDropShadowEffect, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QMainWindow, QMessageBox, QPushButton, QRadioButton,
+    QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +41,9 @@ from model_registry import ModelRegistry, DEFAULT_REGISTRY  # noqa: E402
 from run_support import file_identity  # noqa: E402
 from history_panel import HistoryPanel  # noqa: E402
 from training_task_panel import TrainingTaskPanel  # noqa: E402
+from ui_components import (  # noqa: E402
+    CollapsibleSection, apply_theme, mark_button, page_title,
+)
 
 SIZE = 15
 CELL = 36
@@ -138,23 +141,23 @@ class BoardWidget(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.fillRect(self.rect(), QColor(221, 183, 124))
+        painter.fillRect(self.rect(), QColor(233, 224, 207))
 
-        painter.setPen(QPen(QColor(59, 42, 24), 1))
+        painter.setPen(QPen(QColor(190, 176, 153), 1))
         for i in range(SIZE):
             painter.drawLine(px(0), py(i), px(SIZE - 1), py(i))
             painter.drawLine(px(i), py(0), px(i), py(SIZE - 1))
-        painter.setBrush(QColor(59, 42, 24))
+        painter.setBrush(QColor(150, 136, 114))
         painter.setPen(QPen(Qt.NoPen))
         for sx, sy in ((3, 3), (11, 3), (3, 11), (11, 11), (7, 7)):
             painter.drawEllipse(px(sx) - 3, py(sy) - 3, 6, 6)
 
         if self.markers:
             painter.setPen(QPen(Qt.NoPen))
-            painter.setBrush(QColor(0, 150, 0, 110))
+            painter.setBrush(QColor(0, 122, 255, 72))
             for x, y in self.legal:
-                painter.drawEllipse(px(x) - 4, py(y) - 4, 8, 8)
-            painter.setPen(QPen(QColor(190, 0, 0, 170), 2))
+                painter.drawEllipse(px(x) - 3, py(y) - 3, 6, 6)
+            painter.setPen(QPen(QColor(255, 59, 48, 190), 2))
             for x, y in self.forbidden:
                 painter.drawLine(px(x) - 4, py(y) - 4, px(x) + 4, py(y) + 4)
                 painter.drawLine(px(x) - 4, py(y) + 4, px(x) + 4, py(y) - 4)
@@ -163,18 +166,24 @@ class BoardWidget(QWidget):
             if c == 0:
                 continue
             x, y = m % SIZE, m // SIZE
-            painter.setBrush(QColor(17, 17, 17) if c == 1
-                             else QColor(250, 250, 250))
-            painter.setPen(QPen(QColor(60, 60, 60), 1))
+            # A soft, low-contrast shadow keeps the stones feeling placed on
+            # the board instead of drawn on top of it.
+            painter.setPen(QPen(Qt.NoPen))
+            painter.setBrush(QColor(0, 0, 0, 34))
+            painter.drawEllipse(px(x) - STONE_R + 2, py(y) - STONE_R + 3,
+                                2 * STONE_R, 2 * STONE_R)
+            painter.setBrush(QColor(28, 28, 30) if c == 1
+                             else QColor(255, 255, 255))
+            painter.setPen(QPen(QColor(60, 60, 67, 70), 1))
             painter.drawEllipse(px(x) - STONE_R, py(y) - STONE_R,
                                 2 * STONE_R, 2 * STONE_R)
 
         if self.last_move is not None:
             x, y = self.last_move
-            painter.setPen(QPen(QColor(224, 32, 32), 2))
+            painter.setPen(QPen(QColor(0, 122, 255), 2))
             painter.setBrush(QBrush())
-            painter.drawRect(px(x) - STONE_R - 2, py(y) - STONE_R - 2,
-                             2 * STONE_R + 4, 2 * STONE_R + 4)
+            painter.drawEllipse(px(x) - STONE_R - 3, py(y) - STONE_R - 3,
+                                2 * STONE_R + 6, 2 * STONE_R + 6)
         painter.end()
 
     def mousePressEvent(self, event) -> None:
@@ -198,6 +207,9 @@ class MainWindow(QMainWindow):
                  teacher_store: str | Path = ROOT / "data/teacher/samples.sqlite3") -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app)
         self._exe = exe
         self._think_ms = think_ms
         self._registry = ModelRegistry(registry)
@@ -249,12 +261,43 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
-        root = QHBoxLayout(central)
+        central.setObjectName("Root")
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(28, 22, 28, 24)
+        outer.setSpacing(16)
+
+        header = QWidget()
+        header_row = QHBoxLayout(header)
+        header_row.setContentsMargins(2, 0, 2, 0)
+        header_row.setSpacing(12)
+        header_row.addWidget(page_title("五子棋", "本地对弈 · 训练 · 测评"))
+        header_row.addStretch(1)
+        self.header_status = QLabel("准备就绪")
+        self.header_status.setObjectName("Pill")
+        header_row.addWidget(self.header_status)
+        outer.addWidget(header)
+
+        content = QWidget()
+        root = QHBoxLayout(content)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(24)
+
         self.board = BoardWidget()
         self.board.moveClicked.connect(self._on_player_move)
-        root.addWidget(self.board)
+        board_card = QFrame()
+        board_card.setObjectName("BoardCard")
+        board_layout = QVBoxLayout(board_card)
+        board_layout.setContentsMargins(18, 18, 18, 18)
+        board_layout.addWidget(self.board, 0, Qt.AlignCenter)
+        shadow = QGraphicsDropShadowEffect(board_card)
+        shadow.setBlurRadius(34)
+        shadow.setOffset(0, 10)
+        shadow.setColor(QColor(0, 0, 0, 26))
+        board_card.setGraphicsEffect(shadow)
+        root.addWidget(board_card, 0, Qt.AlignTop)
 
         panel = QVBoxLayout()
+        panel.setSpacing(14)
         # One workbench, five visible workflows. The board and model picker
         # stay outside the tabs so play/collection/training/evaluation all see
         # the same actual model identity.
@@ -269,7 +312,7 @@ class MainWindow(QMainWindow):
         eval_page = QWidget()
         eval_layout = QVBoxLayout(eval_page)
 
-        setup = QGroupBox("对局设置")
+        setup = QGroupBox("对局")
         sv = QVBoxLayout(setup)
         colors = QHBoxLayout()
         self.radio_black = QRadioButton("我执黑（先手）")
@@ -288,10 +331,16 @@ class MainWindow(QMainWindow):
         btns.addWidget(self.btn_stop)
         sv.addLayout(btns)
 
+        mark_button(self.btn_new, "primary")
+        mark_button(self.btn_stop, "danger")
+
+        advanced_play_layout = QVBoxLayout()
+        advanced_play_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_play_layout.setSpacing(8)
         self.chk_markers = QCheckBox("显示合法落点 / 禁手原因")
         self.chk_markers.setChecked(True)
         self.chk_markers.toggled.connect(self._on_markers_toggled)
-        sv.addWidget(self.chk_markers)
+        advanced_play_layout.addWidget(self.chk_markers)
 
         vcf_row = QHBoxLayout()
         self.btn_vcf = QPushButton("算杀检查（VCF）")
@@ -303,7 +352,7 @@ class MainWindow(QMainWindow):
         self.spin_vcf.setSingleStep(1000)
         self.spin_vcf.setValue(50000)
         vcf_row.addWidget(self.spin_vcf)
-        sv.addLayout(vcf_row)
+        advanced_play_layout.addLayout(vcf_row)
 
         think = QHBoxLayout()
         think.addWidget(QLabel("引擎思考(ms)"))
@@ -311,14 +360,20 @@ class MainWindow(QMainWindow):
         self.spin_think.setRange(100, 30000)
         self.spin_think.setValue(self._think_ms)
         think.addWidget(self.spin_think)
-        sv.addLayout(think)
-        play_layout.addWidget(setup)
+        advanced_play_layout.addLayout(think)
 
-        teacher = QGroupBox("教师打标（Rapfi）")
-        tv = QVBoxLayout(teacher)
+        play_layout.addWidget(setup)
+        self.play_advanced = CollapsibleSection("高级对局设置",
+                                                advanced_play_layout)
+        play_layout.addWidget(self.play_advanced)
+
+        teacher_layout = QVBoxLayout()
+        teacher_layout.setContentsMargins(0, 0, 0, 0)
+        teacher_layout.setSpacing(8)
         self.teacher_label = QLabel(self._teacher_status_text())
         self.teacher_label.setWordWrap(True)
-        tv.addWidget(self.teacher_label)
+        self.teacher_label.setObjectName("Caption")
+        teacher_layout.addWidget(self.teacher_label)
         teacher_row = QHBoxLayout()
         self.btn_teacher = QPushButton("打标并保存样本")
         self.btn_teacher.clicked.connect(self._label_teacher)
@@ -329,16 +384,20 @@ class MainWindow(QMainWindow):
         self.spin_teacher_budget.setSingleStep(100)
         self.spin_teacher_budget.setValue(800)
         teacher_row.addWidget(self.spin_teacher_budget)
-        tv.addLayout(teacher_row)
+        teacher_layout.addLayout(teacher_row)
         self.teacher_result = QLabel("样本：未打标")
         self.teacher_result.setWordWrap(True)
-        tv.addWidget(self.teacher_result)
-        data_layout.addWidget(teacher)
+        self.teacher_result.setObjectName("Caption")
+        teacher_layout.addWidget(self.teacher_result)
+        self.teacher_section = CollapsibleSection("教师打标（Rapfi）",
+                                                  teacher_layout)
+        data_layout.addWidget(self.teacher_section)
 
-        collection = QGroupBox("持续采集")
+        collection = QGroupBox("采集数据")
         cv = QVBoxLayout(collection)
         self.collect_pool_label = QLabel(self._pool_status_text())
         self.collect_pool_label.setWordWrap(True)
+        self.collect_pool_label.setObjectName("Caption")
         cv.addWidget(self.collect_pool_label)
         collect_row = QHBoxLayout()
         collect_row.addWidget(QLabel("局数"))
@@ -358,7 +417,6 @@ class MainWindow(QMainWindow):
         self.spin_collect_budget.setSingleStep(100)
         self.spin_collect_budget.setValue(300)
         collect_row.addWidget(self.spin_collect_budget)
-        cv.addLayout(collect_row)
         collect_buttons = QHBoxLayout()
         self.btn_collect_start = QPushButton("启动采集")
         self.btn_collect_start.clicked.connect(self._start_collection)
@@ -368,16 +426,26 @@ class MainWindow(QMainWindow):
         self.btn_collect_stop = QPushButton("停止采集")
         self.btn_collect_stop.clicked.connect(self._stop_collection)
         self.btn_collect_stop.setEnabled(False)
+        mark_button(self.btn_collect_start, "primary")
+        mark_button(self.btn_collect_stop, "danger")
         collect_buttons.addWidget(self.btn_collect_start)
         collect_buttons.addWidget(self.btn_collect_pause)
         collect_buttons.addWidget(self.btn_collect_stop)
         cv.addLayout(collect_buttons)
         self.collect_label = QLabel("采集：未开始")
         self.collect_label.setWordWrap(True)
+        self.collect_label.setObjectName("Caption")
         cv.addWidget(self.collect_label)
+        collect_advanced_layout = QVBoxLayout()
+        collect_advanced_layout.setContentsMargins(0, 0, 0, 0)
+        collect_advanced_layout.addLayout(collect_row)
+        self.collect_advanced = CollapsibleSection("采集参数",
+                                                   collect_advanced_layout)
+        cv.addWidget(self.collect_advanced)
         data_layout.addWidget(collection)
+        data_layout.addStretch(1)
 
-        training = QGroupBox("价值网络训练")
+        training = QGroupBox("从0训练")
         tv2 = QVBoxLayout(training)
         pool_row = QHBoxLayout()
         pool_row.addWidget(QLabel("样本池"))
@@ -405,12 +473,17 @@ class MainWindow(QMainWindow):
         self.combo_train_loss = QComboBox()
         self.combo_train_loss.addItems(["MSE", "SmoothL1"])
         train_row.addWidget(self.combo_train_loss)
-        tv2.addLayout(train_row)
         out_row = QHBoxLayout()
         out_row.addWidget(QLabel("输出"))
         self.edit_train_output = QLineEdit(str(ROOT / "weights" / "value-run"))
         out_row.addWidget(self.edit_train_output)
         tv2.addLayout(out_row)
+        train_advanced_layout = QVBoxLayout()
+        train_advanced_layout.setContentsMargins(0, 0, 0, 0)
+        train_advanced_layout.addLayout(train_row)
+        self.train_advanced = CollapsibleSection("训练参数",
+                                                 train_advanced_layout)
+        tv2.addWidget(self.train_advanced)
         train_buttons = QHBoxLayout()
         self.btn_train_start = QPushButton("开始训练")
         self.btn_train_start.clicked.connect(self._start_training)
@@ -423,6 +496,7 @@ class MainWindow(QMainWindow):
         self.btn_train_stop = QPushButton("停止训练")
         self.btn_train_stop.clicked.connect(self._stop_training)
         self.btn_train_stop.setEnabled(False)
+        mark_button(self.btn_train_stop, "danger")
         train_buttons.addWidget(self.btn_train_start)
         train_buttons.addWidget(self.btn_train_pause)
         train_buttons.addWidget(self.btn_train_resume)
@@ -430,32 +504,40 @@ class MainWindow(QMainWindow):
         tv2.addLayout(train_buttons)
         self.train_label = QLabel("训练：未开始")
         self.train_label.setWordWrap(True)
+        self.train_label.setObjectName("Caption")
         tv2.addWidget(self.train_label)
         self.train_result = QLabel("")
         self.train_result.setWordWrap(True)
+        self.train_result.setObjectName("Caption")
         tv2.addWidget(self.train_result)
         train_layout.addWidget(training)
 
-        model_group = QGroupBox("模型与评估方式")
+        model_group = QGroupBox("模型")
         mv = QVBoxLayout(model_group)
         model_row = QHBoxLayout()
         self.combo_model = QComboBox()
+        self.combo_model.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_model.setMinimumContentsLength(18)
+        self.combo_model.setMinimumWidth(160)
         self._reload_model_choices()
         model_row.addWidget(self.combo_model, 1)
         self.btn_browse_model = QPushButton("浏览…")
         self.btn_browse_model.clicked.connect(self._browse_model)
+        mark_button(self.btn_browse_model, "quiet")
         model_row.addWidget(self.btn_browse_model)
-        mv.addLayout(model_row)
-        model_buttons = QHBoxLayout()
-        self.btn_apply_model = QPushButton("应用模型")
+        self.btn_apply_model = QPushButton("应用")
         self.btn_apply_model.clicked.connect(self._apply_model)
-        model_buttons.addWidget(self.btn_apply_model)
-        self.btn_unload_model = QPushButton("回到手工评估")
+        mark_button(self.btn_apply_model, "primary")
+        model_row.addWidget(self.btn_apply_model)
+        self.btn_unload_model = QPushButton("手工评估")
         self.btn_unload_model.clicked.connect(lambda: self._apply_model_path(None))
-        model_buttons.addWidget(self.btn_unload_model)
-        mv.addLayout(model_buttons)
+        mark_button(self.btn_unload_model, "quiet")
+        model_row.addWidget(self.btn_unload_model)
+        mv.addLayout(model_row)
         self.eval_label = QLabel("")
         self.eval_label.setWordWrap(True)
+        self.eval_label.setObjectName("Caption")
         mv.addWidget(self.eval_label)
         self._update_eval_label()
         panel.addWidget(model_group)
@@ -466,14 +548,16 @@ class MainWindow(QMainWindow):
         self.history_panel.busyChanged.connect(self._evaluation_busy)
         self.history_panel.published.connect(self._apply_model_path)
         eval_layout.addWidget(self.history_panel)
+        eval_layout.addStretch(1)
         self.training_task_panel = TrainingTaskPanel(self._exe, self._pool_path,
             self._registry.root, self._evaluations, ROOT / "weights/teacher-tasks",
             lambda: self._phase in ("idle", "game_over"))
         self.training_task_panel.busyChanged.connect(self._training_task_busy)
         self.training_task_panel.published.connect(self._apply_model_path)
         train_layout.addWidget(self.training_task_panel)
+        train_layout.addStretch(1)
 
-        status = QGroupBox("状态")
+        status = QGroupBox("对局状态")
         stv = QVBoxLayout(status)
         self.turn_label = QLabel("行棋方：-")
         self.status_label = QLabel("")
@@ -487,18 +571,30 @@ class MainWindow(QMainWindow):
         self.replay_label.setWordWrap(True)
         self.error_label = QLabel("")
         self.error_label.setWordWrap(True)
-        self.error_label.setStyleSheet("color: #B00020;")
-        for widget in (self.vcf_engine_label, self.turn_label,
-                       self.status_label, self.vcf_label, self.result_label,
-                       self.replay_label, self.error_label):
+        self.error_label.setStyleSheet("color: #FF3B30;")
+        for widget in (self.turn_label, self.status_label,
+                       self.result_label, self.error_label):
             stv.addWidget(widget)
+        details_layout = QVBoxLayout()
+        details_layout.setContentsMargins(0, 0, 0, 0)
+        details_layout.setSpacing(4)
+        self.vcf_label.setObjectName("Caption")
+        self.vcf_engine_label.setObjectName("Caption")
+        self.replay_label.setObjectName("Caption")
+        for widget in (self.vcf_engine_label, self.vcf_label,
+                       self.replay_label):
+            details_layout.addWidget(widget)
+        self.play_details = CollapsibleSection("对局详情", details_layout)
+        stv.addWidget(self.play_details)
         play_layout.addWidget(status)
 
-        record = QGroupBox("着法记录")
+        record = QGroupBox("记录")
         rv = QVBoxLayout(record)
         self.moves_list = QListWidget()
+        self.moves_list.setMaximumHeight(170)
         rv.addWidget(self.moves_list)
         play_layout.addWidget(record)
+        play_layout.addStretch(1)
 
         tabs.addTab(play_page, "玩一把")
         tabs.addTab(data_page, "收集数据")
@@ -510,11 +606,14 @@ class MainWindow(QMainWindow):
         panel_widget.setLayout(panel)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setMinimumWidth(460)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setMinimumWidth(420)
         scroll.setWidget(panel_widget)
-        root.addWidget(scroll)
+        root.addWidget(scroll, 1)
+        outer.addWidget(content, 1)
         self.setCentralWidget(central)
-        self.resize(BOARD_PX + 500, BOARD_PX + 100)
+        self.resize(BOARD_PX + 700, BOARD_PX + 170)
 
     def _evaluation_busy(self, busy: bool) -> None:
         self._phase = "evaluating" if busy else "idle"
@@ -548,6 +647,7 @@ class MainWindow(QMainWindow):
     def _update_eval_label(self) -> None:
         about = self._about or {}
         value = about.get("value_model") or {}
+        badge = "手工评估"
         if about.get("value_model_loaded"):
             status = "候选试玩（未晋级正式版本）"
             try:
@@ -559,6 +659,9 @@ class MainWindow(QMainWindow):
                                    else "冻结历史版本 ") + entry["version"])
             except (ValueError, OSError, KeyError):
                 pass
+            badge = ("候选模型" if status.startswith("候选")
+                     else status.replace("当前正式版本 ", "正式 ")
+                     .replace("冻结历史版本 ", "历史 "))
             backend = str(value.get("backend", "unknown"))
             backend_text = {
                 "incremental-avx2": "增量累加 + AVX2",
@@ -575,11 +678,14 @@ class MainWindow(QMainWindow):
                 f"文件：{value.get('path', '')}\n"
                 "状态：" + status)
         elif about.get("nnue_loaded"):
+            badge = "旧版 NNUE"
             text = ("评估方式：旧版 NNUE（" + str(about.get("nnue_backend"))
                     + "）\n文件：" + str(about.get("nnue_path")))
         else:
             text = "评估方式：手工威胁评估（没有加载已训练模型）"
         self.eval_label.setText(text)
+        if hasattr(self, "header_status"):
+            self.header_status.setText(badge)
 
     def _browse_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

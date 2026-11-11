@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QListWidget, QPushButton, QSpinBox, QTextEdit, QVBoxLayout,
 )
 from model_registry import ModelRegistry
+from ui_components import CollapsibleSection, mark_button
 
 
 class HistoryPanel(QGroupBox):
@@ -20,7 +21,7 @@ class HistoryPanel(QGroupBox):
     published = Signal(str)
 
     def __init__(self, exe, registry, output_root, can_start):
-        super().__init__("历史版本测评与晋级")
+        super().__init__("测评与晋级")
         self.exe, self.registry, self.output_root = exe, registry, output_root
         self.can_start = can_start
         self.thread = None
@@ -40,11 +41,14 @@ class HistoryPanel(QGroupBox):
         browse.clicked.connect(self._browse)
         row.addWidget(browse)
         layout.addLayout(row)
-        layout.addWidget(QLabel("额外历史对手（可多选；当前正式版本自动加入）"))
+        advanced_layout = QVBoxLayout()
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.setSpacing(6)
+        advanced_layout.addWidget(QLabel("额外历史对手（可多选；当前正式版本自动加入）"))
         self.opponents = QListWidget()
         self.opponents.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.opponents.setMaximumHeight(80)
-        layout.addWidget(self.opponents)
+        advanced_layout.addWidget(self.opponents)
         row = QHBoxLayout()
         row.addWidget(QLabel("开局对数"))
         self.spin_pairs = QSpinBox()
@@ -67,14 +71,16 @@ class HistoryPanel(QGroupBox):
         self.spin_threshold.setValue(0.5)
         self.spin_threshold.setSingleStep(0.01)
         row.addWidget(self.spin_threshold)
-        layout.addLayout(row)
+        advanced_layout.addLayout(row)
         hint = QLabel("赛前冻结；同开局换色、各 1 线程。至少 32 对；配对单侧 95% 下界须高于基线，多个对手校正。异常即停止且不晋级。v0 只验证一对完整合法对局，不宣称棋力提升。")
         hint.setWordWrap(True)
-        layout.addWidget(hint)
-        row = QHBoxLayout()
-        self.btn_initial = QPushButton("验证并登记 v0")
+        hint.setObjectName("Caption")
+        advanced_layout.addWidget(hint)
+        self.advanced = CollapsibleSection("测评参数与对手", advanced_layout)
+        layout.addWidget(self.advanced)
+        self.btn_initial = QPushButton("登记 v0")
         self.btn_initial.clicked.connect(lambda: self.start(True))
-        self.btn_challenge = QPushButton("测评并按条件晋级")
+        self.btn_challenge = QPushButton("开始测评")
         self.btn_challenge.clicked.connect(lambda: self.start(False))
         self.btn_stop = QPushButton("停止测评")
         self.btn_stop.clicked.connect(self.stop)
@@ -85,16 +91,26 @@ class HistoryPanel(QGroupBox):
         self.btn_resume_eval = QPushButton("继续上次中断的测评")
         self.btn_resume_eval.clicked.connect(self.resume_interrupted)
         self.btn_resume_eval.setEnabled(False)
-        for button in (self.btn_initial, self.btn_challenge, self.btn_pause,
-                       self.btn_resume_eval, self.btn_stop):
-            row.addWidget(button)
-        layout.addLayout(row)
+        mark_button(self.btn_initial, "primary")
+        mark_button(self.btn_challenge, "primary")
+        mark_button(self.btn_stop, "danger")
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(8)
+        primary_row.addWidget(self.btn_initial)
+        primary_row.addWidget(self.btn_challenge)
+        layout.addLayout(primary_row)
+        secondary_row = QHBoxLayout()
+        secondary_row.setSpacing(8)
+        for button in (self.btn_pause, self.btn_resume_eval, self.btn_stop):
+            secondary_row.addWidget(button)
+        layout.addLayout(secondary_row)
         self.status = QLabel("测评：未开始")
         self.status.setWordWrap(True)
+        self.status.setObjectName("Caption")
         layout.addWidget(self.status)
         self.report = QTextEdit()
         self.report.setReadOnly(True)
-        self.report.setMaximumHeight(180)
+        self.report.setMaximumHeight(170)
         layout.addWidget(self.report)
         row = QHBoxLayout()
         self.btn_current = QPushButton("使用当前正式版本")

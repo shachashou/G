@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import os
 import queue
 import random
@@ -26,6 +27,7 @@ class TrainingTaskPanel(QGroupBox):
         self.can_start = can_start
         self.messages = queue.Queue()
         self.task = self.thread = self.last_result = None
+        self._recoverable = []
         layout = QVBoxLayout(self)
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("教师训练（新增 Rapfi 标签）", "teacher")
@@ -110,11 +112,29 @@ class TrainingTaskPanel(QGroupBox):
         row = QHBoxLayout()
         self.btn_start = QPushButton("启动教师训练任务")
         self.btn_start.clicked.connect(self.start)
+        self.btn_pause = QPushButton("暂停任务")
+        self.btn_pause.clicked.connect(self.pause)
+        self.btn_pause.setEnabled(False)
+        self.btn_resume = QPushButton("继续暂停的任务")
+        self.btn_resume.clicked.connect(self.resume_runtime)
+        self.btn_resume.setEnabled(False)
         self.btn_stop = QPushButton("停止任务")
         self.btn_stop.clicked.connect(self.stop)
         self.btn_stop.setEnabled(False)
-        row.addWidget(self.btn_start)
-        row.addWidget(self.btn_stop)
+        for button in (self.btn_start, self.btn_pause, self.btn_resume,
+                       self.btn_stop):
+            row.addWidget(button)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("恢复已中断任务"))
+        self.combo_recover = QComboBox()
+        row.addWidget(self.combo_recover, 1)
+        self.btn_refresh_tasks = QPushButton("刷新")
+        self.btn_refresh_tasks.clicked.connect(self._refresh_recoverable)
+        row.addWidget(self.btn_refresh_tasks)
+        self.btn_recover = QPushButton("恢复所选任务")
+        self.btn_recover.clicked.connect(self.resume_selected)
+        row.addWidget(self.btn_recover)
         layout.addLayout(row)
         self.btn_bootstrap = QPushButton("先建立 v0：切换到教师训练")
         self.btn_bootstrap.clicked.connect(self._choose_teacher)
@@ -132,6 +152,7 @@ class TrainingTaskPanel(QGroupBox):
         self.combo_mode.currentIndexChanged.connect(self._mode_changed)
         self._high_throughput()
         self._mode_changed()
+        self._refresh_recoverable()
 
     def _high_throughput(self):
         cpus = os.cpu_count() or 1
@@ -225,22 +246,16 @@ class TrainingTaskPanel(QGroupBox):
             evaluation={"pairs": self.spin_pairs.value(), "movetime_ms": self.spin_ms.value(),
                         "workers": self.spin_eval_workers.value()})
 
-    def start(self):
-        if self.thread is not None or not self.can_start():
-            self.status.setText("任务：请先停止其它任务或对局思考")
-            return
-        from training_task import TrainingTask
-        config = self.make_config()
-        if not self._refresh_readiness():
-            self.status.setText(self.hint.text())
-            return
-        self.task = TrainingTask(config, progress=lambda value: self.messages.put(("state", value)))
-        task = self.task
+    def _start_worker(self, task, message: str):
+        self.task = task
         self.last_result = None
         self.busyChanged.emit(True)
         self.btn_start.setEnabled(False)
+        self.btn_pause.setEnabled(True)
+        self.btn_resume.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        self.status.setText("任务：正在核验依赖与冻结配置…")
+        self.btn_recover.setEnabled(False)
+        self.status.setText(message)
         self._enable_settings(False)
 
         def worker():
@@ -250,6 +265,83 @@ class TrainingTaskPanel(QGroupBox):
                 self.messages.put(("error", str(exc)))
         self.thread = threading.Thread(target=worker, daemon=True)
         self.thread.start()
+
+    def start(self):
+        if self.thread is not None or not self.can_start():
+            self.status.setText("任务：请先停止其它任务或对局思考")
+            return
+        from training_task import TrainingTask
+        config = self.make_config()
+        if not self._refresh_readiness():
+            self.status.setText(self.hint.text())
+            return
+        self._start_worker(
+            TrainingTask(config, progress=lambda value: self.messages.put(("state", value))),
+            "任务：正在核验依赖与冻结配置…")
+
+    def pause(self):
+        if self.task is None or self.thread is None:
+            return
+        if self.task.pause():
+            self.status.setText("任务：暂停中，等待当前棋局/优化步/测评配对到达安全边界…")
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(True)
+
+    def resume_runtime(self):
+        if self.task is None or self.thread is None:
+            return
+        if self.task.resume():
+            self.status.setText("任务：恢复中…")
+            self.btn_resume.setEnabled(False)
+            self.btn_pause.setEnabled(True)
+
+    def _refresh_recoverable(self):
+        roots = {Path(self.edit_output.text().strip() or str(self.output_root))}
+        roots.update(Path(path) for path in self.default_outputs.values())
+        found = {}
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for manifest in root.glob("*/manifest.json"):
+                directory = manifest.parent
+                status = "unknown"
+                try:
+                    state = json.loads((directory / "state.json").read_text(encoding="utf-8"))
+                    status = str(state.get("status", "unknown"))
+                except (OSError, ValueError):
+                    pass
+                if status in ("completed", "failed"):
+                    continue
+                found[str(directory.resolve())] = status
+        self._recoverable = sorted(found.items())
+        selected = self.combo_recover.currentData()
+        self.combo_recover.clear()
+        for path, status in self._recoverable:
+            self.combo_recover.addItem(f"{Path(path).name[:12]}… [{status}]", path)
+        if selected:
+            index = self.combo_recover.findData(selected)
+            if index >= 0:
+                self.combo_recover.setCurrentIndex(index)
+        self.btn_recover.setEnabled(bool(self._recoverable)
+                                    and self.thread is None
+                                    and self.can_start())
+
+    def resume_selected(self):
+        if self.thread is not None or not self.can_start():
+            self.status.setText("任务：请先停止其它任务或对局思考")
+            return
+        path = self.combo_recover.currentData()
+        if not path:
+            self.status.setText("任务：没有可恢复的任务目录")
+            return
+        from training_task import TrainingTask
+        try:
+            task = TrainingTask.resume_from_directory(
+                path, progress=lambda value: self.messages.put(("state", value)))
+        except (OSError, ValueError, KeyError) as exc:
+            self.status.setText("恢复失败：" + str(exc))
+            return
+        self._start_worker(task, "任务：正在核验冻结配置、模型与检查点…")
 
     def _enable_settings(self, enabled):
         self.btn_throughput.setEnabled(enabled)
@@ -262,10 +354,28 @@ class TrainingTaskPanel(QGroupBox):
             self.task.stop()
             self.status.setText("任务：停止中，正在保留检查点并回收进程…")
             self.btn_stop.setEnabled(False)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
+
+    STATUS_TEXT = {"created": "未开始", "running": "运行中", "pausing": "暂停中",
+                   "paused": "已暂停", "resuming": "恢复中", "stopping": "停止中",
+                   "stopped": "已停止", "completed": "已完成", "failed": "失败"}
+
+    def _sync_transport_buttons(self, status):
+        busy = status in ("running", "pausing", "paused", "resuming", "stopping")
+        self.btn_pause.setEnabled(busy and status in ("running", "resuming"))
+        self.btn_resume.setEnabled(busy and status in ("paused", "pausing"))
+        self.btn_stop.setEnabled(busy)
+        if not busy:
+            self.btn_recover.setEnabled(bool(self._recoverable)
+                                        and self.thread is None
+                                        and self.can_start())
 
     def show_state(self, state):
         data, train, evaluation = (state[name] for name in ("data", "trainer", "evaluation"))
-        self.status.setText(f"任务：{state['status']}；采集 {data.get('phase', '-')}；训练 {train.get('phase', '-')}；测评 {evaluation.get('phase', '-')}")
+        status = self.STATUS_TEXT.get(state['status'], state['status'])
+        self.status.setText(f"任务：{status}；采集 {data.get('phase', '-')}；训练 {train.get('phase', '-')}；测评 {evaluation.get('phase', '-')}")
+        self._sync_transport_buttons(state['status'])
         metrics = data.get("totals", data.get("metrics", {}))
         progress = train.get("progress", {})
         current = (evaluation.get("result", {}).get("publication") or state.get("current") or {})
@@ -292,9 +402,12 @@ class TrainingTaskPanel(QGroupBox):
                 continue
             self.thread = None
             self.btn_start.setEnabled(True)
+            self.btn_pause.setEnabled(False)
+            self.btn_resume.setEnabled(False)
             self.btn_stop.setEnabled(False)
             self._enable_settings(True)
             self._mode_changed()
+            self._refresh_recoverable()
             self.busyChanged.emit(False)
             if kind == "error":
                 self.status.setText("任务失败：" + state)

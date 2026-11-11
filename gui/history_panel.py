@@ -26,6 +26,7 @@ class HistoryPanel(QGroupBox):
         self.thread = None
         self.stop_event = None
         self.last_result = None
+        self._resume_run = None
         self.messages = queue.Queue()
         layout = QVBoxLayout(self)
         self.current_label = QLabel()
@@ -78,7 +79,14 @@ class HistoryPanel(QGroupBox):
         self.btn_stop = QPushButton("停止测评")
         self.btn_stop.clicked.connect(self.stop)
         self.btn_stop.setEnabled(False)
-        for button in (self.btn_initial, self.btn_challenge, self.btn_stop):
+        self.btn_pause = QPushButton("暂停测评")
+        self.btn_pause.clicked.connect(self.pause)
+        self.btn_pause.setEnabled(False)
+        self.btn_resume_eval = QPushButton("继续上次中断的测评")
+        self.btn_resume_eval.clicked.connect(self.resume_interrupted)
+        self.btn_resume_eval.setEnabled(False)
+        for button in (self.btn_initial, self.btn_challenge, self.btn_pause,
+                       self.btn_resume_eval, self.btn_stop):
             row.addWidget(button)
         layout.addLayout(row)
         self.status = QLabel("测评：未开始")
@@ -121,6 +129,9 @@ class HistoryPanel(QGroupBox):
             self.btn_initial.setEnabled(not busy and current is None)
             self.btn_challenge.setEnabled(not busy and current is not None)
             self.btn_current.setEnabled(not busy and current is not None)
+            self.btn_pause.setEnabled(busy)
+            self.btn_resume_eval.setEnabled(not busy and self._resume_run is not None)
+            self.btn_stop.setEnabled(busy)
         except (ValueError, OSError) as exc:
             self.current_label.setText("正式版本不可用：" + str(exc))
             self.btn_initial.setEnabled(False)
@@ -132,12 +143,12 @@ class HistoryPanel(QGroupBox):
         if path:
             self.edit_candidate.setText(path)
 
-    def start(self, initial=False):
+    def start(self, initial=False, resume_run=None):
         if self.thread is not None or not self.can_start():
             self.status.setText("测评：请先停止当前任务或对局思考")
             return
         candidate = self.edit_candidate.text().strip()
-        if not candidate:
+        if not candidate and resume_run is None:
             self.status.setText("测评：请选择候选模型")
             return
         # Capture widget values on the GUI thread, before starting the worker.
@@ -150,18 +161,25 @@ class HistoryPanel(QGroupBox):
         stop = self.stop_event = threading.Event()
         self.last_result = None
         self.busyChanged.emit(True)
-        self.status.setText("测评：冻结身份、开局和配置中…")
+        self.status.setText("测评：冻结身份、开局和配置中…"
+                            if resume_run is None else "测评：按已冻结开局重做中断的对局…")
         self.report.clear()
         self.btn_stop.setEnabled(True)
+        self.btn_pause.setEnabled(True)
+        self.btn_resume_eval.setEnabled(False)
 
         def worker():
             try:
                 from history_evaluation import EvaluationConfig, evaluate
                 config = EvaluationConfig(**settings)
-                result = evaluate(candidate, self.exe, registry=self.registry,
-                    output_root=self.output_root, config=config, opponents=opponents,
+                kwargs = dict(registry=self.registry,
+                    output_root=self.output_root, config=config,
+                    opponents=[] if resume_run is not None else opponents,
                     bootstrap=initial, stop_event=stop,
                     progress=lambda item: self.messages.put(("progress", item)))
+                if resume_run is not None:
+                    kwargs["resume_run"] = resume_run
+                result = evaluate(candidate or ".", self.exe, **kwargs)
                 self.messages.put(("done", result))
             except Exception as exc:
                 self.messages.put(("error", str(exc)))
@@ -170,11 +188,24 @@ class HistoryPanel(QGroupBox):
         self.thread.start()
         self.refresh()
 
+    def pause(self):
+        if self.stop_event is not None:
+            self.stop_event.set()
+            self.status.setText("测评：暂停中；当前配对结果丢弃，恢复时按同一冻结开局重做")
+            self.btn_pause.setEnabled(False)
+
+    def resume_interrupted(self):
+        if self._resume_run is None:
+            self.status.setText("测评：没有可继续的中断报告")
+            return
+        self.start(False, resume_run=self._resume_run)
+
     def stop(self):
         if self.stop_event is not None:
             self.stop_event.set()
             self.status.setText("测评：停止中；保留原正式版本")
             self.btn_stop.setEnabled(False)
+            self.btn_pause.setEnabled(False)
 
     def poll(self):
         while True:
@@ -188,11 +219,16 @@ class HistoryPanel(QGroupBox):
             self.thread = None
             self.stop_event = None
             self.btn_stop.setEnabled(False)
+            self.btn_pause.setEnabled(False)
             self.busyChanged.emit(False)
             if kind == "error":
                 self.status.setText("测评失败：" + item)
             else:
                 self.last_result = item
+                if item.get("status") == "interrupted":
+                    self._resume_run = item.get("run")
+                elif item.get("status") == "completed":
+                    self._resume_run = None
                 self.show_report(item)
                 if item.get("publication"):
                     self.published.emit(item["publication"]["path"])

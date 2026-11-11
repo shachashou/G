@@ -303,6 +303,72 @@ def frozen_files(run: Path) -> dict:
             for p in sorted((run / folder).rglob("*")) if p.is_file()}
 
 
+def frozen_file_changes(run: Path, manifest: dict) -> list[str]:
+    """Describe any frozen input that no longer matches the sealed manifest."""
+    recorded = manifest.get("files")
+    if (not isinstance(recorded, dict) or not recorded
+            or any(not isinstance(k, str) or not isinstance(v, str)
+                   for k, v in recorded.items())):
+        raise EvaluationError(f"cannot resume {run}: frozen file identities are missing or invalid")
+    current = frozen_files(run)
+    missing = sorted(set(recorded) - set(current))
+    unexpected = sorted(set(current) - set(recorded))
+    changed = sorted(name for name in set(recorded) & set(current)
+                     if recorded[name] != current[name])
+    return ([f"missing {name}" for name in missing]
+            + [f"changed {name}" for name in changed]
+            + [f"unexpected {name}" for name in unexpected])
+
+
+def load_resume_manifest(run: Path) -> tuple[dict, str, dict]:
+    """Return the sealed manifest, its hash and the last report of a run."""
+    path = run / "manifest.json"
+    if not path.is_file():
+        raise EvaluationError(f"cannot resume {run}: manifest.json is missing")
+    try:
+        manifest = read_json(path)
+    except (OSError, ValueError) as exc:
+        raise EvaluationError(f"cannot resume {run}: manifest.json is unreadable ({exc})") from exc
+    if not isinstance(manifest, dict) or manifest.get("format") != "GMVALUE-EVALUATION1":
+        raise EvaluationError(f"cannot resume {run}: unsupported manifest format")
+    manifest_sha = file_identity(path)["sha256"]
+    report_path = run / "report.json"
+    if not report_path.is_file():
+        raise EvaluationError(f"cannot resume {run}: report.json is missing")
+    try:
+        previous = read_json(report_path)
+    except (OSError, ValueError) as exc:
+        raise EvaluationError(f"cannot resume {run}: report.json is unreadable ({exc})") from exc
+    if not isinstance(previous, dict) or previous.get("manifest_sha256") != manifest_sha:
+        raise EvaluationError(
+            f"cannot resume {run}: manifest.json was rewritten after the run was sealed")
+    return manifest, manifest_sha, previous
+
+
+def frozen_bundle(run: Path, folder: str, entry, label: str) -> dict:
+    """Revalidate one frozen model copy in place without re-freezing it."""
+    if not isinstance(entry, dict) or not isinstance(entry.get("sha256"), str):
+        raise EvaluationError(f"cannot resume {run}: {label} identity is missing from the manifest")
+    bundle = checked_bundle(run / folder / "model.gmvalue")
+    if bundle["sha256"] != entry["sha256"] or bundle["model_id"] != entry.get("model_id"):
+        raise EvaluationError(f"cannot resume {run}: frozen {label} does not match the manifest")
+    bundle["source_path"] = entry.get("source_path", str(run / folder / "model.gmvalue"))
+    return bundle
+
+
+def resume_openings(run: Path, manifest: dict, config: EvaluationConfig) -> list:
+    """Accept only the originally drawn, structurally complete opening list."""
+    openings = manifest.get("openings")
+    if (not isinstance(openings, list) or len(openings) != config.pairs
+            or any(not isinstance(opening, list) or len(opening) != config.opening_plies
+                   or any(not (isinstance(move, list) and len(move) == 2
+                               and all(type(value) is int for value in move))
+                          for move in opening)
+                   for opening in openings)):
+        raise EvaluationError(f"cannot resume {run}: frozen openings are invalid")
+    return openings
+
+
 def verify_publication(run: Path, manifest_sha: str, report_sha: str, stop_event=None):
     if (file_identity(run / "manifest.json")["sha256"] != manifest_sha
             or file_identity(run / "report.json")["sha256"] != report_sha):
@@ -406,84 +472,152 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
              registry: str | Path = DEFAULT_REGISTRY,
              output_root: str | Path = ROOT / "data" / "evaluations",
              config: EvaluationConfig | None = None, opponents: list[str] | None = None,
-             bootstrap: bool = False, stop_event=None, progress=None) -> dict:
-    """Freeze, run, report and atomically publish; never writes training data."""
-    config = config or EvaluationConfig(seed=random.SystemRandom().randrange(2**31))
-    config.validate()
-    if bootstrap and config.pairs != 1:
-        raise EvaluationError("initial registration requires exactly one legal colour-swapped pair")
+             bootstrap: bool = False, stop_event=None, progress=None,
+             resume_run: str | Path | None = None) -> dict:
+    """Freeze, run, report and atomically publish; never writes training data.
+
+    ``resume_run`` reuses an interrupted run directory verbatim: candidate,
+    opponents, engine copy, openings, config, bootstrap flag, incumbent and
+    manifest hash all come from its sealed manifest, and every game is rerun.
+    In that mode the candidate/engine/config arguments are ignored, and a
+    non-empty ``opponents`` list is rejected.  Interrupted games are never
+    carried over.
+    """
     stop = stop_event if stop_event is not None else threading.Event()
     store = ModelRegistry(registry)
-    current = store.read()["current"]
-    if bootstrap != (current is None):
-        raise EvaluationError("register v0 first" if current is None else "v0 already exists")
-    selected = list(dict.fromkeys([current, *(opponents or [])])) if current else []
-    run = Path(output_root).resolve() / (datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:12])
-    run.mkdir(parents=True)
-    # Each run owns copies; training/export can keep changing the source file.
-    frozen_candidate = copy_bundle(Path(candidate).resolve(), run / "candidate")
-    frozen_opponents = {}
-    for version in selected:
-        entry = store.resolve(version)
-        bundle = copy_bundle(Path(entry["path"]), run / "opponents" / version)
-        if bundle["sha256"] == frozen_candidate["sha256"]:
-            raise EvaluationError("candidate is identical to a selected historical model")
-        frozen_opponents[version] = bundle
-    (run / "engine").mkdir()
-    source_engine = Path(engine).resolve()
-    engine_path = run / "engine" / source_engine.name
-    shutil.copy2(source_engine, engine_path)
-    exclusions = set(read_json(run / "candidate" / "training_positions.json")["d4_keys"])
-    # Fresh holdouts across repeated local trials reduce tuning to a single
-    # benchmark. Freeze the prior identities too, so selection is reproducible.
-    prior_openings = set()
-    for previous in run.parent.glob("*/manifest.json"):
-        previous_manifest = read_json(previous)
-        if previous_manifest.get("format") == "GMVALUE-EVALUATION1":
-            prior_openings.update(previous_manifest.get("opening_d4_keys", []))
-    openings, seen = [], set()
-    rng = random.Random(config.seed)
-    with ExecutorClient(engine_path) as referee:
-        for _ in range(max(1000, config.pairs * 100)):
-            opening = [list(p) for p in random_opening(rng, config.opening_plies, config.opening_region)]
-            state = referee.new_game("renju")
-            for x, y in opening:
-                state = referee.play(x, y)
+    if resume_run is not None:
+        run = Path(resume_run).resolve()
+        manifest, manifest_sha, previous = load_resume_manifest(run)
+        changes = frozen_file_changes(run, manifest)
+        if changes:
+            listed = "; ".join(changes[:8]) + ("; ..." if len(changes) > 8 else "")
+            raise EvaluationError(
+                f"cannot resume {run}: frozen files no longer match the manifest ({listed})")
+        if opponents:
+            raise EvaluationError("resumed runs use the frozen opponent list; do not pass opponents")
+        recorded_config = manifest.get("config")
+        if not isinstance(recorded_config, dict):
+            raise EvaluationError(f"cannot resume {run}: frozen configuration is missing")
+        try:
+            config = EvaluationConfig(**recorded_config)
+        except (KeyError, TypeError) as exc:
+            raise EvaluationError(f"cannot resume {run}: invalid frozen configuration ({exc})") from exc
+        config.validate()
+        bootstrap = manifest.get("bootstrap")
+        incumbent = manifest.get("incumbent")
+        if type(bootstrap) is not bool or (bootstrap and incumbent is not None):
+            raise EvaluationError(f"cannot resume {run}: invalid frozen registration contract")
+        recorded_opponents = manifest.get("opponents")
+        frozen_candidate = frozen_bundle(run, "candidate", manifest.get("candidate"), "candidate")
+        frozen_opponents = {}
+        if bootstrap:
+            if recorded_opponents:
+                raise EvaluationError(f"cannot resume {run}: initial registration cannot freeze opponents")
+        else:
+            if (not isinstance(incumbent, str) or not isinstance(recorded_opponents, dict)
+                    or not recorded_opponents or incumbent not in recorded_opponents):
+                raise EvaluationError(f"cannot resume {run}: frozen incumbent or opponents are invalid")
+            for version, entry in recorded_opponents.items():
+                if not isinstance(version, str) or not re.fullmatch(r"v[0-9]+", version):
+                    raise EvaluationError(f"cannot resume {run}: invalid frozen opponent name")
+                frozen_opponents[version] = frozen_bundle(
+                    run, f"opponents/{version}", entry, f"opponent {version}")
+        relative_engine = manifest.get("engine_path")
+        if not isinstance(relative_engine, str):
+            raise EvaluationError(f"cannot resume {run}: frozen engine path is missing")
+        engine_path = (run / relative_engine).resolve()
+        if not engine_path.is_relative_to(run) or not engine_path.is_file():
+            raise EvaluationError(f"cannot resume {run}: frozen engine is missing")
+        if manifest.get("rule") != "renju":
+            raise EvaluationError(f"cannot resume {run}: unsupported frozen rule")
+        openings = resume_openings(run, manifest, config)
+        expected_current = incumbent
+        started = time.monotonic()
+        prior_count = previous.get("resume_count", 0)
+        report = {"format": "GMVALUE-EVALUATION-REPORT1", "run": str(run),
+                  "manifest_sha256": manifest_sha, "status": "running", "eligible": False,
+                  "matches": {}, "statistics": {}, "publication": None,
+                  "resumed": True,
+                  "resume_count": (prior_count if type(prior_count) is int else 0) + 1,
+                  "previous_status": previous.get("status")}
+        write_json(run / "report.json", report)
+        last_report_write = started
+    else:
+        config = config or EvaluationConfig(seed=random.SystemRandom().randrange(2**31))
+        config.validate()
+        if bootstrap and config.pairs != 1:
+            raise EvaluationError("initial registration requires exactly one legal colour-swapped pair")
+        current = store.read()["current"]
+        if bootstrap != (current is None):
+            raise EvaluationError("register v0 first" if current is None else "v0 already exists")
+        selected = list(dict.fromkeys([current, *(opponents or [])])) if current else []
+        run = Path(output_root).resolve() / (datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:12])
+        run.mkdir(parents=True)
+        # Each run owns copies; training/export can keep changing the source file.
+        frozen_candidate = copy_bundle(Path(candidate).resolve(), run / "candidate")
+        frozen_opponents = {}
+        for version in selected:
+            entry = store.resolve(version)
+            bundle = copy_bundle(Path(entry["path"]), run / "opponents" / version)
+            if bundle["sha256"] == frozen_candidate["sha256"]:
+                raise EvaluationError("candidate is identical to a selected historical model")
+            frozen_opponents[version] = bundle
+        (run / "engine").mkdir()
+        source_engine = Path(engine).resolve()
+        engine_path = run / "engine" / source_engine.name
+        shutil.copy2(source_engine, engine_path)
+        exclusions = set(read_json(run / "candidate" / "training_positions.json")["d4_keys"])
+        # Fresh holdouts across repeated local trials reduce tuning to a single
+        # benchmark. Freeze the prior identities too, so selection is reproducible.
+        prior_openings = set()
+        for previous in run.parent.glob("*/manifest.json"):
+            previous_manifest = read_json(previous)
+            if previous_manifest.get("format") == "GMVALUE-EVALUATION1":
+                prior_openings.update(previous_manifest.get("opening_d4_keys", []))
+        openings, seen = [], set()
+        rng = random.Random(config.seed)
+        with ExecutorClient(engine_path) as referee:
+            for _ in range(max(1000, config.pairs * 100)):
+                opening = [list(p) for p in random_opening(rng, config.opening_plies, config.opening_region)]
+                state = referee.new_game("renju")
+                for x, y in opening:
+                    state = referee.play(x, y)
+                    if not state.get("ok") or state["result"] != "ongoing":
+                        break
                 if not state.get("ok") or state["result"] != "ongoing":
+                    continue
+                key = canonical_key(state["cells"], state["side_to_move"])
+                if key in exclusions or key in seen or key in prior_openings:
+                    continue
+                seen.add(key)
+                openings.append(opening)
+                if len(openings) == config.pairs:
                     break
-            if not state.get("ok") or state["result"] != "ongoing":
-                continue
-            key = canonical_key(state["cells"], state["side_to_move"])
-            if key in exclusions or key in seen or key in prior_openings:
-                continue
-            seen.add(key)
-            openings.append(opening)
-            if len(openings) == config.pairs:
-                break
-    if len(openings) != config.pairs:
-        raise EvaluationError("cannot generate enough distinct held-out openings")
-    manifest = {"format": "GMVALUE-EVALUATION1", "purpose": "evaluation-only",
-                "created_at": now(), "bootstrap": bootstrap, "incumbent": current,
-                "candidate": frozen_candidate, "opponents": frozen_opponents,
-                "engine_path": str(engine_path.relative_to(run)),
-                "config": asdict(config), "rule": "renju", "openings": openings,
-                "opening_d4_keys": sorted(seen), "source": source_identity(),
-                "prior_evaluation_d4_keys": sorted(prior_openings),
-                "implementation": {name: file_identity(ROOT / relative)
-                    for name, relative in (("evaluation", "tools/history_evaluation.py"),
-                        ("registry", "tools/model_registry.py"), ("transport", "tools/match_runner.py"),
-                        ("referee_client", "tools/executor.py"), ("format", "trainer/value_format.py"))},
-                "statistics": "paired-hoeffding-bonferroni-v1",
-                "anomaly_policy": "abort-run-no-promotion",
-                "stop_rule": "fixed-pairs-no-early-success", "files": frozen_files(run)}
-    write_json(run / "manifest.json", manifest)
-    manifest_sha = file_identity(run / "manifest.json")["sha256"]
-    report = {"format": "GMVALUE-EVALUATION-REPORT1", "run": str(run),
-              "manifest_sha256": manifest_sha, "status": "running", "eligible": False,
-              "matches": {}, "statistics": {}, "publication": None}
-    write_json(run / "report.json", report)
-    started = time.monotonic()
-    last_report_write = started
+        if len(openings) != config.pairs:
+            raise EvaluationError("cannot generate enough distinct held-out openings")
+        manifest = {"format": "GMVALUE-EVALUATION1", "purpose": "evaluation-only",
+                    "created_at": now(), "bootstrap": bootstrap, "incumbent": current,
+                    "candidate": frozen_candidate, "opponents": frozen_opponents,
+                    "engine_path": str(engine_path.relative_to(run)),
+                    "config": asdict(config), "rule": "renju", "openings": openings,
+                    "opening_d4_keys": sorted(seen), "source": source_identity(),
+                    "prior_evaluation_d4_keys": sorted(prior_openings),
+                    "implementation": {name: file_identity(ROOT / relative)
+                        for name, relative in (("evaluation", "tools/history_evaluation.py"),
+                            ("registry", "tools/model_registry.py"), ("transport", "tools/match_runner.py"),
+                            ("referee_client", "tools/executor.py"), ("format", "trainer/value_format.py"))},
+                    "statistics": "paired-hoeffding-bonferroni-v1",
+                    "anomaly_policy": "abort-run-no-promotion",
+                    "stop_rule": "fixed-pairs-no-early-success", "files": frozen_files(run)}
+        write_json(run / "manifest.json", manifest)
+        manifest_sha = file_identity(run / "manifest.json")["sha256"]
+        expected_current = current
+        report = {"format": "GMVALUE-EVALUATION-REPORT1", "run": str(run),
+                  "manifest_sha256": manifest_sha, "status": "running", "eligible": False,
+                  "matches": {}, "statistics": {}, "publication": None}
+        write_json(run / "report.json", report)
+        started = time.monotonic()
+        last_report_write = started
     aborted = False
     matches = {"initial": frozen_candidate} if bootstrap else frozen_opponents
     for name, opponent in matches.items():
@@ -520,9 +654,17 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
         try:
             if stop.is_set():
                 raise RegistryError("stopped before publication")
-            report["publication"] = store.publish(run, expected_current=current,
-                expected_manifest_sha=manifest_sha, expected_report_sha=report_sha,
-                stop_event=stop)
+            # A resume (or a racing publisher) may already have promoted this
+            # exact candidate; never create a duplicate version for it.
+            current_entry = store.resolve()
+            if (current_entry is not None
+                    and current_entry["sha256"] == frozen_candidate["sha256"]):
+                report["publication"] = current_entry
+                report["publication_skipped"] = "candidate already current"
+            else:
+                report["publication"] = store.publish(run, expected_current=expected_current,
+                    expected_manifest_sha=manifest_sha, expected_report_sha=report_sha,
+                    stop_event=stop)
         except (RegistryError, EvaluationError, OSError, ValueError) as exc:
             report["publication_error"] = str(exc)
     report["report_sha256"] = report_sha

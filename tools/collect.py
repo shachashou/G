@@ -113,6 +113,7 @@ def play_game(game_client: ExecutorClient, config: CollectConfig,
 def collect(pool: SamplePool, config: CollectConfig,
             game_client: ExecutorClient, label_client: ExecutorClient,
             teacher, stop_event: threading.Event | None = None,
+            pause_event: threading.Event | None = None,
             progress=None) -> dict:
     """Runs one collection run; caller owns the clients/teacher lifecycle."""
     run_id = pool.start_run(config.snapshot())
@@ -155,6 +156,11 @@ def collect(pool: SamplePool, config: CollectConfig,
                 **summary}
 
     for index in range(config.games):
+        # A pause takes effect between whole games; the current game either
+        # commits or is aborted, never half-written.
+        while (pause_event is not None and pause_event.is_set()
+               and not (stop_event is not None and stop_event.is_set())):
+            time.sleep(0.1)
         if stop_event is not None and stop_event.is_set():
             return report(stopped=True)
         source_id = (f"{config.strategy_version}-{config.seed}-"

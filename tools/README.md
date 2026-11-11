@@ -86,12 +86,15 @@
 
 ## 持续教师训练编排（工单 09）
 
-`training_task.py` 提供 GUI / CLI 共用的 `TrainingTask(TaskConfig).run()`、`stop()`、`snapshot()`。`TeacherDataSource` 负责教师依赖及单盘数据生产；调度器只依赖数据源的 `preflight()` / `produce()`，训练与测评分别调用现有 `train_value()` 和 `evaluate()`，为后续替换监督来源保留边界。
+`training_task.py` 提供 GUI / CLI 共用的 `TrainingTask(TaskConfig).run()`、`pause()`、`resume()`、`stop()`、`snapshot()`，以及从任务目录重建的 `TrainingTask.resume_from_directory()`。`TeacherDataSource` 负责教师依赖及单盘数据生产；调度器只依赖数据源的 `preflight()` / `produce()`，训练与测评分别调用现有 `train_value()` 和 `evaluate()`，为后续替换监督来源保留边界。
 
 - 每盘开始从正式登记表绑定模型，核验实际加载身份；采集运行配置记录 task id、正式版本与模型哈希，提交事件关联 source ids 和 pool run id。
 - `SamplePool.training_snapshot()` 在同一 WAL 读事务中读取分组、提交计数和数据；`value_data.load_pool()` 冻结为内存数据。指纹覆盖完整记录，不再只哈希行号；`commit_sequence` 与 `committed_training_samples` 区分已提交数据和暂存写入。
 - 调度器要求启动阈值、后续新提交样本与变化的数据指纹，支持新旧抽样、积压背压、容量限速、候选保留及次数/时间/空转上限；不会无限重复训练未变化的数据。
-- 任务持有样本池专属 lease，GUI 禁止与手工任务并行抢占。停止会回收本任务拥有的引擎/教师进程、丢弃暂存对局，保留已提交数据与有效模型；完整任务恢复留给工单 12。
+- 任务持有样本池专属 lease，GUI 禁止与手工任务并行抢占。停止会回收本任务拥有的引擎/教师进程、丢弃暂存对局，保留已提交数据与有效模型。
+- 暂停在安全边界生效：采集在整盘之间、训练在优化步边界保存含模型/优化器/步数/Python RNG 状态的 `last.pt`、测评在整对边界中断。每轮开始前把实际训练/验证样本与池提交身份冻结为 `rounds/round-NNNNN-bundle.json`；恢复时使用该 bundle，而不是重新从变化的池中抽样，并冻结验证集、价值契约、模型血统和测评配置。
+- `resume_from_directory()` 要求目录内 `manifest.json` 的配置与任务完全一致，引擎副本哈希、检查点架构/数据身份、监督来源兼容；配置或文件变化会明确拒绝。重启时若旧 lease 的 PID 已不存在，由同一任务接管并清理 staged 对局；`next_game` 持久化，避免重复对局身份。
+- 中断的测评复用原 run 目录和冻结开局整对重做；如果同一候选已是现任版本，报告 `candidate already current`，不会重复发布版本。
 
 默认值与操作见[根目录说明](../README.md#持续教师训练工单-09)，所有可配置字段见[示例 JSON](teacher-task.example.json)：
 
@@ -120,7 +123,7 @@
 ./.venv/Scripts/python.exe tools/match_runner.py --help
 ~~~
 
-现有选项只描述当前实现。完整暂停恢复仍按工单 12 交付。
+现有选项只描述当前实现。任务暂停/恢复是 Python API（GUI 与 `TrainingTask` 调用）；CLI `training_task.py` 仍按配置启动新任务，不新增 `--resume` 参数。
 
 持续任务支持 `collector_workers`，测评配置支持 `workers`，分别并行运行独立的完整对局；全局局数、停止、背压和数据池容量仍有界。32 逻辑线程机器可参考 `high-throughput-task.example.json`。独立历史测评支持 `--workers 8`，双方仍各 1 线程并使用相同时间。
 

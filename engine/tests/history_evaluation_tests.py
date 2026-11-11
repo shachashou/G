@@ -110,6 +110,19 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(report["publication"]["version"], "v0", report.get("publication_error"))
         return report
 
+    def interrupted_challenge(self):
+        """Publish v0, then stop a challenge after its first finished game."""
+        self.initial()
+        config = replace(self.cfg, pairs=8, min_pairs=8, workers=4, report_interval_s=3600)
+        stop = threading.Event()
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            report = self.run_eval(model=1, config=config, stop_event=stop,
+                                   progress=lambda _: stop.set())
+        self.assertEqual(report["status"], "interrupted")
+        self.assertGreaterEqual(len(report["matches"]["v0"]), 1)
+        self.assertLess(len(report["matches"]["v0"]), config.pairs * 2)
+        return report, config
+
     def pointer(self):
         return (self.registry / "state.json").read_bytes()
 
@@ -267,6 +280,116 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(safe["status"], "completed")
         finally:
             self.models[1].write_bytes(original)
+
+    def test_resume_after_interruption_reruns_and_publishes_once(self):
+        interrupted, config = self.interrupted_challenge()
+        run = Path(interrupted["run"])
+        first_manifest = he.read_json(run / "manifest.json")
+        first_openings = first_manifest["openings"]
+        self.assertEqual(len(ModelRegistry(self.registry).read()["versions"]), 1)
+        output_dirs = {path.name for path in self.output.iterdir()}
+        observed = []
+
+        def on_progress(info):
+            if not observed:
+                observed.append(he.read_json(Path(info["run"]) / "report.json"))
+
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            resumed = self.run_eval(model=1, config=config, resume_run=run,
+                                    progress=on_progress)
+        self.assertTrue(observed and observed[0]["resumed"])
+        self.assertEqual(observed[0]["status"], "running")
+        self.assertEqual(Path(resumed["run"]), run.resolve())
+        self.assertEqual({path.name for path in self.output.iterdir()}, output_dirs)
+        self.assertEqual(he.read_json(run / "manifest.json")["openings"], first_openings)
+        self.assertEqual(resumed["status"], "completed")
+        self.assertTrue(resumed["eligible"])
+        self.assertTrue(resumed["resumed"])
+        self.assertNotIn("publication_skipped", resumed)
+        games = resumed["matches"]["v0"]
+        self.assertEqual(len(games), config.pairs * 2)
+        self.assertTrue(all(g["valid"] and not g["anomalies"] for g in games))
+        for index, game in enumerate(games):
+            self.assertEqual(game["pair"], index // 2)
+            self.assertEqual(game["opening"], first_openings[game["pair"]])
+        self.assertEqual(resumed["publication"]["version"], "v1",
+                         resumed.get("publication_error"))
+        self.assertEqual([entry["version"] for entry in ModelRegistry(self.registry).read()["versions"]],
+                         ["v0", "v1"])
+        published = self.pointer()
+        # A second resume must recognise the promoted candidate, not publish it again.
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            again = self.run_eval(model=1, config=config, resume_run=run)
+        self.assertEqual(Path(again["run"]), run.resolve())
+        self.assertEqual(again["status"], "completed")
+        self.assertTrue(again["eligible"])
+        self.assertEqual(again["publication"]["version"], "v1")
+        self.assertEqual(again["publication_skipped"], "candidate already current")
+        self.assertEqual(len(ModelRegistry(self.registry).read()["versions"]), 2)
+        self.assertEqual(published, self.pointer())
+        result = he.read_json(run / "result.json")
+        self.assertEqual(result["publication"]["version"], "v1")
+        self.assertTrue(result["resumed"])
+        self.assertEqual(result["report_sha256"],
+                         file_identity(run / "report.json")["sha256"])
+
+    def test_resume_interrupted_initial_registration(self):
+        config = replace(self.cfg, seed=7)
+        stop = threading.Event()
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            interrupted = self.run_eval(bootstrap=True, config=config, stop_event=stop,
+                                        progress=lambda _: stop.set())
+        self.assertEqual(interrupted["status"], "interrupted")
+        self.assertIsNone(interrupted["publication"])
+        run = Path(interrupted["run"])
+        self.assertEqual(len(interrupted["matches"]["initial"]), 1)
+        with patch.object(he, "MatchEngine", ScriptedEngine):
+            resumed = self.run_eval(resume_run=run)
+        self.assertEqual(Path(resumed["run"]), run.resolve())
+        self.assertEqual(resumed["status"], "completed")
+        self.assertTrue(resumed["eligible"])
+        self.assertTrue(resumed["resumed"])
+        self.assertEqual(len(resumed["matches"]["initial"]), 2)
+        self.assertEqual(resumed["publication"]["version"], "v0",
+                         resumed.get("publication_error"))
+
+    def test_resume_rejects_missing_or_changed_frozen_files(self):
+        interrupted, config = self.interrupted_challenge()
+        run = Path(interrupted["run"])
+        candidate = run / "candidate" / "training_positions.json"
+        saved = candidate.read_bytes()
+        try:
+            candidate.unlink()
+            with self.assertRaises(he.EvaluationError) as missing:
+                self.run_eval(model=1, config=config, resume_run=run)
+            self.assertIn("frozen files", str(missing.exception))
+            self.assertIn("missing", str(missing.exception))
+        finally:
+            candidate.write_bytes(saved)
+        frozen_fidelity = run / "candidate" / "fidelity.json"
+        saved = frozen_fidelity.read_bytes()
+        try:
+            frozen_fidelity.write_bytes(saved + b" ")
+            with self.assertRaises(he.EvaluationError) as changed:
+                self.run_eval(model=1, config=config, resume_run=run)
+            self.assertIn("frozen files", str(changed.exception))
+            self.assertIn("changed", str(changed.exception))
+        finally:
+            frozen_fidelity.write_bytes(saved)
+        manifest_path = run / "manifest.json"
+        saved = manifest_path.read_bytes()
+        try:
+            manifest = he.read_json(manifest_path)
+            manifest["created_at"] = "rewritten"
+            write_json(manifest_path, manifest)
+            with self.assertRaises(he.EvaluationError) as rewritten:
+                self.run_eval(model=1, config=config, resume_run=run)
+            self.assertIn("rewritten", str(rewritten.exception))
+        finally:
+            manifest_path.write_bytes(saved)
+        # No failed resume may create a version or start a new run directory.
+        self.assertEqual(len(ModelRegistry(self.registry).read()["versions"]), 1)
+        self.assertEqual(len(list(self.output.iterdir())), 2)
 
     def test_numeric_and_training_identity_required(self):
         self.initial()

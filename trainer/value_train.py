@@ -63,6 +63,10 @@ class TrainConfig:
     checkpoint_min_interval_s: float = 60.0
     log_every: int = 10
     resume: str | None = None
+    # Full task recovery binds the checkpoint to the frozen round data and
+    # optimization settings. Plain CLI warm starts may intentionally resume
+    # with a newer pool, so they leave this false.
+    strict_resume: bool = False
     ea: int = vf.EA_DEFAULT
     act_max: float = vf.ACT_MAX_DEFAULT
     export: bool = True
@@ -122,9 +126,11 @@ def evaluate(model: ValueNet, samples, device: str, batch_size: int,
 
 def _checkpoint_payload(*, model: ValueNet, optimizer,
                      step: int, config: TrainConfig, identity: dict,
-                     history: list[dict], device: str, training_positions: dict) -> dict:
+                     history: list[dict], device: str, training_positions: dict,
+                     rng_state=None) -> dict:
     return {
         "format": CHECKPOINT_FORMAT,
+        "rng_state": rng_state,
         "arch": ARCH,
         "rule": "renju",
         "feature_spec": "absolute-color-450",
@@ -147,7 +153,8 @@ def _save_checkpoint(path: Path, **values) -> None:
     torch.save(_checkpoint_payload(**values), path)
 
 
-def _load_checkpoint(path: str | Path, config: TrainConfig) -> dict:
+def _load_checkpoint(path: str | Path, config: TrainConfig,
+                     *, strict: bool = False) -> dict:
     blob = torch.load(Path(path), map_location="cpu", weights_only=False)
     if not isinstance(blob, dict) or blob.get("format") != CHECKPOINT_FORMAT:
         raise ValueError("not a value-network checkpoint")
@@ -157,6 +164,17 @@ def _load_checkpoint(path: str | Path, config: TrainConfig) -> dict:
         if blob.get(key) != expected:
             raise ValueError(
                 f"checkpoint {key} {blob.get(key)!r} does not match {expected!r}")
+    # A full task resume must not silently change the optimisation contract.
+    # `steps` may grow (it is the resume target), and the output
+    # directory/device may legitimately change between attempts.
+    if strict:
+        stored = blob.get("config") or {}
+        for key in ("seed", "batch_size", "lr", "loss", "smooth_l1_beta",
+                    "ea", "act_max", "weight_decay"):
+            if key in stored and stored[key] != getattr(config, key):
+                raise ValueError(
+                    f"checkpoint {key} {stored[key]!r} does not match "
+                    f"{getattr(config, key)!r}")
     return blob
 
 
@@ -281,7 +299,8 @@ def export_model(model: ValueNet, bundle: value_data.DataBundle,
             "fidelity": report["fidelity"]}
 
 
-def train_value(config: TrainConfig, *, stop_event=None, progress=None,
+def train_value(config: TrainConfig, *, stop_event=None, pause_event=None,
+                progress=None,
                 data_bundle: value_data.DataBundle | None = None) -> dict:
     """Runs (or resumes) training and exports the deployment model."""
     started = time.monotonic()
@@ -315,12 +334,25 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
     history: list[dict] = []
     resumed_from = None
     if config.resume:
-        checkpoint = _load_checkpoint(config.resume, config)
+        checkpoint = _load_checkpoint(config.resume, config,
+                                      strict=config.strict_resume)
         prior = checkpoint.get("training_positions", {})
         if prior.get("format") != "GMVALUE-TRAINING-POSITIONS1":
             raise ValueError("checkpoint lacks frozen training positions; restart from zero")
         bundle = replace(bundle, previous_positions=tuple(prior["d4_keys"]),
                          previous_sources=tuple(prior["source_ids"]))
+        stored_identity = checkpoint.get("data_identity") or {}
+        if (config.strict_resume and stored_identity.get("samples_sha256")
+                and stored_identity.get("samples_sha256")
+                != bundle.identity.get("samples_sha256")):
+            raise ValueError(
+                "checkpoint data snapshot does not match the frozen training data")
+        stored_rng = checkpoint.get("rng_state")
+        if stored_rng:
+            gauss_next = (None if stored_rng[2] is None
+                          else float(stored_rng[2]))
+            rng.setstate((int(stored_rng[0]),
+                          tuple(int(v) for v in stored_rng[1]), gauss_next))
         model.load_state_dict(checkpoint["model_state"])
         model.to(device)
         optimizer.load_state_dict(checkpoint["optimizer_state"])
@@ -371,6 +403,9 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
         if stop_event is not None and stop_event.is_set():
             stopped, stop_reason = True, "stopped"
             break
+        if pause_event is not None and pause_event.is_set():
+            stopped, stop_reason = True, "paused"
+            break
         if config.max_minutes is not None \
                 and (time.monotonic() - started) / 60.0 >= config.max_minutes:
             stopped, stop_reason = True, "time_limit"
@@ -418,7 +453,8 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
                 pending_best = copy.deepcopy(_checkpoint_payload(model=model, optimizer=optimizer,
                                  step=step + 1, config=config,
                                  identity=bundle.identity, history=history,
-                                 device=device, training_positions=positions))
+                                 device=device, training_positions=positions,
+                                 rng_state=rng.getstate()))
             if (pending_best is not None
                     and time.monotonic() - last_best_write >= config.checkpoint_min_interval_s):
                 torch.save(pending_best, best_path)
@@ -429,7 +465,8 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
             _save_checkpoint(last_path, model=model, optimizer=optimizer,
                              step=step + 1, config=config,
                              identity=bundle.identity, history=history,
-                             device=device, training_positions=positions)
+                             device=device, training_positions=positions,
+                             rng_state=rng.getstate())
             last_checkpoint_write = time.monotonic()
 
     if pending_history:
@@ -440,7 +477,8 @@ def train_value(config: TrainConfig, *, stop_event=None, progress=None,
     _save_checkpoint(last_path, model=model, optimizer=optimizer,
                      step=completed_steps, config=config,
                      identity=bundle.identity, history=history,
-                     device=device, training_positions=positions)
+                     device=device, training_positions=positions,
+                     rng_state=rng.getstate())
 
     summary = {
         "format": "GMVALUE-TRAIN1",

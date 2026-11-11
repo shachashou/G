@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 import copy
+import ctypes
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,74 @@ from executor import ExecutorClient
 from model_registry import DEFAULT_REGISTRY, ModelRegistry
 from run_support import file_identity, source_identity, write_json
 from sample_pool import SamplePool
+
+TASK_FORMAT = "GMVALUE-TRAINING-TASK1"
+# A round reaches one of these states without needing the scheduler again.
+FINAL_ROUND_STATUS = ("published", "retained", "numerical_rejected")
+
+
+def read_json(path: str | Path):
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def config_json(config: "TaskConfig") -> dict:
+    """Round-trip through JSON so equality matches the frozen manifest."""
+    return json.loads(json.dumps(asdict(config), sort_keys=True, allow_nan=False))
+
+
+def pid_alive(pid: int) -> bool:
+    """True when a process with this PID is still running (best effort)."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # os.kill(pid, 0) can terminate a process on Windows; use the API.
+        process_query_limited_information = 0x1000
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information, False, int(pid))
+        if not handle:
+            return False
+        try:
+            return True
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+    except OSError:
+        return False
+    return True
+
+
+def save_bundle(path: Path, bundle) -> None:
+    """Freezes the exact round data so resume never re-samples the pool."""
+    payload = {"format": "GMVALUE-TRAINING-BUNDLE1",
+               "train": [asdict(sample) for sample in bundle.train],
+               "validation": [asdict(sample) for sample in bundle.validation],
+               "identity": bundle.identity,
+               "previous_positions": list(bundle.previous_positions),
+               "previous_sources": list(bundle.previous_sources)}
+    write_json(path, payload)
+
+
+def load_bundle(path: Path):
+    from value_data import DataBundle, Sample
+    blob = read_json(path)
+    if blob.get("format") != "GMVALUE-TRAINING-BUNDLE1":
+        raise ValueError("frozen round data is not a training bundle")
+
+    def samples(rows):
+        return [Sample(cells=tuple(int(c) for c in row["cells"]),
+                       side=row["side"], target=float(row["target"]),
+                       source_id=row["source_id"],
+                       label_source=row["label_source"],
+                       label_version=row["label_version"],
+                       weight=float(row.get("weight", 1.0)))
+                for row in rows]
+
+    return DataBundle(train=samples(blob["train"]),
+                      validation=samples(blob["validation"]),
+                      identity=dict(blob["identity"]),
+                      previous_positions=tuple(blob.get("previous_positions", [])),
+                      previous_sources=tuple(blob.get("previous_sources", [])))
 
 
 @dataclass(frozen=True)
@@ -228,12 +297,16 @@ class TrainingTask:
         self.task_id = uuid.uuid4().hex
         self.directory = Path(config.output_root).resolve() / self.task_id
         self.stop_event = threading.Event()
+        # Set means "pause requested"; the scheduler clears it only on resume.
+        self.pause_event = threading.Event()
         self.resources = Resources(self.stop_event)
         self.lock = threading.RLock()
-        self.state = {"format": "GMVALUE-TRAINING-TASK1", "task_id": self.task_id,
+        self.state = {"format": TASK_FORMAT, "task_id": self.task_id,
             "directory": str(self.directory), "status": "created", "reason": None,
             "data": {}, "trainer": {}, "evaluation": {}, "rounds": [], "games": 0,
-            "consumed_training_samples": 0, "resources": {"cpu_threads": config.cpu_threads,
+            "next_game": 0, "candidates": [], "last_attempt": None,
+            "consumed_training_samples": 0, "resume_count": 0,
+            "resources": {"cpu_threads": config.cpu_threads,
                 "device": config.device, "collector_workers": config.collector_workers,
                 "evaluation_workers": config.evaluation.get("workers", 1),
                 "state_write_interval_s": config.state_write_interval_s,
@@ -247,6 +320,11 @@ class TrainingTask:
         self.production_halted = threading.Event()
         self.last_backpressure_report = -float("inf")
         self.last_state_write = -float("inf")
+        self.resume_mode = False
+        self.last_candidate = None
+        self.last_round_time = -float("inf")
+        self._run_lock = threading.Lock()
+        self._work_started = False
 
     def snapshot(self):
         with self.lock:
@@ -278,7 +356,90 @@ class TrainingTask:
             self.progress(value)
 
     def stop(self):
+        self.pause_event.clear()
         self.stop_event.set()
+        with self.lock:
+            if self.state["status"] in ("created", "running", "pausing",
+                                        "paused", "resuming"):
+                self.update(status="stopping")
+
+    def pause(self):
+        """Requests a pause at the next game / optimizer / evaluation boundary."""
+        with self.lock:
+            if self.state["status"] not in ("running", "resuming"):
+                return False
+            self.pause_event.set()
+            self.update(status="pausing")
+            return True
+
+    def resume(self):
+        """Clears a pause request; the scheduler thread keeps running."""
+        with self.lock:
+            if self.state["status"] not in ("pausing", "paused"):
+                return False
+            self.pause_event.clear()
+            self.update(status="resuming", reason=None)
+            return True
+
+    def _wait_while_paused(self, set_state: bool = True) -> bool:
+        """Blocks while paused. False means a stop arrived first."""
+        while self.pause_event.is_set() and not self.stop_event.is_set():
+            if set_state and self.state.get("status") != "paused":
+                self.update(status="paused")
+            self.pause_event.wait(0.1)
+        if self.stop_event.is_set():
+            return False
+        if set_state and self.state.get("status") in (
+                "paused", "pausing", "resuming"):
+            reason = None if self.state.get("reason") == "user_pause" else self.state.get("reason")
+            self.update(status="running", reason=reason)
+        return True
+
+    @classmethod
+    def resume_from_directory(cls, directory, *, progress=None,
+                              source_factory=None, trainer=None,
+                              evaluator=None, config: "TaskConfig | None" = None):
+        """Reopens a persisted task from its manifest/state, without running it."""
+        directory = Path(directory).resolve()
+        manifest = read_json(directory / "manifest.json")
+        if manifest.get("format") != TASK_FORMAT:
+            raise ValueError("not a training task directory")
+        if manifest.get("task_id") != directory.name:
+            raise ValueError("task manifest id does not match its directory")
+        if config is not None and config_json(config) != manifest.get("config"):
+            raise ValueError(
+                "task configuration differs from the frozen manifest; "
+                "resume with the original configuration")
+        config = TaskConfig(**manifest["config"])
+        task = cls(config, source_factory=source_factory, trainer=trainer,
+                   evaluator=evaluator, progress=progress)
+        task.task_id = manifest["task_id"]
+        task.directory = directory
+        task.resume_mode = True
+        task._restore_state(manifest)
+        return task
+
+    def _restore_state(self, manifest) -> None:
+        state_path = self.directory / "state.json"
+        stored = read_json(state_path) if state_path.is_file() else {}
+        if stored:
+            if stored.get("task_id") != self.task_id:
+                raise ValueError("stored task state belongs to another task")
+            with self.lock:
+                self.state.update(stored)
+                self.state["format"] = TASK_FORMAT
+                self.state["resume_count"] = int(stored.get("resume_count", 0)) + 1
+            self.next_game = int(stored.get("next_game", stored.get("games", 0)))
+            self.empty_games = int(stored.get("empty_games", 0))
+        self.last_candidate = None
+        candidates = self.state.get("candidates") or []
+        if candidates:
+            self.last_candidate = candidates[-1]
+        status = self.state.get("status")
+        if status == "completed":
+            raise ValueError("task already completed; nothing to resume")
+        if status == "failed":
+            raise ValueError("task failed previously; fix the cause or start a new task")
 
     def data_ready(self, stats):
         return (stats["train_samples"] >= self.config.min_train_samples
@@ -302,6 +463,10 @@ class TrainingTask:
         try:
             with SamplePool(cfg.pool, create=False) as pool:
                 while not self.stop_event.is_set() and not self.production_halted.is_set():
+                    # A pause takes effect between whole games, never inside a
+                    # game being committed. The scheduler owns the paused state.
+                    if not self._wait_while_paused(set_state=False):
+                        break
                     while not self.stop_event.is_set() and not self.production_halted.is_set():
                         stats = pool.stats(cfg.label_sources())
                         with self.lock:
@@ -322,6 +487,10 @@ class TrainingTask:
                             break
                         index = self.next_game
                         self.next_game += 1
+                        self.state["next_game"] = self.next_game
+                    # Persist before the game starts: a crash mid-game must not
+                    # reuse the same game index (and source id) on resume.
+                    self._persist_state()
                     self.event("game_started", worker=worker, game=index + 1)
                     result = source.produce(pool, index)
                     with self.lock:
@@ -378,14 +547,393 @@ class TrainingTask:
                 raise ValueError("unsafe candidate retention path")
             shutil.rmtree(target)
 
-    def run(self):
-        from history_evaluation import EvaluationConfig, evaluate
-        from value_data import load_pool
+    def _persist_state(self) -> None:
+        with self.lock:
+            self.state["next_game"] = int(self.next_game)
+            self.state["empty_games"] = int(self.empty_games)
+            write_json(self.directory / "state.json", self.state)
+            self.last_state_write = time.monotonic()
+
+    def _write_round(self, record) -> None:
+        write_json(self.directory / f"round-{int(record['round']):05d}.json", record)
+
+    def _round_record(self, index):
+        for record in self.state["rounds"]:
+            if record.get("round") == index:
+                return record
+        return None
+
+    def _acquire_lease(self, pool_path):
+        lease = pool_path.with_suffix(pool_path.suffix + ".training-task.lock")
+        reclaimed = None
+        for _ in range(2):
+            try:
+                with lease.open("x") as handle:
+                    handle.write(json.dumps({"task_id": self.task_id, "pid": os.getpid()}))
+                if reclaimed:
+                    self.event("stale_lease_reclaimed", previous=reclaimed)
+                return lease
+            except FileExistsError:
+                try:
+                    info = read_json(lease)
+                except (OSError, ValueError) as exc:
+                    raise ValueError("pool lease is unreadable") from exc
+                pid = int(info.get("pid", -1))
+                if pid_alive(pid):
+                    raise ValueError("another training task owns this pool")
+                # Only the same persisted task may take over its own stale
+                # lease. An unrelated lease is never removed speculatively.
+                if not self.resume_mode or info.get("task_id") != self.task_id:
+                    raise ValueError("another training task owns this pool")
+                reclaimed = info
+                lease.unlink()
+        raise ValueError("could not acquire the pool lease")
+
+    def _prepare_frozen_engine(self, manifest, cfg):
+        self.engine = self.directory / "engine" / Path(cfg.engine).name
+        expected = manifest.get("engine", {})
+        ok = (self.engine.is_file()
+              and file_identity(self.engine)["sha256"] == expected.get("sha256"))
+        if not ok:
+            source = Path(cfg.engine)
+            if (source.is_file()
+                    and file_identity(source)["sha256"] == expected.get("sha256")):
+                self.engine.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, self.engine)
+                ok = True
+        if not ok:
+            raise ValueError("frozen task engine is missing or changed")
+
+    def _check_supervision(self, manifest, source):
+        frozen = manifest.get("supervision") or {}
+        fresh = source.preflight()
+        for key in ("label_source", "teacher", "lock", "label_version",
+                    "teacher_calls", "teacher_history_used", "exploration",
+                    "value_contract"):
+            if key in frozen and frozen[key] != fresh.get(key):
+                raise ValueError("supervision configuration changed since the task started")
+        self.update(supervision=fresh.get("label_source", frozen.get("label_source")))
+
+    def _wait_for_bundle(self, index, cfg, load_pool):
+        last_attempt = self.state.get("last_attempt")
+        observed_commit = None
+        last_change = time.monotonic()
+        while not self.stop_event.is_set():
+            if not self._wait_while_paused():
+                return None, None
+            with SamplePool(cfg.pool, create=False) as pool:
+                stats = pool.stats(cfg.label_sources())
+            if stats["commit_sequence"] != observed_commit:
+                observed_commit = stats["commit_sequence"]
+                last_change = time.monotonic()
+            ready = self.data_ready(stats)
+            fresh = (last_attempt is None
+                     or stats["committed_training_samples"]
+                     - self.state["consumed_training_samples"] >= cfg.min_new_samples)
+            interval = (time.monotonic() - self.last_round_time
+                        >= cfg.min_round_interval_s)
+            if ready and fresh and interval:
+                candidate_data = load_pool(
+                    cfg.pool, train_limit=cfg.training_sample_limit,
+                    new_ratio=cfg.new_ratio, seed=cfg.seed + index,
+                    label_sources=cfg.label_sources(),
+                    source_weights=cfg.source_weights())
+                if (len(candidate_data.train) >= cfg.min_train_samples
+                        and len(candidate_data.validation) >= cfg.min_validation_samples
+                        and (cfg.mode == "teacher"
+                             or candidate_data.identity["train_games"] >= cfg.min_train_games)
+                        and candidate_data.identity["samples_sha256"] != last_attempt):
+                    return candidate_data, None
+            self.update("trainer",
+                        phase="waiting_data" if not ready else "waiting_fresh_data",
+                        metrics=stats, required_new_samples=cfg.min_new_samples)
+            if self.producer_done.is_set() and not (ready and fresh):
+                return None, "data_limit_or_insufficient_new_samples"
+            if time.monotonic() - last_change > cfg.max_idle_s:
+                return None, "data_idle_limit"
+            self.stop_event.wait(0.2)
+        return None, None
+
+    def _create_round(self, index, bundle, cfg, source):
+        incumbent = ModelRegistry(cfg.registry).resolve()
+        if cfg.mode != "teacher" and incumbent is None:
+            raise ValueError("teacher-free training requires an existing incumbent")
+        output = self.directory / "candidates" / f"round-{index:05d}"
+        parent = self.last_candidate or incumbent
+        checkpoint = self.last_candidate["checkpoint"] if self.last_candidate else None
+        start_step = self.last_candidate["steps"] if self.last_candidate else 0
+        lineage = {"task_id": self.task_id, "round": index,
+                   "supervision": source.label_source, "mode": cfg.mode,
+                   "source_weights": cfg.source_weights(), "parent": parent,
+                   "incumbent_at_training": incumbent,
+                   "data_commit_sequence": bundle.identity["commit_sequence"]}
+        bundle_path = self.directory / "rounds" / f"round-{index:05d}-bundle.json"
+        save_bundle(bundle_path, bundle)
+        record = {"round": index, "status": "new", "output": str(output),
+                  "bundle": str(bundle_path), "lineage": lineage,
+                  "data_identity": bundle.identity, "training": None,
+                  "evaluation": None, "candidate": None,
+                  "start_step": start_step,
+                  "initial_model": incumbent["path"] if incumbent and not checkpoint else None,
+                  "attempts": {"training": 0, "evaluation": 0}}
+        with self.lock:
+            self.state["rounds"].append(record)
+            self.state["rounds"].sort(key=lambda item: item["round"])
+            self.state["last_attempt"] = bundle.identity["samples_sha256"]
+            self.state["consumed_training_samples"] = bundle.identity["committed_training_samples"]
+        self._write_round(record)
+        self._persist_state()
+        self.update("trainer", phase="data_frozen", round=index,
+                    metrics=bundle.summary())
+        return record
+
+    def _train_round(self, index, cfg, record, bundle):
         from value_train import TrainConfig, train_value
+        training = record.get("training")
+        if training and not training.get("stopped"):
+            if record.get("candidate"):
+                self.last_candidate = record["candidate"]
+                with self.lock:
+                    candidates = [item for item in self.state.get("candidates", [])
+                                  if item.get("round") != index]
+                    candidates.append(record["candidate"])
+                    candidates.sort(key=lambda item: item.get("round", 0))
+                    self.state["candidates"] = candidates
+                return "trained"
+            if not record.get("candidate"):
+                # Crash window after the training record was persisted but
+                # before the candidate identity was. Recover from the export.
+                output = Path(record["output"])
+                model_path = output / "model.gmvalue"
+                if not model_path.is_file():
+                    raise ValueError("trained round has no exported candidate")
+                from value_format import read_value_weights
+                _, metadata = read_value_weights(model_path)
+                candidate = {"model_id": metadata["model_id"],
+                             "sha256": file_identity(model_path)["sha256"],
+                             "checkpoint": str(output / "last.pt"),
+                             "steps": training["steps"], "round": index}
+                record["candidate"] = candidate
+                record["status"] = "trained"
+                self.last_candidate = candidate
+                with self.lock:
+                    candidates = [item for item in self.state.get("candidates", [])
+                                  if item.get("round") != index]
+                    candidates.append(candidate)
+                    candidates.sort(key=lambda item: item.get("round", 0))
+                    self.state["candidates"] = candidates
+                self._write_round(record)
+                self._persist_state()
+            return "trained"
+        checkpoint = None
+        if training and training.get("stopped"):
+            checkpoint = (training.get("checkpoint") or {}).get("last")
+            if not checkpoint or not Path(checkpoint).is_file():
+                raise ValueError("paused round has no usable training checkpoint")
+        attempts = record.setdefault("attempts", {"training": 0, "evaluation": 0})
+        attempts["training"] = int(attempts.get("training", 0)) + 1
+        train_config = TrainConfig(
+            pool=cfg.pool, output_dir=record["output"], seed=cfg.seed + index,
+            steps=int(record["start_step"]) + cfg.train_steps,
+            batch_size=cfg.batch_size, lr=cfg.lr, loss=cfg.loss,
+            device=cfg.device, resume=checkpoint, strict_resume=True,
+            initial_model=None if checkpoint else record.get("initial_model"),
+            lineage=record["lineage"], val_every=max(1, cfg.train_steps // 5),
+            checkpoint_min_interval_s=cfg.checkpoint_min_interval_s,
+            checkpoint_every=max(1, cfg.train_steps // 2),
+            log_every=max(1, cfg.train_steps // 10))
+        self.update("trainer", phase="training", round=index,
+                    attempt=attempts["training"])
+        summary = (self.trainer or train_value)(
+            train_config, data_bundle=bundle, stop_event=self.stop_event,
+            pause_event=self.pause_event,
+            progress=lambda progress: self.update(
+                "trainer", phase="training", progress=progress))
+        with self.lock:
+            record["training"] = {
+                "steps": summary["steps"], "stopped": summary["stopped"],
+                "stop_reason": summary.get("stop_reason"),
+                "samples_exposed": summary["samples_exposed"],
+                "export": summary.get("export"),
+                "checkpoint": summary["checkpoint"],
+                "validation": summary["validation"],
+                "device": summary["device"]}
+            record["checkpoint"] = summary["checkpoint"]["last"]
+        if (summary.get("stop_reason") == "paused"
+                and not self.stop_event.is_set()):
+            record["status"] = "paused"
+            self._write_round(record)
+            self.update("trainer", phase="paused", summary=record["training"])
+            self.update(status="paused", reason="user_pause")
+            return "paused"
+        if summary.get("stopped") or self.stop_event.is_set():
+            record["status"] = "stopped"
+            self._write_round(record)
+            self.update("trainer", phase="stopped", summary=record["training"])
+            return "stopped"
+        passed = (summary.get("export") or {}).get("passed", False)
+        self.update("trainer",
+                    phase="exported" if passed else "numerical_rejected",
+                    summary=record["training"])
+        self._write_round(record)
+        if not passed:
+            record["status"] = "numerical_rejected"
+            self._write_round(record)
+            return "done"
+        from value_format import read_value_weights
+        _, metadata = read_value_weights(
+            Path(record["output"]) / "model.gmvalue")
+        candidate = {"model_id": metadata["model_id"],
+                     "sha256": file_identity(
+                         Path(record["output"]) / "model.gmvalue")["sha256"],
+                     "checkpoint": str(Path(record["output"]) / "last.pt"),
+                     "steps": summary["steps"], "round": index}
+        record["candidate"] = candidate
+        record["status"] = "trained"
+        self.last_candidate = candidate
+        with self.lock:
+            candidates = [item for item in self.state.get("candidates", [])
+                          if item.get("round") != index]
+            candidates.append(candidate)
+            candidates.sort(key=lambda item: item.get("round", 0))
+            self.state["candidates"] = candidates
+        self._write_round(record)
+        self._persist_state()
+        return "trained"
+
+    def _evaluate_round(self, index, cfg, record):
+        from history_evaluation import EvaluationConfig, evaluate
+        candidate = record.get("candidate")
+        if not candidate:
+            raise ValueError("round has no exported candidate to evaluate")
+        store = ModelRegistry(cfg.registry)
+        current = store.resolve()
+        if current and current["sha256"] == candidate["sha256"]:
+            record["evaluation"] = {
+                "run": current.get("run") or (record.get("evaluation") or {}).get("run"),
+                "status": "completed",
+                "statistics": (record.get("evaluation") or {}).get("statistics", {}),
+                "publication": current,
+                "already_current": True}
+            record["status"] = "published"
+            self._write_round(record)
+            self.update("evaluation", phase="already_current", round=index,
+                        result=record["evaluation"])
+            return "done"
+        bootstrap = current is None
+        if cfg.mode != "teacher" and bootstrap:
+            raise ValueError("incumbent disappeared before teacher-free evaluation")
+        eval_config = EvaluationConfig(**cfg.evaluation)
+        eval_config = replace(
+            eval_config, seed=cfg.seed + 100000 + index,
+            pairs=1 if bootstrap else eval_config.pairs)
+        previous = record.get("evaluation") or {}
+        resume_run = None
+        if previous.get("status") == "interrupted":
+            candidate_run = Path(previous.get("run", ""))
+            if candidate_run.is_dir():
+                resume_run = candidate_run
+        attempts = record.setdefault("attempts", {"training": 0, "evaluation": 0})
+        attempts["evaluation"] = int(attempts.get("evaluation", 0)) + 1
+        eval_stop = threading.Event()
+        eval_done = threading.Event()
+
+        def watch():
+            while not eval_done.wait(0.1):
+                if self.stop_event.is_set() or self.pause_event.is_set():
+                    eval_stop.set()
+                    return
+
+        watcher = threading.Thread(target=watch, daemon=True,
+                                   name="evaluation-pause")
+        watcher.start()
+        self.update("evaluation", phase="evaluating", round=index,
+                    bootstrap=bootstrap, attempt=attempts["evaluation"],
+                    resumed=bool(resume_run))
+        try:
+            kwargs = dict(
+                registry=cfg.registry, output_root=cfg.evaluations,
+                config=eval_config, bootstrap=bootstrap, stop_event=eval_stop,
+                progress=lambda progress: self.update(
+                    "evaluation", phase="evaluating", progress=progress))
+            if resume_run is not None:
+                kwargs["resume_run"] = resume_run
+            result = (self.evaluator or evaluate)(
+                Path(record["output"]) / "model.gmvalue", self.engine, **kwargs)
+        finally:
+            eval_done.set()
+            watcher.join(timeout=2)
+        with self.lock:
+            record["evaluation"] = {
+                "run": result["run"], "status": result["status"],
+                "statistics": result["statistics"],
+                "publication": result.get("publication"),
+                "publication_error": result.get("publication_error"),
+                "resumed": bool(resume_run),
+                "attempt": attempts["evaluation"]}
+        self._write_round(record)
+        self._persist_state()
+        if result["status"] == "interrupted":
+            if self.stop_event.is_set():
+                return "stopped"
+            if self.pause_event.is_set():
+                record["status"] = "paused"
+                self._write_round(record)
+                self.update(status="paused", reason="user_pause")
+                return "paused"
+            raise ValueError("evaluation interrupted without a pause or stop request")
+        if result["status"] != "completed":
+            raise ValueError("evaluation aborted: " + result["status"])
+        if result.get("publication_error"):
+            raise ValueError("publication failed: " + result["publication_error"])
+        if cfg.mode != "teacher":
+            self.event("teacher_exit_evidence", mode=cfg.mode,
+                       task_runs_without_teacher=True,
+                       training_sources=record["data_identity"]["label_sources"],
+                       history_report=result["run"],
+                       promoted=bool(result.get("publication")),
+                       relative_progress_proven=bool(result.get("publication")))
+        record["status"] = "published" if result.get("publication") else "retained"
+        self._write_round(record)
+        self.update("evaluation",
+                    phase="published" if result.get("publication") else "retained_incumbent",
+                    result=record["evaluation"])
+        return "done"
+
+    def _run_round(self, index, cfg, source):
+        from value_data import load_pool
+        record = self._round_record(index)
+        if record is None:
+            bundle, reason = self._wait_for_bundle(index, cfg, load_pool)
+            if bundle is None:
+                return reason or "stopped"
+            record = self._create_round(index, bundle, cfg, source)
+        else:
+            bundle = load_bundle(Path(record["bundle"]))
+        if record.get("status") in FINAL_ROUND_STATUS:
+            return "done"
+        trained = self._train_round(index, cfg, record, bundle)
+        if trained != "trained":
+            return trained
+        return self._evaluate_round(index, cfg, record)
+
+    def run(self):
+        # One scheduler thread owns one task directory. A duplicate start on
+        # the same object waits for that run and returns its final snapshot
+        # instead of racing on the directory and state files.
+        if not self._run_lock.acquire(blocking=False):
+            with self._run_lock:
+                return self.snapshot()
+        try:
+            return self._run()
+        finally:
+            self._run_lock.release()
+
+    def _run(self):
+        from value_data import load_pool
         import torch
         cfg = self.config
         self.started = time.monotonic()
-        self.directory.mkdir(parents=True, exist_ok=False)
         finished = threading.Event()
         producer = watchdog = None
         lease = None
@@ -394,15 +942,18 @@ class TrainingTask:
             cfg.validate()
             pool_path = Path(cfg.pool).resolve()
             pool_path.parent.mkdir(parents=True, exist_ok=True)
-            lease = pool_path.with_suffix(pool_path.suffix + ".training-task.lock")
-            # Keep a separate ownership flag: a failed acquisition must never
-            # remove another task's lease in finally.
-            try:
-                with lease.open("x") as handle:
-                    handle.write(json.dumps({"task_id": self.task_id, "pid": os.getpid()}))
-            except FileExistsError:
-                lease = None
-                raise ValueError("another training task owns this pool")
+            if not self.resume_mode and self.directory.exists():
+                # A freshly generated id must never inherit an existing task
+                # directory (e.g. an aborted duplicate start). Move to a new id
+                # before taking the pool lease.
+                previous = self.task_id
+                self.task_id = uuid.uuid4().hex
+                self.directory = Path(cfg.output_root).resolve() / self.task_id
+                with self.lock:
+                    self.state["task_id"] = self.task_id
+                    self.state["directory"] = str(self.directory)
+                self._directory_collision = previous
+            lease = self._acquire_lease(pool_path)
             factory = self.source_factory
             if factory is None:
                 if cfg.mode == "teacher":
@@ -411,161 +962,141 @@ class TrainingTask:
                     from selfplay_data import SelfPlayDataSource
                     factory = SelfPlayDataSource
             source = factory(self)
-            provenance = source.preflight()
-            (self.directory / "engine").mkdir()
-            self.engine = self.directory / "engine" / Path(cfg.engine).name
-            shutil.copy2(cfg.engine, self.engine)
-            current = ModelRegistry(cfg.registry).resolve()
-            write_json(self.directory / "manifest.json", {
-                "format": "GMVALUE-TRAINING-TASK1", "config": asdict(cfg),
-                "task_id": self.task_id, "supervision": provenance,
-                "engine": file_identity(self.engine), "incumbent_at_start": current,
-                "implementation": {path: file_identity(ROOT / path) for path in (
-                    "tools/training_task.py", "tools/collect.py", "tools/teacher_label.py",
-                    "tools/sample_pool.py", "trainer/value_train.py", "trainer/value_data.py",
-                    "trainer/value_model.py", "tools/history_evaluation.py", "tools/selfplay_data.py")},
-                "environment": {"python": sys.version, "torch": str(torch.__version__),
-                    "hip": torch.version.hip, "cuda": torch.version.cuda,
-                    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None},
-                "source": source_identity()})
-            with SamplePool(cfg.pool) as pool:
-                for key, value in (("capacity", cfg.capacity), ("new_ratio", cfg.new_ratio),
-                                   ("validation_games", cfg.validation_games)):
-                    pool.set_config(key, value)
-                stats = pool.stats(cfg.label_sources())
-                if stats["total_validation_samples"] + cfg.min_train_samples > cfg.capacity:
-                    raise ValueError("frozen validation data leaves insufficient training capacity")
+            if self.resume_mode:
+                manifest_path = self.directory / "manifest.json"
+                if not manifest_path.is_file():
+                    raise ValueError("task manifest is missing; cannot resume")
+                manifest = read_json(manifest_path)
+                if manifest.get("format") != TASK_FORMAT:
+                    raise ValueError("not a training task directory")
+                if manifest.get("task_id") != self.task_id:
+                    raise ValueError("task manifest id does not match the directory")
+                if manifest.get("config") != config_json(cfg):
+                    raise ValueError(
+                        "task configuration differs from the frozen manifest; "
+                        "resume with the original configuration")
+                self._prepare_frozen_engine(manifest, cfg)
+                self._check_supervision(manifest, source)
+                with SamplePool(cfg.pool) as pool:
+                    removed = pool.abort_staged_games()
+                    if removed:
+                        self.event("stale_staging_cleaned", games=removed)
+                    for key, value in (("capacity", cfg.capacity),
+                                       ("new_ratio", cfg.new_ratio),
+                                       ("validation_games", cfg.validation_games)):
+                        pool.set_config(key, value)
+                    stats = pool.stats(cfg.label_sources())
+                    if (stats["total_validation_samples"] + cfg.min_train_samples
+                            > cfg.capacity):
+                        raise ValueError(
+                            "frozen validation data leaves insufficient training capacity")
+                self.update(status="resuming", reason=None)
+            else:
+                self.directory.mkdir(parents=True, exist_ok=False)
+                previous = getattr(self, "_directory_collision", None)
+                if previous:
+                    self.event("directory_collision_reassigned",
+                               previous=previous, current=self.task_id)
+                provenance = source.preflight()
+                (self.directory / "engine").mkdir()
+                self.engine = self.directory / "engine" / Path(cfg.engine).name
+                shutil.copy2(cfg.engine, self.engine)
+                current = ModelRegistry(cfg.registry).resolve()
+                write_json(self.directory / "manifest.json", {
+                    "format": TASK_FORMAT, "config": asdict(cfg),
+                    "task_id": self.task_id, "supervision": provenance,
+                    "engine": file_identity(self.engine),
+                    "incumbent_at_start": current,
+                    "implementation": {path: file_identity(ROOT / path) for path in (
+                        "tools/training_task.py", "tools/collect.py",
+                        "tools/teacher_label.py", "tools/sample_pool.py",
+                        "trainer/value_train.py", "trainer/value_data.py",
+                        "trainer/value_model.py", "tools/history_evaluation.py",
+                        "tools/selfplay_data.py")},
+                    "environment": {"python": sys.version,
+                                    "torch": str(torch.__version__),
+                                    "hip": torch.version.hip,
+                                    "cuda": torch.version.cuda,
+                                    "gpu": (torch.cuda.get_device_name(0)
+                                            if torch.cuda.is_available() else None)},
+                    "source": source_identity()})
+                with SamplePool(cfg.pool) as pool:
+                    for key, value in (("capacity", cfg.capacity),
+                                       ("new_ratio", cfg.new_ratio),
+                                       ("validation_games", cfg.validation_games)):
+                        pool.set_config(key, value)
+                    stats = pool.stats(cfg.label_sources())
+                    if (stats["total_validation_samples"] + cfg.min_train_samples
+                            > cfg.capacity):
+                        raise ValueError(
+                            "frozen validation data leaves insufficient training capacity")
             torch.set_num_threads(cfg.cpu_threads)
-            self.update(status="running", supervision=source.label_source,
-                        training_sources=cfg.label_sources(), source_weights=cfg.source_weights())
-            watchdog = threading.Thread(target=self._watchdog, args=(finished,), daemon=True)
+            self._work_started = True
+            self._persist_state()
+            self.update(status="running", reason=None,
+                        supervision=source.label_source,
+                        training_sources=cfg.label_sources(),
+                        source_weights=cfg.source_weights())
+            watchdog = threading.Thread(target=self._watchdog,
+                                        args=(finished,), daemon=True)
             watchdog.start()
-            producer = threading.Thread(target=self._producer, args=(source,), daemon=True)
+            producer = threading.Thread(target=self._producer,
+                                        args=(source,), daemon=True)
             producer.start()
-            last_candidate = None
-            consumed = 0
-            last_attempt = None
-            last_round = -float("inf")
-            last_change = time.monotonic()
-            observed_commit = None
-            for index in range(cfg.max_rounds):
-                bundle = None
-                while not self.stop_event.is_set():
-                    with SamplePool(cfg.pool, create=False) as pool:
-                        stats = pool.stats(cfg.label_sources())
-                    if stats["commit_sequence"] != observed_commit:
-                        observed_commit = stats["commit_sequence"]
-                        last_change = time.monotonic()
-                    ready = self.data_ready(stats)
-                    fresh = index == 0 or stats["committed_training_samples"] - consumed >= cfg.min_new_samples
-                    interval = time.monotonic() - last_round >= cfg.min_round_interval_s
-                    if ready and fresh and interval:
-                        candidate_data = load_pool(cfg.pool, train_limit=cfg.training_sample_limit,
-                            new_ratio=cfg.new_ratio, seed=cfg.seed + index,
-                            label_sources=cfg.label_sources(), source_weights=cfg.source_weights())
-                        if (len(candidate_data.train) >= cfg.min_train_samples
-                                and len(candidate_data.validation) >= cfg.min_validation_samples
-                                and (cfg.mode == "teacher" or candidate_data.identity["train_games"] >= cfg.min_train_games)
-                                and candidate_data.identity["samples_sha256"] != last_attempt):
-                            bundle = candidate_data
-                            break
-                    self.update("trainer", phase="waiting_data" if not ready else "waiting_fresh_data",
-                        metrics=stats, required_new_samples=cfg.min_new_samples)
-                    if self.producer_done.is_set() and not (ready and fresh):
-                        self.update(reason="data_limit_or_insufficient_new_samples")
-                        break
-                    if time.monotonic() - last_change > cfg.max_idle_s:
-                        self.update(reason="data_idle_limit")
-                        self.stop_event.set()
-                        break
-                    self.stop_event.wait(0.2)
-                if bundle is None or self.stop_event.is_set():
+            index = 0
+            while index < len(self.state["rounds"]):
+                record = self.state["rounds"][index]
+                if record.get("round") != index:
+                    raise ValueError("round records are not contiguous")
+                if record.get("status") in FINAL_ROUND_STATUS:
+                    index += 1
+                    continue
+                break
+            while index < cfg.max_rounds:
+                if self.stop_event.is_set():
                     break
-                last_attempt = bundle.identity["samples_sha256"]
-                consumed = bundle.identity["committed_training_samples"]
-                self.update(consumed_training_samples=consumed)
-                incumbent = ModelRegistry(cfg.registry).resolve()
-                if cfg.mode != "teacher" and incumbent is None:
-                    raise ValueError("teacher-free training requires an existing incumbent")
-                output = self.directory / "candidates" / f"round-{index:05d}"
-                parent = last_candidate or incumbent
-                checkpoint = last_candidate["checkpoint"] if last_candidate else None
-                start_step = last_candidate["steps"] if last_candidate else 0
-                lineage = {"task_id": self.task_id, "round": index, "supervision": source.label_source,
-                    "mode": cfg.mode, "source_weights": cfg.source_weights(),
-                    "parent": parent, "incumbent_at_training": incumbent,
-                    "data_commit_sequence": bundle.identity["commit_sequence"]}
-                train_config = TrainConfig(pool=cfg.pool, output_dir=str(output), seed=cfg.seed + index,
-                    steps=start_step + cfg.train_steps, batch_size=cfg.batch_size, lr=cfg.lr,
-                    loss=cfg.loss, device=cfg.device, resume=checkpoint,
-                    initial_model=incumbent["path"] if incumbent and not checkpoint else None,
-                    lineage=lineage, val_every=max(1, cfg.train_steps // 5),
-                    checkpoint_min_interval_s=cfg.checkpoint_min_interval_s,
-                    checkpoint_every=max(1, cfg.train_steps // 2), log_every=max(1, cfg.train_steps // 10))
-                record = {"round": index, "output": str(output), "lineage": lineage,
-                          "data_identity": bundle.identity, "training": None, "evaluation": None}
-                with self.lock:
-                    self.state["rounds"].append(record)
-                write_json(self.directory / f"round-{index:05d}.json", record)
-                self.update("trainer", phase="training", round=index)
-                summary = (self.trainer or train_value)(train_config, data_bundle=bundle,
-                    stop_event=self.stop_event,
-                    progress=lambda p: self.update("trainer", phase="training", progress=p))
-                with self.lock:
-                    record["training"] = {"steps": summary["steps"], "stopped": summary["stopped"],
-                        "samples_exposed": summary["samples_exposed"],
-                        "export": summary.get("export"), "checkpoint": summary["checkpoint"],
-                        "validation": summary["validation"], "device": summary["device"]}
-                passed = (summary.get("export") or {}).get("passed", False)
-                self.update("trainer", phase="stopped" if summary["stopped"] else "exported" if passed else "numerical_rejected",
-                            summary=record["training"])
-                write_json(self.directory / f"round-{index:05d}.json", record)
-                last_round = time.monotonic()
-                if self.stop_event.is_set() or summary["stopped"]:
+                if not self._wait_while_paused():
                     break
-                if passed:
-                    _, metadata = __import__("value_format").read_value_weights(output / "model.gmvalue")
-                    last_candidate = {"model_id": metadata["model_id"],
-                        "sha256": file_identity(output / "model.gmvalue")["sha256"],
-                        "checkpoint": str(output / "last.pt"), "steps": summary["steps"]}
-                    current = ModelRegistry(cfg.registry).resolve()
-                    bootstrap = current is None
-                    if cfg.mode != "teacher" and bootstrap:
-                        raise ValueError("incumbent disappeared before teacher-free evaluation")
-                    eval_config = EvaluationConfig(**cfg.evaluation)
-                    eval_config = replace(eval_config, seed=cfg.seed + 100000 + index,
-                                          pairs=1 if bootstrap else eval_config.pairs)
-                    self.update("evaluation", phase="evaluating", round=index, bootstrap=bootstrap)
-                    result = (self.evaluator or evaluate)(output / "model.gmvalue", self.engine,
-                        registry=cfg.registry, output_root=cfg.evaluations, config=eval_config,
-                        bootstrap=bootstrap, stop_event=self.stop_event,
-                        progress=lambda p: self.update("evaluation", phase="evaluating", progress=p))
-                    with self.lock:
-                        record["evaluation"] = {"run": result["run"], "status": result["status"],
-                            "statistics": result["statistics"], "publication": result.get("publication"),
-                            "publication_error": result.get("publication_error")}
-                    if cfg.mode != "teacher":
-                        self.event("teacher_exit_evidence", mode=cfg.mode,
-                            task_runs_without_teacher=True, training_sources=bundle.identity["label_sources"],
-                            history_report=result["run"], promoted=bool(result.get("publication")),
-                            relative_progress_proven=bool(result.get("publication")))
-                    self.update("evaluation", phase="published" if result.get("publication") else "retained_incumbent",
-                        result=record["evaluation"])
-                    if result["status"] not in ("completed", "interrupted"):
-                        raise ValueError("evaluation aborted: " + result["status"])
-                    if result.get("publication_error"):
-                        raise ValueError("publication failed: " + result["publication_error"])
-                write_json(self.directory / f"round-{index:05d}.json", record)
-                self._prune(last_candidate)
-                self.event("round_complete", round=index, record=str(self.directory / f"round-{index:05d}.json"))
+                record = self._round_record(index)
+                if record and record.get("status") in FINAL_ROUND_STATUS:
+                    index += 1
+                    continue
+                outcome = self._run_round(index, cfg, source)
+                if outcome == "paused":
+                    continue
+                if outcome == "stopped":
+                    break
+                if outcome in ("data_limit_or_insufficient_new_samples",
+                               "data_idle_limit"):
+                    self.update(reason=outcome)
+                    break
+                self.last_round_time = time.monotonic()
+                self._prune(self.last_candidate)
+                self.event("round_complete", round=index,
+                           record=str(self.directory / f"round-{index:05d}.json"))
+                index += 1
             if self.producer_error:
                 raise ValueError(self.producer_error)
-            self.update(status="stopping", terminal_status="stopped" if self.stop_event.is_set() else "completed",
-                reason=self.state["reason"] or ("user_stop" if self.stop_event.is_set() else "round_or_data_limit"))
+            self.update(status="stopping",
+                        terminal_status="stopped" if self.stop_event.is_set()
+                        else "completed",
+                        reason=self.state["reason"] or (
+                            "user_stop" if self.stop_event.is_set()
+                            else "round_or_data_limit"))
         except Exception as exc:
-            self.update(status="failed", reason=str(exc))
+            if self.resume_mode and not self._work_started:
+                # A resume that failed during identity/compatibility checks
+                # must leave the paused/stopped task intact for a later retry.
+                with self.lock:
+                    previous_status = self.state.get("status", "paused")
+                self.update(status=previous_status,
+                            reason="resume failed: " + str(exc),
+                            resume_error=str(exc))
+            else:
+                self.update(status="failed", reason=str(exc))
         finally:
             self.stop_event.set()
+            self.pause_event.clear()
             finished.set()
             cleanup_errors = self.resources.close_all()
             if producer:
@@ -594,9 +1125,9 @@ class TrainingTask:
                 self.update(status="failed", reason="; ".join(cleanup_errors))
             final_status = self.state.get("terminal_status", self.state["status"])
             self.update(status="failed" if self.state["status"] == "failed" else final_status,
-                        cleanup_complete=not producer or not producer.is_alive(), current=current)
+                        cleanup_complete=not producer or not producer.is_alive(),
+                        current=current)
         return self.snapshot()
-
 
 def main():
     import argparse

@@ -461,6 +461,13 @@ class SamplePool:
                 (int(game_id),))
             return cursor.rowcount > 0
 
+    def abort_staged_games(self) -> int:
+        """Drops staged rows left by a crashed producer; committed data is kept."""
+        with self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM games WHERE status = 'staged'")
+            return int(cursor.rowcount)
+
     @contextmanager
     def _sample_transaction(self):
         if self._conn.in_transaction:

@@ -2,14 +2,14 @@
 
 Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"玩一把、收集数据、从0训练、自我训练、历史版本测评"。
 
-**项目正在按新方案重设计。** 当前已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级、持续教师训练、完全无教师的胜负自主训练，以及新模型的增量累加器与 AVX2 部署推理；完整任务恢复（工单 12）仍待实现。
+**项目已按新方案完成首轮交付。** 已交付执行器、搜索、训练与推理基础、桌面 GUI、开源 VCF、Rapfi 打标与滚动样本池、新价值网络实际对弈、历史版本测评与晋级、持续教师训练、完全无教师的胜负自主训练、新模型的增量累加器与 AVX2 部署推理，以及可暂停/重启恢复的一站式任务工作台。
 
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
 - [实施工单](.scratch/gomoku-nnue/issues/)：已发布12张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md) 和 [11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)。剩余工单按各自的 Blocked by 推进；ready-for-agent 不表示依赖已经完成。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)、[11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md) 和 [12：任务恢复与一站式验收](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md)。
 
 ## 设计方向
 
@@ -263,6 +263,19 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 数值检查失败、测评未过或证据不足都保留正式版本；详细验收见[工单 10](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)。
 
+## 任务暂停、恢复与重启（工单 12）
+
+客户端右侧现在是统一的「玩一把 / 收集数据 / 从0训练 / 自我训练 / 测评」标签页，模型选择固定在标签页上方，所有模式共享同一个实际模型身份。持续教师/自主任务面板提供「暂停任务」「继续暂停的任务」「停止任务」和「恢复已中断任务」；暂停、继续和恢复都经过 `TrainingTask` 公共调度器，而不是只改按钮文字。
+
+- **状态**：`运行中 → 暂停中 → 已暂停 → 恢复中 → 运行中`，以及完成、失败、已停止。暂停请求在安全边界生效：采集在完整棋局之间、训练在优化步边界写检查点、测评在整局/整对边界中断；不会提交半盘棋或把未完成对局当成和棋。
+- **恢复绑定**：任务目录冻结 `manifest.json`（完整配置、监督来源、引擎副本、初始正式版本与实现身份）、每轮冻结的 `rounds/round-NNNNN-bundle.json`（实际训练/验证样本和池提交身份）、`last.pt`（模型、优化器、步数、Python RNG 状态、训练局面和血统）以及 `state.json`。恢复时逐项核验配置、引擎、检查点契约和冻结验证集；配置不同、检查点损坏或引擎变化都会明确拒绝，不会重新抽取更容易的验证数据。
+- **重启**：关闭客户端或停止任务会回收本任务启动的采集/训练/测评进程，删除暂存对局，保留已提交数据、检查点和正式版本。重启后任务目录出现在「恢复已中断任务」列表；若上次进程异常退出，同一任务的旧 lease 在确认 PID 不存在后接管，残留 staged 对局被清理，`next_game` 继续递增，避免重复对局身份。
+- **测评续跑**：中断的测评目录保留冻结候选、对手、引擎副本和开局。恢复时复用该目录和原开局，丢弃上次未完成的配对付费结果并整对重做；同一候选已登记时只报告 `already current`/`publication_skipped`，不会重复发布版本。
+- **独立面板**：收集数据支持暂停/停止（当前棋局完成或丢弃后停）；从0训练支持在优化步边界暂停并从 `last.pt` 继续；历史测评支持暂停后「继续上次中断的测评」。持续任务仍是教师/自主训练的主入口。
+- **资源与冲突**：同一池的专属 lease 阻止两个任务同时写入；并发数、训练快照、积压和容量限制仍生效。已提交数据、正式版本和当前候选不因任务失败或恢复被破坏。
+
+实现与验收记录见[工单 12](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md)，GUI 操作细节见[客户端说明](gui/README.md)。
+
 ## 并发与磁盘写入
 
 GUI 持续训练默认采用「高吞吐预设（本机）」，也可以点击「少量数据快速启动」恢复小规模参数。预设不修改学习率、每轮优化步数、晋级门槛或已运行任务。应用新配置前先停止旧任务，等待结束再启动；代码更新后需重新打开客户端。
@@ -302,8 +315,8 @@ CLI 仍默认单路采集；32 线程机器可使用[高吞吐示例](tools/high
 | 标签 | 已接入 Rapfi 教师（固定版本）与版本化样本存储，区分评分/建议着法/胜负标签 | 持续采集与样本池（工单 05）、结果标签 |
 | 网络 | 新 450 → 1024 → 64 → 32 → 1 单输出网络已训练、导出并可加载对弈 | 无教师自主训练与历史版本晋级 |
 | 推理 | `GMVALUE1` 第一层增量累加 + AVX2 已接入真实搜索与采集；保留全量标量参照和 `--value-backend reference`；旧 NNUE 保留 | 三后端逐位一致，按实测报告推理与搜索性能 |
-| 数据与编排 | 有容量上限的样本池、教师/过渡/完全无教师任务及周期晋级 | 完整暂停恢复 |
-| GUI | 对弈、采集、教师打标、训练、模型选择、历史测评、原子晋级与自主任务已完成 | 任务恢复与最终工作台整合 |
+| 数据与编排 | 有容量上限的样本池、教师/过渡/完全无教师任务、周期晋级，以及暂停/检查点恢复、lease/staged 清理和测评续跑 | 保持现有冻结契约与可复查报告 |
+| GUI | 统一标签页覆盖对弈、采集、从0训练、自我训练、测评和模型选择；持续任务可暂停、继续、停止并从重启后的任务目录恢复 | 保持界面响应与进程回收 |
 
 现有工具可用于检查和迁移基础能力，不能当作新工作台已经交付。旧权重不视为新网络的兼容模型。
 

@@ -23,7 +23,8 @@ from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog,
     QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QMessageBox, QPushButton, QRadioButton, QScrollArea, QSpinBox, QTabWidget,
+    QVBoxLayout, QWidget,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -227,9 +228,13 @@ class MainWindow(QMainWindow):
         self._game_id = uuid.uuid4().hex[:12]
         self._active_teacher = None
         self._collect_stop = None
+        self._collect_pause = None
         self._collect_thread = None
         self._collect_generation = 0
         self._train_stop = None
+        self._train_pause = None
+        self._train_resume = None
+        self._train_target = 0
         self._train_thread = None
         self._train_generation = 0
         self._generation = 0
@@ -250,6 +255,19 @@ class MainWindow(QMainWindow):
         root.addWidget(self.board)
 
         panel = QVBoxLayout()
+        # One workbench, five visible workflows. The board and model picker
+        # stay outside the tabs so play/collection/training/evaluation all see
+        # the same actual model identity.
+        tabs = QTabWidget()
+        self.tabs = tabs
+        play_page = QWidget()
+        play_layout = QVBoxLayout(play_page)
+        data_page = QWidget()
+        data_layout = QVBoxLayout(data_page)
+        train_page = QWidget()
+        train_layout = QVBoxLayout(train_page)
+        eval_page = QWidget()
+        eval_layout = QVBoxLayout(eval_page)
 
         setup = QGroupBox("对局设置")
         sv = QVBoxLayout(setup)
@@ -294,7 +312,7 @@ class MainWindow(QMainWindow):
         self.spin_think.setValue(self._think_ms)
         think.addWidget(self.spin_think)
         sv.addLayout(think)
-        panel.addWidget(setup)
+        play_layout.addWidget(setup)
 
         teacher = QGroupBox("教师打标（Rapfi）")
         tv = QVBoxLayout(teacher)
@@ -315,7 +333,7 @@ class MainWindow(QMainWindow):
         self.teacher_result = QLabel("样本：未打标")
         self.teacher_result.setWordWrap(True)
         tv.addWidget(self.teacher_result)
-        panel.addWidget(teacher)
+        data_layout.addWidget(teacher)
 
         collection = QGroupBox("持续采集")
         cv = QVBoxLayout(collection)
@@ -344,16 +362,20 @@ class MainWindow(QMainWindow):
         collect_buttons = QHBoxLayout()
         self.btn_collect_start = QPushButton("启动采集")
         self.btn_collect_start.clicked.connect(self._start_collection)
+        self.btn_collect_pause = QPushButton("暂停采集")
+        self.btn_collect_pause.clicked.connect(self._pause_collection)
+        self.btn_collect_pause.setEnabled(False)
         self.btn_collect_stop = QPushButton("停止采集")
         self.btn_collect_stop.clicked.connect(self._stop_collection)
         self.btn_collect_stop.setEnabled(False)
         collect_buttons.addWidget(self.btn_collect_start)
+        collect_buttons.addWidget(self.btn_collect_pause)
         collect_buttons.addWidget(self.btn_collect_stop)
         cv.addLayout(collect_buttons)
         self.collect_label = QLabel("采集：未开始")
         self.collect_label.setWordWrap(True)
         cv.addWidget(self.collect_label)
-        panel.addWidget(collection)
+        data_layout.addWidget(collection)
 
         training = QGroupBox("价值网络训练")
         tv2 = QVBoxLayout(training)
@@ -392,10 +414,18 @@ class MainWindow(QMainWindow):
         train_buttons = QHBoxLayout()
         self.btn_train_start = QPushButton("开始训练")
         self.btn_train_start.clicked.connect(self._start_training)
+        self.btn_train_pause = QPushButton("暂停训练")
+        self.btn_train_pause.clicked.connect(self._pause_training)
+        self.btn_train_pause.setEnabled(False)
+        self.btn_train_resume = QPushButton("继续上次训练")
+        self.btn_train_resume.clicked.connect(self._resume_training)
+        self.btn_train_resume.setEnabled(False)
         self.btn_train_stop = QPushButton("停止训练")
         self.btn_train_stop.clicked.connect(self._stop_training)
         self.btn_train_stop.setEnabled(False)
         train_buttons.addWidget(self.btn_train_start)
+        train_buttons.addWidget(self.btn_train_pause)
+        train_buttons.addWidget(self.btn_train_resume)
         train_buttons.addWidget(self.btn_train_stop)
         tv2.addLayout(train_buttons)
         self.train_label = QLabel("训练：未开始")
@@ -404,7 +434,7 @@ class MainWindow(QMainWindow):
         self.train_result = QLabel("")
         self.train_result.setWordWrap(True)
         tv2.addWidget(self.train_result)
-        panel.addWidget(training)
+        train_layout.addWidget(training)
 
         model_group = QGroupBox("模型与评估方式")
         mv = QVBoxLayout(model_group)
@@ -435,13 +465,13 @@ class MainWindow(QMainWindow):
         self.history_panel.edit_candidate.setText(self._model or "")
         self.history_panel.busyChanged.connect(self._evaluation_busy)
         self.history_panel.published.connect(self._apply_model_path)
-        panel.addWidget(self.history_panel)
+        eval_layout.addWidget(self.history_panel)
         self.training_task_panel = TrainingTaskPanel(self._exe, self._pool_path,
             self._registry.root, self._evaluations, ROOT / "weights/teacher-tasks",
             lambda: self._phase in ("idle", "game_over"))
         self.training_task_panel.busyChanged.connect(self._training_task_busy)
         self.training_task_panel.published.connect(self._apply_model_path)
-        panel.addWidget(self.training_task_panel)
+        train_layout.addWidget(self.training_task_panel)
 
         status = QGroupBox("状态")
         stv = QVBoxLayout(status)
@@ -462,13 +492,19 @@ class MainWindow(QMainWindow):
                        self.status_label, self.vcf_label, self.result_label,
                        self.replay_label, self.error_label):
             stv.addWidget(widget)
-        panel.addWidget(status)
+        play_layout.addWidget(status)
 
         record = QGroupBox("着法记录")
         rv = QVBoxLayout(record)
         self.moves_list = QListWidget()
         rv.addWidget(self.moves_list)
-        panel.addWidget(record)
+        play_layout.addWidget(record)
+
+        tabs.addTab(play_page, "玩一把")
+        tabs.addTab(data_page, "收集数据")
+        tabs.addTab(train_page, "从0训练 / 自我训练")
+        tabs.addTab(eval_page, "测评")
+        panel.addWidget(tabs)
 
         panel_widget = QWidget()
         panel_widget.setLayout(panel)
@@ -724,12 +760,27 @@ class MainWindow(QMainWindow):
                 self._phase = "idle"
                 self._train_thread = None
                 self._train_stop = None
+                self._train_pause = None
                 self.btn_train_start.setEnabled(True)
+                self.btn_train_pause.setEnabled(False)
                 self.btn_train_stop.setEnabled(False)
                 if kind == "train_done":
-                    self.status_label.setText("训练完成")
+                    paused = (payload.get("stopped") is True
+                              and payload.get("stop_reason") == "paused")
+                    if paused:
+                        checkpoint = (payload.get("checkpoint") or {}).get("last")
+                        self._train_resume = checkpoint
+                        self.btn_train_resume.setEnabled(
+                            bool(checkpoint and Path(checkpoint).is_file()))
+                        self.status_label.setText("训练已暂停；可在安全检查点继续")
+                    else:
+                        self._train_resume = None
+                        self.btn_train_resume.setEnabled(False)
+                        self.status_label.setText("训练完成")
                     self._show_training_result(payload)
                 else:
+                    self._train_resume = None
+                    self.btn_train_resume.setEnabled(False)
                     self._show_error("训练失败：" + str(payload))
                 continue
             if kind in ("collect_progress", "collect_done", "collect_error"):
@@ -741,7 +792,9 @@ class MainWindow(QMainWindow):
                 self._phase = "idle"
                 self._collect_thread = None
                 self._collect_stop = None
+                self._collect_pause = None
                 self.btn_collect_start.setEnabled(True)
+                self.btn_collect_pause.setEnabled(False)
                 self.btn_collect_stop.setEnabled(False)
                 if kind == "collect_done":
                     self.status_label.setText("采集完成")
@@ -833,12 +886,15 @@ class MainWindow(QMainWindow):
             seed=self._collection_seed if self._collection_seed is not None else int(time.time()) % 100000,
             model_id="handcrafted")
         stop_event = threading.Event()
+        pause_event = threading.Event()
         self._collect_stop = stop_event
+        self._collect_pause = pause_event
         self._collect_generation += 1
         generation = self._collect_generation
         self._phase = "collecting"
         self.status_label.setText("采集运行中…")
         self.btn_collect_start.setEnabled(False)
+        self.btn_collect_pause.setEnabled(True)
         self.btn_collect_stop.setEnabled(True)
         exe = self._exe
         pool_path = self._pool_path
@@ -853,7 +909,7 @@ class MainWindow(QMainWindow):
                         rapfi_teacher.RapfiTeacher(identity=identity) as teacher:
                     summary = collect.collect(
                         pool, config, game_client, label_client, teacher,
-                        stop_event=stop_event,
+                        stop_event=stop_event, pause_event=pause_event,
                         progress=lambda update: self._queue.put(
                             ("collect_progress", generation, update)))
                 self._queue.put(("collect_done", generation, summary))
@@ -866,11 +922,20 @@ class MainWindow(QMainWindow):
         self._collect_thread = threading.Thread(target=worker, daemon=True)
         self._collect_thread.start()
 
+    def _pause_collection(self) -> None:
+        if self._collect_pause is None:
+            return
+        self._collect_pause.set()
+        self.btn_collect_pause.setEnabled(False)
+        self.status_label.setText("采集暂停中：当前棋局完成后停在安全边界")
+
     def _stop_collection(self) -> None:
         if self._collect_stop is None:
             return
         self._collect_stop.set()
+        self._collect_pause.set()  # wakes the between-games pause wait
         self.btn_collect_stop.setEnabled(False)
+        self.btn_collect_pause.setEnabled(False)
         self.status_label.setText("停止采集中…")
 
     def _show_collection_update(self, update: dict, *, done: bool = False) -> None:
@@ -900,7 +965,7 @@ class MainWindow(QMainWindow):
         if done:
             self.collect_pool_label.setText(self._pool_status_text())
 
-    def _start_training(self) -> None:
+    def _start_training(self, resume: str | None = None) -> None:
         if self._phase != "idle":
             return
         pool_path = self.edit_pool.text().strip()
@@ -908,17 +973,31 @@ class MainWindow(QMainWindow):
         if not pool_path or not output_dir:
             self._show_error("需要样本池路径和输出目录")
             return
-        steps = self.spin_train_steps.value()
+        if resume:
+            steps = self._train_target
+            seed = self._train_seed
+        else:
+            steps = self.spin_train_steps.value()
+            seed = int(time.time()) % 100000
+            self._train_seed = seed
+            self._train_target = steps
+            self._train_resume = None
         batch = self.spin_train_batch.value()
         lr = self.spin_train_lr.value()
         loss = "mse" if self.combo_train_loss.currentIndex() == 0 else "smooth_l1"
         stop_event = threading.Event()
+        pause_event = threading.Event()
         self._train_stop = stop_event
+        self._train_pause = pause_event
         self._train_generation += 1
         generation = self._train_generation
         self._phase = "training"
-        self.status_label.setText("训练运行中…（可点「停止训练」保存当前状态）")
+        self.status_label.setText(
+            "训练运行中…（可点「暂停训练」保存检查点）" if resume is None
+            else "从检查点继续训练…")
         self.btn_train_start.setEnabled(False)
+        self.btn_train_pause.setEnabled(True)
+        self.btn_train_resume.setEnabled(False)
         self.btn_train_stop.setEnabled(True)
         self.train_label.setText("训练：正在加载数据与初始化…")
         self.train_result.setText("")
@@ -928,13 +1007,14 @@ class MainWindow(QMainWindow):
                 import value_train
                 config = value_train.TrainConfig(
                     pool=pool_path, output_dir=output_dir,
-                    seed=int(time.time()) % 100000, steps=steps,
+                    seed=seed, steps=steps,
                     batch_size=batch, lr=lr, loss=loss, device="auto",
+                    resume=resume,
                     val_every=max(5, steps // 5),
                     checkpoint_every=max(10, steps // 2),
                     log_every=max(1, steps // 10))
                 summary = value_train.train_value(
-                    config, stop_event=stop_event,
+                    config, stop_event=stop_event, pause_event=pause_event,
                     progress=lambda update: self._queue.put(
                         ("train_progress", generation, update)))
                 self._queue.put(("train_done", generation, summary))
@@ -944,11 +1024,29 @@ class MainWindow(QMainWindow):
         self._train_thread = threading.Thread(target=worker, daemon=True)
         self._train_thread.start()
 
+    def _pause_training(self) -> None:
+        if self._train_pause is None:
+            return
+        self._train_pause.set()
+        self.btn_train_pause.setEnabled(False)
+        self.status_label.setText("训练暂停中：将在优化步边界保存检查点")
+
+    def _resume_training(self) -> None:
+        if self._phase != "idle" or not self._train_resume:
+            return
+        if not Path(self._train_resume).is_file():
+            self._show_error("训练检查点已不存在，无法继续")
+            return
+        self._start_training(resume=self._train_resume)
+
     def _stop_training(self) -> None:
         if self._train_stop is None:
             return
         self._train_stop.set()
+        if self._train_pause is not None:
+            self._train_pause.set()  # wakes a paused wait so the worker exits
         self.btn_train_stop.setEnabled(False)
+        self.btn_train_pause.setEnabled(False)
         self.status_label.setText("停止训练中（保存 checkpoint 与导出）…")
 
     def _show_training_progress(self, update: dict) -> None:
@@ -1177,10 +1275,14 @@ class MainWindow(QMainWindow):
         self._generation += 1
         if self._collect_stop is not None:
             self._collect_stop.set()
+        if self._collect_pause is not None:
+            self._collect_pause.set()
         if self._collect_thread is not None:
             self._collect_thread.join(timeout=10)
         if self._train_stop is not None:
             self._train_stop.set()
+        if self._train_pause is not None:
+            self._train_pause.set()
         if self._train_thread is not None:
             self._train_thread.join(timeout=20)
         teacher = self._active_teacher

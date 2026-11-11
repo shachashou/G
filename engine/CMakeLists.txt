@@ -384,6 +384,20 @@ if(GOMOKU_PYTHON)
             "$<TARGET_FILE:gomoku_nnue>")
   set_tests_properties(training_task_tests PROPERTIES TIMEOUT 300)
 
+  # Ticket 12: pause at data/training/evaluation boundaries, restart recovery
+  # with frozen config/data/validation, stale lease/staging cleanup and
+  # evaluation-run reuse.
+  add_test(NAME recovery_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/recovery_tests.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(recovery_tests PROPERTIES TIMEOUT 600)
+
+  add_test(NAME gui_recovery_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_recovery_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_recovery_smoke PROPERTIES
+    TIMEOUT 600 SKIP_RETURN_CODE 77 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   add_test(NAME run_support_tests
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_support_tests.py")
   set_tests_properties(run_support_tests PROPERTIES TIMEOUT 30)

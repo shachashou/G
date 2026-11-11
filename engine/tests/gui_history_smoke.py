@@ -72,6 +72,26 @@ def main():
         assert panel.last_result and panel.last_result["status"] == "interrupted"
         assert ModelRegistry(registry).read()["current"] == "v0"
         print("stop and process cleanup: passed")
+
+        # Pause an evaluation, then resume the same frozen run from the GUI.
+        panel.spin_pairs.setValue(8)
+        panel.edit_candidate.setText(str(root / "6/model.gmvalue"))
+        panel.btn_challenge.click()
+        assert pump_until(app, lambda: panel.thread is not None
+                          and "局" in panel.status.text(), 15), panel.status.text()
+        panel.btn_pause.click()
+        assert pump_until(app, lambda: panel.thread is None, 60)
+        assert panel.last_result["status"] == "interrupted", panel.last_result
+        interrupted_run = panel.last_result["run"]
+        assert panel.btn_resume_eval.isEnabled()
+        panel.btn_resume_eval.click()
+        assert pump_until(app, lambda: panel.thread is None, 120)
+        resumed = panel.last_result
+        assert resumed["run"] == interrupted_run, (resumed.get("run"), interrupted_run)
+        assert resumed["status"] == "completed", resumed
+        assert "保留原正式版本" in panel.status.text()
+        assert ModelRegistry(registry).read()["current"] == "v0"
+        print("pause evaluation, resume same frozen run, keep incumbent: passed")
         window.close()
         app.processEvents()
         # A fresh window follows the registry without an explicit --model.

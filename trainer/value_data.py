@@ -14,7 +14,6 @@ colour swap). Validation is never augmented and is isolated from training by
 game identity and by D4-canonical position keys; a leaked position raises
 instead of silently training on validation data.
 """
-from __future__ import annotations
 
 import hashlib
 import json

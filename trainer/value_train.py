@@ -22,7 +22,6 @@ CLI::
 This proves the pipeline runs and its numbers are sane; it is not a strength
 promotion claim.
 """
-from __future__ import annotations
 
 import argparse
 import copy

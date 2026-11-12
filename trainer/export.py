@@ -16,7 +16,6 @@ Example::
       --checkpoint weights\\nnue_v1.pt --data data\\raw\\round1\\train.binpack ^
       --output weights\\nnue_v1.nnue --report weights\\export_report.json
 """
-from __future__ import annotations
 
 import argparse
 import json

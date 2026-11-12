@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Offline acceptance for the model cleanup planner (tools/model_cleanup.py)."""
-from __future__ import annotations
 
 import io
 import json

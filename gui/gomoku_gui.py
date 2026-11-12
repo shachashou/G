@@ -7,7 +7,6 @@ result are never computed in this GUI. Engine thinking runs on a background
 thread so the window stays responsive; closing or stopping the game kills
 the engine subprocess.
 """
-from __future__ import annotations
 
 import argparse
 import os

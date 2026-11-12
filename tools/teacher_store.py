@@ -34,7 +34,6 @@ Command line::
     python tools/teacher_store.py stats data/teacher/samples.sqlite3
     python tools/teacher_store.py validate data/teacher/samples.sqlite3
 """
-from __future__ import annotations
 
 import argparse
 import json

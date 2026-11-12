@@ -38,7 +38,6 @@ Command line::
         --store data/teacher/samples.sqlite3 label --moves H8,H7,I9,G7
     python tools/teacher_label.py --store data/teacher/samples.sqlite3 stats
 """
-from __future__ import annotations
 
 import argparse
 import json

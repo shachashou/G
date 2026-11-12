@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Offline acceptance for the historical-data planner (tools/storage_cleanup.py)."""
-from __future__ import annotations
 
 import io
 import json

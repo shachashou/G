@@ -9,7 +9,6 @@ validation error actually drops instead of only that the loop runs.
 No engine and no teacher are involved: records are written through the public
 pool boundary (ticket 05).
 """
-from __future__ import annotations
 
 import random
 import sys

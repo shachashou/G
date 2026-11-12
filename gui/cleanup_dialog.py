@@ -9,7 +9,6 @@ Two tabs share one guarded deletion flow:
 The dialog only *offers* selections; both planners re-scan and re-check every
 protection before touching the disk.
 """
-from __future__ import annotations
 
 from pathlib import Path
 

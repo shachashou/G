@@ -19,7 +19,6 @@ Everything else is a candidate for deletion. Bundles from paused/stopped
 tasks carry a ``warning`` because removing them shrinks what that task can
 resume from, but the newest checkpoint is always kept.
 """
-from __future__ import annotations
 
 import argparse
 import json

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Frozen paired matches and evidence-based publication of GMVALUE1 models."""
-from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED

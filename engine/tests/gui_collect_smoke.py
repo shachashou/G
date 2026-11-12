@@ -7,7 +7,6 @@ returns to idle with nothing staged. Skips (77) when Rapfi is not installed.
 
 Usage: python gui_collect_smoke.py <gomoku_nnue.exe>
 """
-from __future__ import annotations
 
 import sys
 import time

@@ -46,7 +46,6 @@ File layout (little-endian): 64-byte header, then the weight body.
       W1 int8  [1024, 15]    b1 int16 [15]
       W2 int8  [2, 15]       b2 int16 [2]
 """
-from __future__ import annotations
 
 import os
 import struct

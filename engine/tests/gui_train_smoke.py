@@ -8,7 +8,6 @@ the UI returns to idle.
 
 Usage: python gui_train_smoke.py <gomoku_nnue.exe>
 """
-from __future__ import annotations
 
 import json
 import sys

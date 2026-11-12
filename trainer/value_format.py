@@ -34,7 +34,6 @@ Usage::
     weights, meta = unpack_value_weights(blob)
     fixed_point_z = infer_int(weights, sparse_indices)
 """
-from __future__ import annotations
 
 import json
 import math

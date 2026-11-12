@@ -8,7 +8,6 @@ tolerances.
 
 Usage: python value_train_tests.py [tools dir]
 """
-from __future__ import annotations
 
 import copy
 import json

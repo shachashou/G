@@ -1,5 +1,4 @@
 """Small, dependency-free provenance/report utilities for offline experiments."""
-from __future__ import annotations
 
 import hashlib
 import json

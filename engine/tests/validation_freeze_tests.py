@@ -16,7 +16,6 @@ Fixture note: with --val-fraction 0.5 --seed 42 over 4 games, the split is
 deterministically {1, 2} (verified via dataset.choose_validation_games), so
 the bridge pair X / mirror(X) is placed in games 0 (train) and 1 (val).
 """
-from __future__ import annotations
 
 import importlib.util
 import json

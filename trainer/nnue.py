@@ -19,7 +19,6 @@ Two forward modes share one topology:
 Parameters start as small integers. Training can move them away from integers;
 original-model to exported-model fidelity must be measured independently.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
 

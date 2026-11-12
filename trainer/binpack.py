@@ -21,7 +21,6 @@ Record layout::
 WDL is relative to the side to move: 0 = loss, 1 = draw, 2 = win,
 3 = unknown (only legal while a worker is still playing that game).
 """
-from __future__ import annotations
 
 import argparse
 import json

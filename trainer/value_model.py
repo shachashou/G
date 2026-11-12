@@ -10,7 +10,6 @@ Hidden activations use a clipped ReLU with a fixed ceiling (``act_max``) so the
 exported integer network has exactly the same shape. The output is
 ``tanh(z)`` in ``[-1, 1]``; ``z`` is what the integer file stores.
 """
-from __future__ import annotations
 
 from dataclasses import dataclass
 

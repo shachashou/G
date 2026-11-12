@@ -16,7 +16,6 @@ Commands (all run with the project venv)::
   .venv\\Scripts\\python.exe tools\\datagen.py calibrate --depths 6,5,4
   .venv\\Scripts\\python.exe tools\\datagen.py report --manifest data/raw/round1/manifest.json
 """
-from __future__ import annotations
 
 import argparse
 import glob

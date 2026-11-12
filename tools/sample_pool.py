@@ -45,7 +45,6 @@ Command line::
     python tools/sample_pool.py validate data/pool/pool.sqlite3
     python tools/sample_pool.py evict data/pool/pool.sqlite3 --capacity 500
 """
-from __future__ import annotations
 
 import argparse
 import hashlib

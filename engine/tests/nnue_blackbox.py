@@ -7,7 +7,6 @@ handcrafted evaluator instead of crashing.
 
 Usage: python nnue_blackbox.py [path to gomoku_nnue.exe]
 """
-from __future__ import annotations
 
 import random
 import re

@@ -17,7 +17,6 @@ temporary store, and checks the contract end to end:
 Usage: python teacher_tests.py <gomoku_nnue.exe> <tools dir>
 Exit code 77 means "teacher not installed" (registered as a ctest skip).
 """
-from __future__ import annotations
 
 import json
 import os

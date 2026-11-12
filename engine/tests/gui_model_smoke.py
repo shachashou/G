@@ -9,7 +9,6 @@ the handcrafted evaluator and the explicit failure path for a corrupt file.
 Usage: python gui_model_smoke.py <gomoku_nnue.exe>
 Requires QT_QPA_PLATFORM=offscreen.
 """
-from __future__ import annotations
 
 import sys
 import tempfile

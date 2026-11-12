@@ -1,5 +1,4 @@
 """GUI adapter for the shared history evaluation backend; no game rules."""
-from __future__ import annotations
 
 import json
 from pathlib import Path

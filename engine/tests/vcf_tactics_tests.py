@@ -6,7 +6,6 @@ without the GUI, and that it keeps the proven / unknown distinction intact.
 
 Usage: python vcf_tactics_tests.py <gomoku_nnue.exe> [tools dir]
 """
-from __future__ import annotations
 
 import sys
 from pathlib import Path

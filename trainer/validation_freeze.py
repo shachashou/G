@@ -21,7 +21,6 @@ the hash check are reported as separate facts.
 
 Pure standard library, like the rest of the trainer's split logic.
 """
-from __future__ import annotations
 
 import argparse
 import json

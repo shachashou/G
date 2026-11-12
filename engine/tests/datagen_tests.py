@@ -10,7 +10,6 @@ A real C++ worker generates tiny shards; the Python read end checks the magic,
 64-byte layout, WDL backfill, game boundaries and shard merging; the C++ worker
 then replays sampled records to prove the stored search scores are reproducible.
 """
-from __future__ import annotations
 
 import json
 import shutil

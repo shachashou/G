@@ -12,7 +12,6 @@ Covers the whole user-visible contract through the two process front ends:
 
 Usage: python value_engine_blackbox.py [path to gomoku_nnue.exe]
 """
-from __future__ import annotations
 
 import json
 import random

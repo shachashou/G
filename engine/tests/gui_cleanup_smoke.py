@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Offscreen acceptance for the cleanup dialog: models and historical data."""
-from __future__ import annotations
 
 import json
 import os

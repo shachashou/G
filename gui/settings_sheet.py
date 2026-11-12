@@ -4,7 +4,6 @@ All advanced controls are moved here from the main cards, but the widgets and
 their bindings stay unchanged. The sheet is non-destructive: background tasks
 keep running while it is open.
 """
-from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtWidgets import (

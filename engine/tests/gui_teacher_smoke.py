@@ -8,7 +8,6 @@ path when the teacher dependency is missing (no fabricated labels).
 Usage: python gui_teacher_smoke.py <gomoku_nnue.exe>
 Requires QT_QPA_PLATFORM=offscreen and an installed Rapfi (else exit 77).
 """
-from __future__ import annotations
 
 import sys
 import time

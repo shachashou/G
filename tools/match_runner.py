@@ -22,7 +22,6 @@ Example (PowerShell, using the project venv)::
 which is what history-evaluation iterations use. The gate compares the score rate
 ``(wins + 0.5 * draws) / games``.
 """
-from __future__ import annotations
 
 import argparse
 import contextlib

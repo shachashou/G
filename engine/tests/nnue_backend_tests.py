@@ -7,7 +7,6 @@ indices) as the Python integer reference. The benchmark prints ns/eval so the
 
 Usage: python nnue_backend_tests.py [path to nnue_probe.exe]
 """
-from __future__ import annotations
 
 import random
 import re

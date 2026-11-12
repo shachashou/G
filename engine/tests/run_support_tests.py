@@ -1,5 +1,4 @@
 """Atomic report writes remain safe with Windows readers and concurrent writers."""
-from __future__ import annotations
 
 import ctypes
 import json

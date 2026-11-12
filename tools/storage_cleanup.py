@@ -15,7 +15,6 @@ Two kinds of history are handled, both with hard protections:
 
 Candidate model bundles are handled separately by ``tools/model_cleanup.py``.
 """
-from __future__ import annotations
 
 import argparse
 import json

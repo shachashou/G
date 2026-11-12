@@ -9,7 +9,6 @@
 The pure-Python split logic is importable without torch/numpy so it can be
 tested on a bare environment; only the Dataset class needs torch.
 """
-from __future__ import annotations
 
 import random
 from array import array

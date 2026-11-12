@@ -32,7 +32,6 @@ Command line::
     python tools/rapfi_teacher.py about
     python tools/rapfi_teacher.py probe H8,H7,I9,G7
 """
-from __future__ import annotations
 
 import argparse
 import hashlib

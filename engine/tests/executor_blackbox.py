@@ -7,7 +7,6 @@ on the verdicts returned by the executor.
 
 Usage: python executor_blackbox.py [gomoku_nnue.exe] [tools/executor.py]
 """
-from __future__ import annotations
 
 import os
 import sys

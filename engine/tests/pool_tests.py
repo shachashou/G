@@ -8,7 +8,6 @@ read snapshots, the supervision contract and integrity rejection.
 
 Usage: python pool_tests.py [tools dir]
 """
-from __future__ import annotations
 
 import math
 import shutil

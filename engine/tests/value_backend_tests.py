@@ -14,7 +14,6 @@ equality. This test drives the actual Alpha-Beta search and the match runner:
 
 Usage: python value_backend_tests.py [gomoku_nnue.exe] [tools dir]
 """
-from __future__ import annotations
 
 import json
 import random

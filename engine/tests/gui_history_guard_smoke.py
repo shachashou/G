@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Offscreen acceptance: evaluation candidate guard and retainer explanation."""
-from __future__ import annotations
 
 import hashlib
 import json

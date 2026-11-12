@@ -1,5 +1,4 @@
 """Atomic, local history of validated GMVALUE1 releases (ticket 08)."""
-from __future__ import annotations
 
 from contextlib import contextmanager
 import json

@@ -13,7 +13,6 @@ Torch half (runs when installed):
 
 Usage: python nnue_parity_tests.py [path to nnue_probe.exe]
 """
-from __future__ import annotations
 
 import importlib.util
 import json

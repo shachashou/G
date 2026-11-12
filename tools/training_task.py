@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Bounded continuous training orchestration, with replaceable data producers."""
-from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace

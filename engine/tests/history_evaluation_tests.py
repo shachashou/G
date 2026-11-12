@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Public evaluation/publication boundary: real engines plus scripted rivals."""
-from __future__ import annotations
 
 from dataclasses import replace
 import json

@@ -4,7 +4,6 @@ The UI deliberately follows a phone-app hierarchy: one calm surface, white
 cards, one blue primary action per mode, and progressive disclosure for the
 many training/evaluation knobs. No rules or task behavior live here.
 """
-from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (

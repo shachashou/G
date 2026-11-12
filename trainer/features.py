@@ -31,7 +31,6 @@ overline, double-four, double-three all depend only on line geometry), so
 score and WDL labels are unchanged by augmentation. Only the feature indices
 are permuted, and the colour partition is preserved.
 """
-from __future__ import annotations
 
 from typing import Callable, Iterable, Sequence
 

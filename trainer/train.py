@@ -14,7 +14,6 @@ Example (project venv, RTX 4080 SUPER auto-detected)::
 Every epoch writes train/validation loss into the history JSON so the
 convergence curve can be reviewed later. The best checkpoint is kept.
 """
-from __future__ import annotations
 
 import argparse
 import json

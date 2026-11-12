@@ -8,7 +8,6 @@ executor/VCF filtering, atomic game commits, pool stats and stop behaviour.
 
 Usage: python collect_tests.py <gomoku_nnue.exe> <tools dir>
 """
-from __future__ import annotations
 
 import math
 import shutil

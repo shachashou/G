@@ -29,7 +29,6 @@ Programmatic use (tests inject a stub teacher)::
     from collect import CollectConfig, collect
     summary = collect(pool, config, game_client, label_client, teacher)
 """
-from __future__ import annotations
 
 import argparse
 import json

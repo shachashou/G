@@ -12,7 +12,6 @@ Example::
       --data data\\raw\\m5_fresh_200k\\train.binpack ^
       --out data\\m5\\fresh_200k_profile.json
 """
-from __future__ import annotations
 
 import argparse
 import math

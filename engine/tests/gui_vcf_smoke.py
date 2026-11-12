@@ -8,7 +8,6 @@ checks what the user would see: status, first move and variation.
 Usage: python gui_vcf_smoke.py <gomoku_nnue.exe>
 Requires QT_QPA_PLATFORM=offscreen.
 """
-from __future__ import annotations
 
 import sys
 import time

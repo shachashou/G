@@ -1,5 +1,4 @@
 """Teacher, transition and teacher-free modes using the shared scheduler."""
-from __future__ import annotations
 
 from pathlib import Path
 import json

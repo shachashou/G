@@ -15,7 +15,6 @@ Usage::
         client.play(7, 7)
         print(client.legal_moves()["count"])
 """
-from __future__ import annotations
 
 import json
 import subprocess

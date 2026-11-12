@@ -18,7 +18,6 @@ Usage::
     .venv\\Scripts\\python.exe tools/vcf_bench.py --engine build/engine/gomoku_nnue.exe
     .venv\\Scripts\\python.exe tools/vcf_bench.py --engine ... --json report.json --repeats 7
 """
-from __future__ import annotations
 
 import argparse
 import json

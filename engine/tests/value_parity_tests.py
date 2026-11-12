@@ -17,7 +17,6 @@ Torch half (runs when installed and the local demo model exists):
 
 Usage: python value_parity_tests.py [path to value_probe.exe]
 """
-from __future__ import annotations
 
 import hashlib
 import importlib.util

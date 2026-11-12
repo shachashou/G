@@ -16,7 +16,7 @@
 
 ## Verification
 
-- `gui_history_guard_smoke`：候选等于正式 v1 时 `candidate_problem` 返回中文说明、`start()` 拒绝且无 worker/无目录；不同文件通过；得分率 62.5% / 下界 47.2% / 64 对的保留报告出现「证据不足」与「增加开局对数」；`_sync_history_candidate` 对正式版本清空、对候选填入；门槛提示 64 对=65.3%、128 对=60.8%、基线 0.51 时=66.3%（即提高基线反而更难）。
+- 候选防护功能保留；专门的 `gui_history_guard_smoke` 已按用户要求删除，不再运行其断言。
 - `gui_ui_smoke`：训练任务面板显示「晋级条件」。
 - `gui_history_smoke`、`gui_model_smoke` 等既有测评/模型测试保持通过。
 

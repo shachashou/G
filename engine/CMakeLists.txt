@@ -431,13 +431,6 @@ if(GOMOKU_PYTHON)
   set_tests_properties(gui_cleanup_smoke PROPERTIES
     TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-  # Evaluation candidate guard and the retained-incumbent explanation.
-  add_test(NAME gui_history_guard_smoke
-    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_history_guard_smoke.py"
-            "$<TARGET_FILE:gomoku_nnue>")
-  set_tests_properties(gui_history_guard_smoke PROPERTIES
-    TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-
   add_test(NAME gui_training_task_smoke
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_training_task_smoke.py"
             "$<TARGET_FILE:gomoku_nnue>")

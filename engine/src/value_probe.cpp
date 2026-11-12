@@ -92,6 +92,10 @@ void runWalk(const ValueNetwork& network, std::istream& input) {
   Board board(RuleMode::Renju);
   ValueAccumulator acc{};
   bool initialized = false;
+  // Stones placed since the last `load`.  Undo may only walk back over those;
+  // the loaded position itself has no move history, so an underflow used to
+  // call updateAccumulator with lastMove() == -1 and abort the probe.
+  int placed = 0;
 
   std::string line;
   while (std::getline(input, line)) {
@@ -118,6 +122,7 @@ void runWalk(const ValueNetwork& network, std::istream& input) {
       }
       network.rebuildAccumulator(board, acc);
       initialized = true;
+      placed = 0;
       printEval(network, board, acc, "load", -1);
     } else if (op == "place") {
       int cell = -1;
@@ -136,9 +141,10 @@ void runWalk(const ValueNetwork& network, std::istream& input) {
       const Color side = board.sideToMove();
       network.updateAccumulator(board, cell, cellOf(side), acc);
       board.place(cell);
+      ++placed;
       printEval(network, board, acc, "place", cell);
     } else if (op == "undo") {
-      if (!initialized || board.moveCount() == 0) {
+      if (!initialized || placed == 0) {
         printWalkError("nothing to undo");
         continue;
       }
@@ -147,6 +153,7 @@ void runWalk(const ValueNetwork& network, std::istream& input) {
       // stone is still present), then the board is rolled back.
       network.updateAccumulator(board, move, Cell::Empty, acc);
       board.undo();
+      --placed;
       printEval(network, board, acc, "undo", move);
     } else if (op == "state") {
       if (!initialized) {

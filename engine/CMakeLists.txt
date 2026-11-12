@@ -416,6 +416,28 @@ if(GOMOKU_PYTHON)
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_support_tests.py")
   set_tests_properties(run_support_tests PROPERTIES TIMEOUT 30)
 
+  # Candidate models and historical data: planners, guards, CLI and dialog.
+  add_test(NAME model_cleanup_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/model_cleanup_tests.py")
+  set_tests_properties(model_cleanup_tests PROPERTIES TIMEOUT 60)
+
+  add_test(NAME storage_cleanup_tests
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/storage_cleanup_tests.py")
+  set_tests_properties(storage_cleanup_tests PROPERTIES TIMEOUT 60)
+
+  add_test(NAME gui_cleanup_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_cleanup_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_cleanup_smoke PROPERTIES
+    TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+  # Evaluation candidate guard and the retained-incumbent explanation.
+  add_test(NAME gui_history_guard_smoke
+    COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_history_guard_smoke.py"
+            "$<TARGET_FILE:gomoku_nnue>")
+  set_tests_properties(gui_history_guard_smoke PROPERTIES
+    TIMEOUT 120 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
   add_test(NAME gui_training_task_smoke
     COMMAND "${GOMOKU_PYTHON}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/gui_training_task_smoke.py"
             "$<TARGET_FILE:gomoku_nnue>")

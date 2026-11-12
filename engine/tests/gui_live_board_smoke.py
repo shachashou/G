@@ -7,6 +7,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / p) for p in ("gui", "tools", "trainer")]
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 import gomoku_gui
 
@@ -39,7 +40,9 @@ def payload(game, stones, side="white", last=(7, 7), ply=None, kind="collect"):
 def main():
     app = QApplication.instance() or QApplication([sys.argv[0]])
     with tempfile.TemporaryDirectory(prefix="gui-live-") as raw:
-        window = gomoku_gui.MainWindow(EXE, 50)
+        settings = QSettings(str(Path(raw) / "client.ini"),
+                             QSettings.Format.IniFormat)
+        window = gomoku_gui.MainWindow(EXE, 50, settings=settings)
         window.resize(1264, 820)
         window.show()
         pump(app)
@@ -80,6 +83,18 @@ def main():
         window._sync_live_button()
         assert window.btn_live.isVisible()
         assert "LIVE" in window.btn_live.text()
+
+        # Hiding the board removes the mirror affordance without stopping the
+        # background task; showing the board brings it back.
+        window._toggle_board()
+        assert not window.board_card.isVisible()
+        assert not window.btn_live.isVisible()
+        window._on_preview(payload(1, [(7, 7), (8, 8), (9, 9)], side="black",
+                                  last=(9, 9), ply=3))
+        assert window._preview["cells"][9 * 15 + 9] == 1
+        window._toggle_board()
+        assert window.board_card.isVisible()
+        assert window.btn_live.isVisible()
         played = []
         window._client.play = lambda x, y: played.append((x, y))
         window._on_player_move(0, 0)

@@ -15,6 +15,38 @@ from PySide6.QtWidgets import (
 from model_registry import ModelRegistry
 from ui_components import CollapsibleSection, mark_button
 
+CONCLUSION_TEXT = {
+    "passed": "通过",
+    "incomplete": "对局未完整完成",
+    "insufficient_pairs": "有效配对不足",
+    "below_threshold": "明显弱于基线",
+    "insufficient_evidence": "证据不足",
+}
+
+
+def _percent(value) -> str:
+    return "—" if value is None else f"{value:.1%}"
+
+
+def judgement(stat: dict) -> str:
+    """One-line, human explanation of why a challenge was not promoted."""
+    if stat.get("passed"):
+        return "通过：配对下界高于基线"
+    conclusion = stat.get("conclusion")
+    if conclusion == "incomplete":
+        return "对局未完整完成，本次证据无效"
+    if conclusion == "insufficient_pairs":
+        return f"有效配对 {stat.get('completed_pairs', '?')} 少于最低要求"
+    if conclusion == "below_threshold":
+        return "未通过：配对上界不高于基线，候选明显更弱"
+    if conclusion == "insufficient_evidence":
+        return (f"未通过：得分率 {_percent(stat.get('score_rate'))}，"
+                f"配对下界 {_percent(stat.get('one_sided_lower'))} ≤ "
+                f"门槛 {_percent(stat.get('threshold'))}"
+                f"（{stat.get('completed_pairs', '?')} 对开局）；"
+                "证据不足，可增加开局对数或继续训练")
+    return "未通过"
+
 
 class HistoryPanel(QGroupBox):
     busyChanged = Signal(bool)
@@ -79,6 +111,14 @@ class HistoryPanel(QGroupBox):
         hint.setWordWrap(True)
         hint.setObjectName("Caption")
         advanced_layout.addWidget(hint)
+        self.gate_hint = QLabel("")
+        self.gate_hint.setWordWrap(True)
+        self.gate_hint.setObjectName("Caption")
+        advanced_layout.addWidget(self.gate_hint)
+        for widget in (self.spin_pairs, self.spin_threshold):
+            widget.valueChanged.connect(self._update_gate_hint)
+        self.opponents.itemSelectionChanged.connect(self._update_gate_hint)
+
         self.advanced = CollapsibleSection("测评参数与对手", advanced_layout)
         self.advanced.embed()
         self.btn_initial = QPushButton("登记 v0")
@@ -155,11 +195,57 @@ class HistoryPanel(QGroupBox):
             self.btn_initial.setEnabled(False)
             self.btn_challenge.setEnabled(False)
             self.btn_current.setEnabled(False)
+        self._update_gate_hint()
+
+    def _update_gate_hint(self, *_args):
+        from history_evaluation import required_score_rate
+
+        pairs = self.spin_pairs.value()
+        threshold = self.spin_threshold.value()
+        selected = {item.text() for item in self.opponents.selectedItems()}
+        comparisons = len(selected)
+        try:
+            state = ModelRegistry(self.registry).read()
+            if state.get("current") and state["current"] not in selected:
+                comparisons += 1
+        except (ValueError, OSError):
+            pass
+        comparisons = max(1, comparisons)
+        required = required_score_rate(pairs, threshold, comparisons)
+        detail = "；有效配对至少 32" if pairs < 32 else ""
+        self.gate_hint.setText(
+            f"晋级条件：{pairs} 对开局、{comparisons} 个对手，配对得分率需 > "
+            f"{required:.1%}（单侧 95% 下界 > {threshold:.0%}）{detail}。"
+            "门槛看的是置信下界，不是原始胜率：51% 的观察值仍然无法证明更强。")
 
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择候选模型", "weights", "GMVALUE1 (*.gmvalue)")
         if path:
             self.edit_candidate.setText(path)
+
+    def candidate_problem(self, candidate: str) -> str | None:
+        """Reject a challenger byte-identical to a registered version.
+
+        The backend already refuses this, but only after creating a run
+        directory and showing an English message. Catching it here keeps the
+        evaluation picker honest: the formal version is the opponent, never
+        the candidate.
+        """
+        from run_support import file_identity
+        try:
+            identity = file_identity(Path(candidate))
+            state = ModelRegistry(self.registry).read()
+        except (OSError, ValueError) as exc:
+            return "测评：候选模型不可用：" + str(exc)
+        for entry in state.get("versions", []):
+            if entry.get("sha256") == identity["sha256"]:
+                role = ("当前正式版本"
+                        if entry.get("version") == state.get("current")
+                        else "历史版本")
+                return (f"测评：候选与{role} {entry['version']} 是同一个模型，"
+                        "不能自己挑战自己；请选择新训练出的候选目录"
+                        "（weights/*-tasks/<任务>/candidates/round-*）。")
+        return None
 
     def start(self, initial=False, resume_run=None):
         if self.thread is not None or not self.can_start():
@@ -169,6 +255,11 @@ class HistoryPanel(QGroupBox):
         if not candidate and resume_run is None:
             self.status.setText("测评：请选择候选模型")
             return
+        if candidate and resume_run is None:
+            problem = self.candidate_problem(candidate)
+            if problem:
+                self.status.setText(problem)
+                return
         # Capture widget values on the GUI thread, before starting the worker.
         settings = {"pairs": 1 if initial else self.spin_pairs.value(),
                     "workers": self.spin_workers.value(),
@@ -264,7 +355,10 @@ class HistoryPanel(QGroupBox):
         summaries = {name: {"胜": s["wins"], "和": s["draws"], "负": s["losses"],
             "有效局数": s["valid_games"], "严格胜率": s["strict_win_rate"],
             "得分率": s["score_rate"], "配对下界": s["one_sided_lower"],
-            "结论": s["conclusion"], "异常": s["anomalies"]}
+            "门槛": s.get("threshold"), "有效配对": s.get("completed_pairs"),
+            "结论": s["conclusion"] + "（" + CONCLUSION_TEXT.get(
+                s["conclusion"], s["conclusion"]) + "）",
+            "判定": judgement(s), "异常": s["anomalies"]}
             for name, s in result.get("statistics", {}).items()}
         self.report.setPlainText(json.dumps({"对手报告": summaries,
             "用时秒": result.get("elapsed_s"), "报告目录": result.get("run"),

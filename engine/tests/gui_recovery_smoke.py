@@ -9,6 +9,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / p) for p in ("gui", "tools", "trainer")]
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 import gomoku_gui
 import rapfi_teacher

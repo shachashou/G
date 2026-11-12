@@ -7,9 +7,9 @@ Windows 本地五子棋训练与对弈工作台：在同一个客户端完成"�
 - [主规格](.scratch/gomoku-nnue/spec.md)：目标行为、交付顺序、测试与范围，状态 ready-for-agent。
 - [术语表](GLOSSARY.md)：教师启动、自主训练、正式版本、候选模型与晋级等定义。
 - [训练端说明](trainer/README.md) / [工具说明](tools/README.md) / [客户端说明](gui/README.md)：现有能力及改造边界。
-- [实施工单](.scratch/gomoku-nnue/issues/)：已发布14张，每张独立记录验收条件和阻塞关系。
+- [实施工单](.scratch/gomoku-nnue/issues/)：已发布22张，每张独立记录验收条件和阻塞关系。
 
-已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)、[11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)、[12：任务恢复与一站式验收](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md) 和 [13：简化界面（接近苹果手机式）](.scratch/gomoku-nnue/issues/13-simplified-apple-like-ui.md) 和 [14：实时棋盘与三模式简化工作台](.scratch/gomoku-nnue/issues/14-live-board-and-simplified-workbench.md)。
+已完成 [01：训练基础脱离旧实验](.scratch/gomoku-nnue/issues/01-retire-legacy-experiments.md)、[02：GUI 完成一局合法对弈](.scratch/gomoku-nnue/issues/02-desktop-play-and-shared-rules.md)、[03：接入开源 VCF](.scratch/gomoku-nnue/issues/03-open-source-vcf-integration.md)、[04：教师评分与有效样本落盘](.scratch/gomoku-nnue/issues/04-rapfi-labeling-and-sample-storage.md)、[05：持续采集与滚动样本池](.scratch/gomoku-nnue/issues/05-continuous-collection-and-replay-pool.md)、[06：新网络从零训练与导出](.scratch/gomoku-nnue/issues/06-new-network-training-and-export.md)、[07：使用新模型实际对弈](.scratch/gomoku-nnue/issues/07-new-model-cpp-play.md)、[08：历史版本测评与晋级](.scratch/gomoku-nnue/issues/08-history-evaluation-and-promotion.md)、[09：持续教师训练闭环](.scratch/gomoku-nnue/issues/09-continuous-teacher-training.md)、[10：完全无教师自主训练](.scratch/gomoku-nnue/issues/10-teacher-free-self-training.md)、[11：增量累加器与推理加速](.scratch/gomoku-nnue/issues/11-incremental-accumulator-and-inference-speed.md)、[12：任务恢复与一站式验收](.scratch/gomoku-nnue/issues/12-task-recovery-and-workbench-acceptance.md) 和 [13：简化界面（接近苹果手机式）](.scratch/gomoku-nnue/issues/13-simplified-apple-like-ui.md)、[14：实时棋盘与三模式简化工作台](.scratch/gomoku-nnue/issues/14-live-board-and-simplified-workbench.md)、[15：可隐藏棋盘](.scratch/gomoku-nnue/issues/15-hideable-board.md)、[16：模型胶囊可读性](.scratch/gomoku-nnue/issues/16-model-capsule-readability.md)、[17：模型清理](.scratch/gomoku-nnue/issues/17-model-cleanup.md)、[18：历史数据清理](.scratch/gomoku-nnue/issues/18-historical-data-cleanup.md)、[19：测评候选防护与保留结论说明](.scratch/gomoku-nnue/issues/19-evaluation-candidate-guard.md)、[20：训练任务导出拒绝可见性](.scratch/gomoku-nnue/issues/20-export-rejection-visibility.md)、[21：训练任务参数持久化](.scratch/gomoku-nnue/issues/21-task-settings-persistence.md) 和 [22：搜索深度可见性](.scratch/gomoku-nnue/issues/22-search-depth-visibility.md)。
 
 ## 设计方向
 
@@ -100,6 +100,17 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 或 `.venv\Scripts\python.exe gui\gomoku_gui.py --help`。客户端通过 JSON-lines 协议调用权威执行器：完整合法落点、禁手原因、落子结果和终局都由 C++ 执行器给出，界面与 Python 裁判不另写规则。窗口可自由拖动缩放，棋盘按窗口尺寸等比重绘（15×15 网格始终居中，棋子与标记随格距缩放）；关闭时记住大小，下次启动沿用。详见 [客户端说明](gui/README.md)。
 
 **直接双击 `gui/play.bat` 默认加载 `weights/registry/state.json` 指向的当前正式模型。** 尚未登记 v0 时，显示手工威胁评估 + Alpha-Beta + VCF；`--model PATH` 可显式试玩候选。登记或晋级后，GUI 显示真实正式版本身份，后续启动沿用该版本。
+
+顶部模型胶囊使用短标签：`正式 v0`、`历史 v3`、`候选 · value-run`、`候选 · <任务 id8>/round-00001`；完整路径、模型 id 与身份在悬停提示和「设置 → 模型」中。模型再多也不会只看到一串被截断的路径。
+
+## AI 能看多少步
+
+搜索是迭代加深 Alpha-Beta（PVS + 置换表 + killer/history）。GUI 只传每步时间（默认 1000 ms），引擎默认 `maxDepth=8`：
+
+- 深度按**层（半手）**计，8 层 = 双方各 4 手，是硬上限；到达后继续给时间也不会更深。
+- 实测 1000 ms：开局约 7 层（3.5 手）、中盘约 6 层（3 手）；200 ms 中盘约 5 层。调大「每步 ms」通常只多 1 层左右。
+- 算杀（VCF）是独立搜索：根预算 50000 节点、攻击方最多 10 手，能证明比常规搜索更深的强制胜；`disproven` 只表示预算内没有 VCF，不代表没有胜法。
+- 界面每次 AI 行棋后在对局详情显示「深度 N 层（约 N/2 手）· 节点 · 评分」，着法来自算杀时会注明。
 
 ## 算杀（VCF）
 
@@ -199,7 +210,19 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 - **默认统计方案**：64 个开局对（128 局）/对手，至少 32 个完整开局对；对每对两局的平均得分使用 Hoeffding 单侧下界，整体 `alpha=0.05`，多个对手用 Bonferroni 校正。只有每个对手的下界都**严格高于 0.5**才具备晋级资格。这是保守的工程默认值，可在开赛前配置，不继承旧 M5 门槛。
 - **异常与停止**：崩溃、超时、非法落子、身份不符或模型加载失败即终止本次测评；异常判负与有效棋力证据分开，达到手数上限只记未完成，不算和棋。停止保存部分报告并回收子进程。证据不足或任何异常均保持现任版本。
 - **发布**：发布前复核冻结身份、统计和权威执行器重放的终局，带锁原子替换正式版本指针；若现任版本已变更则拒绝过期发布。历史版本保留模型、数值报告及晋级来源。
-- **报告**：`data/evaluations/<run>/manifest.json` 是赛前配置，`report.json` 是封存对局与统计，`result.json` 是发布回执。GUI 显示胜/和/负、严格胜率、得分率、有效局数、配对下界、结论、用时和异常，并可查看已有报告。
+- **报告**：`data/evaluations/<run>/manifest.json` 是赛前配置，`report.json` 是封存对局与统计，`result.json` 是发布回执。GUI 显示胜/和/负、严格胜率、得分率、有效局数、配对下界、门槛、有效配对、结论、判定、用时和异常，并可查看已有报告。
+- **候选防护（工单 19）**：顶部胶囊切到正式/历史版本时不会自动填进测评选候选框；启动前会按哈希核验，候选与任何登记版本相同则用中文拒绝（说明是哪个版本、应选新训练的候选目录），不创建空测评目录。
+- **保留解释（工单 19）**：未晋级时报告给出「判定」一行，例如「未通过：得分率 62.5%，配对下界 47.2% ≤ 门槛 50.0%（64 对开局）；证据不足，可增加开局对数或继续训练」。证据不足 ≠ 训练失败。
+- **晋级门槛换算（工单 19）**：门槛是「配对得分的单侧 95% 下界 > 基线」，不是原始胜率。单对手、基线 50%、`alpha=0.05` 时，需要达到的配对得分率约：
+
+  | 开局对 | 需超过的得分率 |
+  |---:|---:|
+  | 32 | 71.6% |
+  | 64 | 65.3% |
+  | 128 | 60.8% |
+  | 256 | 57.6% |
+
+  所以把基线从 50% 改成 51% 并不会更容易：64 对开局下需要 66.3%，反而更高。128 局里看到 51% 也只是接近噪声（比例标准误约 4.4%）。要让 60% 左右的真实进步晋级，正确做法是增加开局对数（或让候选继续变强），而不是降低证据标准。测评面板与训练面板会实时显示当前配置所需的得分率。
 
 候选目录必须有新训练器导出的 `model.gmvalue`、`fidelity.json`、`training_positions.json`。缺少训练清单的旧模型仍可试玩，但不能用于本流程登记或晋级；需要通过新训练链路生成可追溯导出。
 
@@ -290,9 +313,46 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 验收见[工单 14](.scratch/gomoku-nnue/issues/14-live-board-and-simplified-workbench.md)，GUI 细节见[客户端说明](gui/README.md)。
 
+## 可隐藏棋盘（工单 15）
+
+顶部「隐藏棋盘」按钮（或 `Ctrl+B`）收起左侧棋盘，右侧面板占满窗口；再点一次或按 `Ctrl+B` 恢复。隐藏只是显示偏好：对局、实时镜像与后台任务照常运行；隐藏期间不显示 LIVE/返回对局入口，重新显示后按当前状态恢复玩家棋盘或实时镜像。选择写入本地客户端设置，下次启动沿用。验收见[工单 15](.scratch/gomoku-nnue/issues/15-hideable-board.md)。
+
+## 模型选择与清理（工单 16 / 17 / 18）
+
+「设置 → 模型」分组列出模型身份、完整路径与「清理模型与数据…」入口。对话框分两页：
+
+**候选模型**
+
+- **短标签**：正式/历史版本显示为 `正式 vN` / `历史 vN`，未登记模型显示为 `候选 · <目录>` 或 `候选 · <任务 id8>/round-N`，按修改时间从新到旧；完整路径和模型 id 在悬停提示里。
+- **清理范围**：只处理 `weights/` 下的候选模型包（模型 + 检查点 + 训练位置）。`weights/registry`（正式/历史版本及其测评证据）不参与扫描。
+- **永不删除**：登记表里的正式/历史版本、当前加载的模型、本地测试样例 `weights/value-demo`、正在运行任务的全部候选。
+- **保留规则**：每个任务至少保留最近 N 轮（默认 1，可在对话框调整并存为客户端偏好），保证暂停/已停止的任务仍有最近检查点可恢复。
+- **默认勾选**：已完成/已失败任务的旧轮次；手动训练输出（`weights/value-run` 等）默认不勾选，需要显式选择。
+
+**历史数据**
+
+- **任务目录**：`weights/*-tasks/<id>`。运行中的任务永不删除；`completed`/`failed` 默认列出（不在恢复列表里）；`paused`/`stopped` 可恢复，默认不勾选，勾选会看到「删除后无法继续恢复」。
+- **测评记录**：`data/evaluations/<run>`。被登记表任何版本引用、或被可恢复任务的中断测评引用的 run 是证据，永不删除；其余默认不勾选，勾选后删除「当时为什么没晋级」的记录，不影响当前版本。
+- **安全**：删除前二次确认，只删除重新扫描后仍可清理、位于对应根目录内、非符号链接的整目录；任务运行中拒绝打开清理对话框。删除后刷新模型胶囊、设置摘要与测评报告列表。
+
+命令行（默认只列出，不改动磁盘）：
+
+~~~powershell
+.venv\Scripts\python.exe tools/model_cleanup.py
+.venv\Scripts\python.exe tools/model_cleanup.py --keep 2 --json
+.venv\Scripts\python.exe tools/model_cleanup.py --apply --all
+.venv\Scripts\python.exe tools/model_cleanup.py --apply --select "value-run"
+
+.venv\Scripts\python.exe tools/storage_cleanup.py
+.venv\Scripts\python.exe tools/storage_cleanup.py --apply --all
+.venv\Scripts\python.exe tools/storage_cleanup.py --apply --select "evaluation:20261111-142711-1aae89fab1a7"
+~~~
+
+验收见[工单 16](.scratch/gomoku-nnue/issues/16-model-capsule-readability.md)、[工单 17](.scratch/gomoku-nnue/issues/17-model-cleanup.md) 与[工单 18](.scratch/gomoku-nnue/issues/18-historical-data-cleanup.md)。
+
 ## 并发与磁盘写入
 
-GUI 持续训练默认采用「高吞吐预设（本机）」，也可以点击「少量数据快速启动」恢复小规模参数。预设不修改学习率、每轮优化步数、晋级门槛或已运行任务。应用新配置前先停止旧任务，等待结束再启动；代码更新后需重新打开客户端。
+GUI 持续训练默认采用「高吞吐预设（本机）」，也可以点击「少量数据快速启动」恢复小规模参数。预设不修改学习率、每轮优化步数、晋级门槛或已运行任务。应用新配置前先停止旧任务，等待结束再启动；代码更新后需重新打开客户端。任务参数所见即所得：改动立即生效并在 300 ms 内自动保存，重开客户端沿用，没有单独的保存按钮。
 
 | 配置 | 高吞吐（7950X3D / 32 逻辑线程） | 少量数据快速启动 |
 |---|---:|---:|

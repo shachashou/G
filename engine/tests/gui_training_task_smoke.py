@@ -8,6 +8,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT / p) for p in ("gui", "tools", "trainer")]
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 import gomoku_gui
 import rapfi_teacher
@@ -32,8 +33,10 @@ def main():
     app = QApplication.instance() or QApplication([sys.argv[0]])
     with tempfile.TemporaryDirectory(prefix="gui-teacher-task-") as raw:
         root = Path(raw)
+        settings = QSettings(str(root / "client.ini"), QSettings.Format.IniFormat)
         window = gomoku_gui.MainWindow(str(Path(sys.argv[1]).resolve()), 20,
-            pool=root / "pool.sqlite3", registry=root / "registry", evaluations=root / "evaluations")
+            pool=root / "pool.sqlite3", registry=root / "registry", evaluations=root / "evaluations",
+            settings=settings)
         window.show()
         panel = window.training_task_panel
         panel.btn_quick.click()

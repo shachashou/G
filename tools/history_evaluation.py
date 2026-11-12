@@ -152,6 +152,20 @@ def copy_bundle(model: Path, folder: Path) -> dict:
     return {**frozen, "source_path": str(model.resolve())}
 
 
+def hoeffding_margin(pairs: int, comparisons: int = 1,
+                     alpha: float = 0.05) -> float:
+    """One-sided Hoeffding half-width used by the promotion gate."""
+    if pairs < 1:
+        return 1.0
+    return math.sqrt(math.log(max(1, comparisons) / alpha) / (2 * pairs))
+
+
+def required_score_rate(pairs: int, threshold: float = 0.5,
+                        comparisons: int = 1, alpha: float = 0.05) -> float:
+    """Paired score rate needed for the lower bound to clear the threshold."""
+    return min(1.0, threshold + hoeffding_margin(pairs, comparisons, alpha))
+
+
 def pair_statistics(games: list[dict], config: EvaluationConfig,
                     comparisons: int = 1) -> dict:
     """One bounded observation per complete opening pair, never per game.
@@ -610,7 +624,8 @@ def evaluate(candidate: str | Path, engine: str | Path, *,
             entry = store.resolve(version)
             bundle = copy_bundle(Path(entry["path"]), run / "opponents" / version)
             if bundle["sha256"] == frozen_candidate["sha256"]:
-                raise EvaluationError("candidate is identical to a selected historical model")
+                raise EvaluationError(
+                    f"candidate is identical to the registered version {version}")
             frozen_opponents[version] = bundle
         (run / "engine").mkdir()
         source_engine = Path(engine).resolve()

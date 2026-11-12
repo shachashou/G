@@ -22,10 +22,12 @@ class TrainingTaskPanel(QGroupBox):
     stateChanged = Signal(dict)
     recoverableChanged = Signal(int)
 
-    def __init__(self, exe, pool, registry, evaluations, output_root, can_start):
+    def __init__(self, exe, pool, registry, evaluations, output_root,
+                 can_start, settings=None):
         super().__init__("运行")
         self.exe, self.pool, self.registry = exe, pool, registry
         self.evaluations, self.output_root = evaluations, output_root
+        self._settings = settings
         self.default_outputs = {"teacher": str(output_root),
             "transition": str(Path(output_root).parent / "transition-tasks"),
             "selfplay": str(Path(output_root).parent / "selfplay-tasks")}
@@ -84,6 +86,12 @@ class TrainingTaskPanel(QGroupBox):
                 row.addWidget(QLabel(label))
                 row.addWidget(widget)
             settings_layout.addLayout(row)
+        self.eval_hint = QLabel("")
+        self.eval_hint.setWordWrap(True)
+        self.eval_hint.setObjectName("Caption")
+        settings_layout.addWidget(self.eval_hint)
+        self.spin_pairs.valueChanged.connect(self._update_eval_hint)
+        self._update_eval_hint()
         row = QHBoxLayout()
         self.btn_throughput = QPushButton("高吞吐预设（本机）")
         self.btn_throughput.clicked.connect(self._high_throughput)
@@ -125,6 +133,12 @@ class TrainingTaskPanel(QGroupBox):
         row.addWidget(self.spin_teacher_weight)
         row.addStretch(1)
         settings_layout.addLayout(row)
+        self.save_hint = QLabel(
+            "所见即所得：修改立即生效并自动保存，重开客户端沿用；"
+            "任务运行中参数锁定，改动只影响下一个新任务。")
+        self.save_hint.setWordWrap(True)
+        self.save_hint.setObjectName("Caption")
+        settings_layout.addWidget(self.save_hint)
         self.settings = CollapsibleSection("任务与资源设置", settings_layout)
         self.settings.embed()
         row = QHBoxLayout()
@@ -181,7 +195,82 @@ class TrainingTaskPanel(QGroupBox):
         self.combo_mode.currentIndexChanged.connect(self._mode_changed)
         self._high_throughput()
         self._mode_changed()
+        self._persisted = {
+            "capacity": self.spin_capacity, "min_train": self.spin_min_train,
+            "new_samples": self.spin_new, "steps": self.spin_steps,
+            "batch": self.spin_batch, "workers": self.spin_workers,
+            "eval_workers": self.spin_eval_workers,
+            "cpu_threads": self.spin_cpu_threads,
+            "sample_limit": self.spin_sample_limit,
+            "pending": self.spin_pending,
+            "validation_games": self.spin_validation_games,
+            "state_seconds": self.spin_state_seconds,
+            "checkpoint_seconds": self.spin_checkpoint_seconds,
+            "rounds": self.spin_rounds, "games": self.spin_games,
+            "minutes": self.spin_minutes, "pairs": self.spin_pairs,
+            "eval_ms": self.spin_ms, "lr": self.spin_lr,
+            "selfplay_ms": self.spin_selfplay_ms,
+            "epsilon": self.spin_epsilon,
+            "teacher_weight": self.spin_teacher_weight,
+        }
+        self._restore_task_settings()
+        # WYSIWYG: every edit is persisted after a short debounce, so there is
+        # no separate "save" step to forget.
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(300)
+        self._save_timer.timeout.connect(self._save_task_settings)
+        for widget in self._persisted.values():
+            widget.valueChanged.connect(self._queue_task_settings_save)
+        for widget in (self.combo_device, self.combo_mode):
+            widget.currentIndexChanged.connect(self._queue_task_settings_save)
+        self.edit_output.textEdited.connect(self._queue_task_settings_save)
         self._refresh_recoverable()
+
+    def _queue_task_settings_save(self, *_args) -> None:
+        if self._settings is None or not hasattr(self, "_save_timer"):
+            return
+        self._save_timer.start()
+
+    def _restore_task_settings(self) -> None:
+        """Bring back the last task budget; presets must not silently reset it."""
+        if self._settings is None:
+            return
+        for key, widget in self._persisted.items():
+            raw = self._settings.value(f"training/{key}")
+            if raw is None:
+                continue
+            try:
+                widget.setValue(float(raw) if isinstance(
+                    widget, QDoubleSpinBox) else int(raw))
+            except (TypeError, ValueError):
+                continue
+        device = self._settings.value("training/device")
+        if device is not None:
+            index = self.combo_device.findText(str(device))
+            if index >= 0:
+                self.combo_device.setCurrentIndex(index)
+        mode = self._settings.value("training/mode")
+        if mode is not None:
+            index = self.combo_mode.findData(str(mode))
+            if index >= 0:
+                self.combo_mode.setCurrentIndex(index)
+        output = self._settings.value("training/output")
+        if output:
+            self.edit_output.setText(str(output))
+        self._update_eval_hint()
+
+    def _save_task_settings(self) -> None:
+        if self._settings is None:
+            return
+        if getattr(self, "_save_timer", None) is not None:
+            self._save_timer.stop()
+        for key, widget in self._persisted.items():
+            self._settings.setValue(f"training/{key}", widget.value())
+        self._settings.setValue("training/device", self.combo_device.currentText())
+        self._settings.setValue("training/mode", self.combo_mode.currentData())
+        self._settings.setValue("training/output", self.edit_output.text().strip())
+        self._settings.sync()
 
     def _high_throughput(self):
         cpus = os.cpu_count() or 1
@@ -250,6 +339,16 @@ class TrainingTaskPanel(QGroupBox):
         spin.setValue(value)
         return spin
 
+    def _update_eval_hint(self, *_args):
+        from history_evaluation import required_score_rate
+
+        pairs = self.spin_pairs.value()
+        required = required_score_rate(pairs, 0.5, 1)
+        self.eval_hint.setText(
+            f"晋级条件：任务内候选挑战当前正式版本，{pairs} 对开局，"
+            f"配对得分率需 > {required:.1%}（单侧 95% 下界 > 50%）；"
+            "观察到的 51% 并不等于能晋级。")
+
     def make_config(self):
         from training_task import TaskConfig
         return TaskConfig(engine=str(self.exe), pool=str(self.pool), registry=str(self.registry),
@@ -305,6 +404,7 @@ class TrainingTaskPanel(QGroupBox):
         if not self._refresh_readiness():
             self.status.setText(self.hint.text())
             return
+        self._save_task_settings()
         self._start_worker(
             TrainingTask(config, progress=lambda value: self.messages.put(("state", value))),
             "任务：正在核验依赖与冻结配置…")
@@ -415,21 +515,47 @@ class TrainingTaskPanel(QGroupBox):
     def show_state(self, state):
         data, train, evaluation = (state[name] for name in ("data", "trainer", "evaluation"))
         status = self.STATUS_TEXT.get(state['status'], state['status'])
-        self.status.setText(f"任务：{status}；采集 {data.get('phase', '-')}；训练 {train.get('phase', '-')}；测评 {evaluation.get('phase', '-')}")
+        rounds = state.get("rounds") or []
+        last = rounds[-1] if rounds else {}
+        rejected = last.get("status") == "numerical_rejected"
+        self.status.setText(
+            f"任务：{status}；采集 {data.get('phase', '-')}；训练 {train.get('phase', '-')}；测评 {evaluation.get('phase', '-')}"
+            + ("；最近一轮导出保真度未通过，未进入测评" if rejected else ""))
         self._sync_transport_buttons(state['status'])
         metrics = data.get("totals", data.get("metrics", {}))
         progress = train.get("progress", {})
         current = (evaluation.get("result", {}).get("publication") or state.get("current") or {})
         lines = [f"模式 {state.get('mode', 'teacher')}，训练来源 {state.get('training_sources')}，权重 {state.get('source_weights')}",
-            f"采集局数 {state['games']}，候选轮数 {len(state['rounds'])}",
+            f"采集局数 {state['games']}，候选轮数 {len(rounds)}",
             f"池累计生成 {metrics.get('generated', 0)}，有效 {metrics.get('valid', 0)}，入池 {metrics.get('inserted', 0)}",
             f"池容量 {metrics.get('total_pool_samples', metrics.get('pool_samples', 0))}/{metrics.get('capacity', '?')}，可用 {metrics.get('pool_samples', 0)}，有效/秒 {metrics.get('effective_per_second', 0):.2f}",
             f"采集模型 {data.get('version') or data.get('model_id', 'handcrafted')}",
             f"训练 step {progress.get('step', '-')}，loss {progress.get('train_loss', '-')}，val MAE {progress.get('val_mae', '-')}，设备 {train.get('summary', {}).get('device', state['resources'].get('device'))}",
             f"正式版本 {current.get('version', '尚未建立')}；资源 {state['resources']}",
             f"测评结果 {evaluation.get('result', {}).get('statistics', {})}",
+            self._round_note(last),
             f"结束原因 {state.get('reason')}；任务记录 {state['directory']}"]
-        self.metrics.setPlainText("\n".join(lines))
+        self.metrics.setPlainText("\n".join(line for line in lines if line))
+
+    @staticmethod
+    def _round_note(record: dict) -> str:
+        """Explain the latest round, especially a numerical export rejection."""
+        if not record:
+            return ""
+        status = record.get("status")
+        training = record.get("training") or {}
+        export = training.get("export") or {}
+        fidelity = export.get("fidelity") or {}
+        measured = fidelity.get("float_vs_integer") or {}
+        limit = (fidelity.get("value_tolerance") or {}).get("p95_abs")
+        steps = training.get("steps", "-")
+        if status == "numerical_rejected":
+            p95 = measured.get("p95_abs")
+            detail = (f"p95 {p95:.2%} > {limit:.2%}" if isinstance(p95, float)
+                      and isinstance(limit, float) else "超出冻结容差")
+            return (f"最近一轮：导出保真度未通过（{detail}），已丢弃，未进入测评；"
+                    f"训练 {steps} 步")
+        return f"最近一轮：{status}，训练 {steps} 步"
 
     def poll(self):
         while True:
@@ -466,3 +592,4 @@ class TrainingTaskPanel(QGroupBox):
         if self.thread:
             self.thread.join(timeout=30)
         self.timer.stop()
+        self._save_task_settings()

@@ -19,7 +19,9 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QPointF, QRect, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtGui import (
+    QBrush, QColor, QFont, QKeySequence, QPainter, QPen, QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
     QGraphicsDropShadowEffect, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
@@ -32,7 +34,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "trainer"))
 from executor import ExecutorClient, ExecutorError  # noqa: E402
 import collect  # noqa: E402
+import model_cleanup  # noqa: E402
 import rapfi_teacher  # noqa: E402
+import storage_cleanup  # noqa: E402
 import teacher_label  # noqa: E402
 import vcf_tactics  # noqa: E402
 from sample_pool import PoolError, SamplePool  # noqa: E402
@@ -40,6 +44,7 @@ from teacher_store import TeacherStore  # noqa: E402
 from model_registry import ModelRegistry, DEFAULT_REGISTRY  # noqa: E402
 from run_support import file_identity  # noqa: E402
 from history_panel import HistoryPanel  # noqa: E402
+from cleanup_dialog import CleanupDialog  # noqa: E402
 from training_task_panel import TrainingTaskPanel  # noqa: E402
 from ui_components import (  # noqa: E402
     CollapsibleSection, SegmentedControl, apply_theme, mark_button, page_title,
@@ -309,17 +314,21 @@ class MainWindow(QMainWindow):
                  pool: str | Path = ROOT / "data" / "pool" / "pool.sqlite3",
                  collection_seed: int | None = None,
                  teacher_store: str | Path = ROOT / "data/teacher/samples.sqlite3",
-                 restore_geometry: bool = False) -> None:
+                 restore_geometry: bool = False,
+                 settings: QSettings | None = None,
+                 weights_root: str | Path = ROOT / "weights") -> None:
         super().__init__()
         self.setWindowTitle("GomokuNNUE · 有禁手五子棋")
         self._restore_geometry = restore_geometry
-        self._settings = QSettings("GomokuNNUE", "DesktopClient")
+        self._settings = (settings if settings is not None
+                          else QSettings("GomokuNNUE", "DesktopClient"))
         app = QApplication.instance()
         if app is not None:
             apply_theme(app)
         self._exe = exe
         self._think_ms = think_ms
         self._registry = ModelRegistry(registry)
+        self._weights_root = Path(weights_root)
         self._evaluations = evaluations
         self._pool_path = Path(pool)
         self._collection_seed = collection_seed
@@ -361,6 +370,7 @@ class MainWindow(QMainWindow):
         self._preview_key: tuple | None = None
         self._preview_last_at = 0.0
         self._live_forced = False
+        self._board_visible = True
         self._background_active = False
         self._recoverable_count = 0
         self._training_task_panel_busy = False
@@ -394,12 +404,20 @@ class MainWindow(QMainWindow):
         self.combo_model.setObjectName("ModelCapsule")
         self.combo_model.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.combo_model.setMinimumContentsLength(14)
-        self.combo_model.setMinimumWidth(170)
-        self.combo_model.setMaximumWidth(280)
+        self.combo_model.setMinimumContentsLength(12)
+        self.combo_model.setMinimumWidth(180)
+        self.combo_model.setMaximumWidth(320)
+        self.combo_model.setToolTip(
+            "当前加载的价值网络模型；选中即应用。完整路径与身份见「设置 → 模型」")
         self._reload_model_choices()
         self.combo_model.activated.connect(self._model_capsule_activated)
         header_row.addWidget(self.combo_model)
+        self.btn_board = QPushButton("隐藏棋盘")
+        mark_button(self.btn_board, "quiet")
+        self.btn_board.setToolTip(
+            "隐藏左侧棋盘，把宽度让给右侧面板（Ctrl+B）")
+        self.btn_board.clicked.connect(self._toggle_board)
+        header_row.addWidget(self.btn_board)
         self.btn_settings = QPushButton("设置")
         mark_button(self.btn_settings, "quiet")
         header_row.addWidget(self.btn_settings)
@@ -438,6 +456,7 @@ class MainWindow(QMainWindow):
         self.board.moveClicked.connect(self._on_player_move)
         board_card = QFrame()
         board_card.setObjectName("BoardCard")
+        self.board_card = board_card
         board_card.setSizePolicy(QSizePolicy.Policy.Expanding,
                                  QSizePolicy.Policy.Expanding)
         board_layout = QVBoxLayout(board_card)
@@ -533,11 +552,16 @@ class MainWindow(QMainWindow):
         self.vcf_engine_label.setToolTip(engine_identity)
         self.replay_label = QLabel("")
         self.replay_label.setWordWrap(True)
+        self.search_label = QLabel("搜索：尚未行棋")
+        self.search_label.setWordWrap(True)
+        self.search_label.setToolTip(
+            "AI 每步的迭代加深深度（层 = 半手）；默认上限 8 层（双方各 4 手），"
+            "算杀（VCF）另有独立预算，可证明更深的强制胜。")
         details_layout = QVBoxLayout()
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.setSpacing(4)
         for widget in (self.turn_label, self.status_label, self.result_label,
-                       self.vcf_engine_label, self.vcf_label,
+                       self.search_label, self.vcf_engine_label, self.vcf_label,
                        self.replay_label):
             widget.setObjectName("Caption")
             details_layout.addWidget(widget)
@@ -691,7 +715,8 @@ class MainWindow(QMainWindow):
         self.training_task_panel = TrainingTaskPanel(
             self._exe, self._pool_path, self._registry.root, self._evaluations,
             ROOT / "weights/teacher-tasks",
-            lambda: self._phase in ("idle", "game_over"))
+            lambda: self._phase in ("idle", "game_over"),
+            settings=self._settings)
         self.training_task_panel.busyChanged.connect(self._training_task_busy)
         self.training_task_panel.published.connect(self._apply_model_path)
         self.training_task_panel.previewReceived.connect(self._on_preview)
@@ -714,7 +739,8 @@ class MainWindow(QMainWindow):
         self.history_panel = HistoryPanel(
             self._exe, self._registry.root, self._evaluations,
             lambda: self._phase in ("idle", "game_over"))
-        self.history_panel.edit_candidate.setText(self._model or "")
+        self.history_panel.edit_candidate.setText("")
+        self._sync_history_candidate()
         self.history_panel.busyChanged.connect(self._evaluation_busy)
         self.history_panel.published.connect(self._apply_model_path)
         self.history_panel.previewReceived.connect(self._on_preview)
@@ -738,6 +764,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(content, 1)
         self.setCentralWidget(central)
         self._apply_window_size()
+        self._set_board_visible(
+            bool(self._settings.value("window/board_visible", True, type=bool)),
+            persist=False)
+        self._board_shortcut = QShortcut(QKeySequence("Ctrl+B"), self)
+        self._board_shortcut.activated.connect(self._toggle_board)
 
         # ---- model details + settings sheet ---------------------------
         teacher_layout = QVBoxLayout()
@@ -788,6 +819,17 @@ class MainWindow(QMainWindow):
         row.addWidget(self.btn_apply_model)
         row.addWidget(self.btn_unload_model)
         model_layout.addLayout(row)
+        cleanup_row = QHBoxLayout()
+        self.btn_cleanup_models = QPushButton("清理模型与数据…")
+        self.btn_cleanup_models.clicked.connect(self._open_cleanup)
+        mark_button(self.btn_cleanup_models, "quiet")
+        cleanup_row.addWidget(self.btn_cleanup_models)
+        self.cleanup_summary = QLabel("")
+        self.cleanup_summary.setObjectName("Caption")
+        self.cleanup_summary.setWordWrap(True)
+        cleanup_row.addWidget(self.cleanup_summary, 1)
+        model_layout.addLayout(cleanup_row)
+        self._refresh_cleanup_summary()
         self._update_eval_label()
 
         self.settings_sheet = SettingsSheet(self)
@@ -814,7 +856,7 @@ class MainWindow(QMainWindow):
                                         self.history_panel.advanced)
         self.settings_sheet.add_section("eval", "测评报告",
                                         self.history_panel.report)
-        self.btn_settings.clicked.connect(lambda: self.settings_sheet.show())
+        self.btn_settings.clicked.connect(self._show_settings)
 
     def _default_window_size(self) -> tuple[int, int]:
         """A small first launch; the window is freely resizable afterwards."""
@@ -836,6 +878,30 @@ class MainWindow(QMainWindow):
                     return
         width, height = self._default_window_size()
         self.resize(width, height)
+
+    def _toggle_board(self) -> None:
+        self._set_board_visible(not self._board_visible)
+
+    def _set_board_visible(self, visible: bool, persist: bool = True) -> None:
+        """Collapse the board card so the right panel gets the whole width.
+
+        Hiding the board is a viewing preference, not a game action: the
+        engine, the live mirror and any background task keep running. The
+        choice survives a restart through QSettings.
+        """
+        self._board_visible = bool(visible)
+        self.board_card.setVisible(self._board_visible)
+        self.btn_board.setText("隐藏棋盘" if self._board_visible else "显示棋盘")
+        if self._board_visible:
+            if self._live_showing():
+                self._render_preview()
+            elif self._state is not None:
+                self._refresh()
+            self._sync_live_button()
+        else:
+            self.btn_live.hide()
+        if persist:
+            self._settings.setValue("window/board_visible", self._board_visible)
 
     def _training_mode_changed(self, key: str | None = None) -> None:
         key = key or self.training_mode.current()
@@ -942,12 +1008,15 @@ class MainWindow(QMainWindow):
 
     def _sync_live_button(self) -> None:
         show = bool(self._preview and self._background_active
-                    and self._player_midgame())
+                    and self._player_midgame() and self._board_visible)
         self.btn_live.setVisible(show)
         if show:
             self.btn_live.setText("返回对局" if self._live_forced else "LIVE")
         if getattr(self, "play_live_hint", None) is not None:
-            if self._live_showing():
+            if not self._board_visible:
+                self.play_live_hint.setText(
+                    "后台任务运行中 · 棋盘已隐藏（Ctrl+B 显示）")
+            elif self._live_showing():
                 self.play_live_hint.setText(
                     "正在观看后台实时棋盘 · 只读；点「返回对局」继续")
             else:
@@ -1034,25 +1103,95 @@ class MainWindow(QMainWindow):
 
     # ---- model selection ----------------------------------------------
 
-    @staticmethod
-    def _model_display(path: Path) -> str:
+    def _registry_index(self) -> dict[str, dict]:
+        """Resolved model path -> registry entry, so labels can say 正式/历史."""
         try:
-            return str(path.resolve().relative_to(ROOT))
+            state = self._registry.read()
+        except (ValueError, OSError):
+            return {}
+        index: dict[str, dict] = {}
+        for entry in state.get("versions", []):
+            try:
+                path = (self._registry.root / entry["model"]).resolve()
+            except (KeyError, OSError, TypeError):
+                continue
+            index[str(path)] = {
+                **entry, "current": entry.get("version") == state.get("current")}
+        return index
+
+    @staticmethod
+    def _candidate_label(path: Path) -> str:
+        """Short, distinguishable label for a model nobody registered.
+
+        ``weights/value-run/model.gmvalue`` -> ``候选 · value-run``;
+        ``weights/teacher-tasks/<id>/candidates/round-00001/model.gmvalue``
+        -> ``候选 · <id8>/round-00001``. Full paths live in the tooltip and in
+        the settings sheet, so the top capsule only shows what identifies it.
+        """
+        try:
+            parts = list(Path(path).resolve().relative_to(ROOT).parts)
         except ValueError:
-            return str(path)
+            parts = list(Path(path).resolve().parts)
+        parts = [p for p in parts
+                 if p.lower() not in ("weights", "candidates", "models")
+                 and not p.lower().endswith(".gmvalue")]
+        short = [p[:8] if len(p) == 32 and all(
+            c in "0123456789abcdef" for c in p.lower()) else p
+            for p in parts]
+        tail = short[-2:] if len(short) >= 2 else short
+        return "候选 · " + "/".join(tail) if tail else str(path)
+
+    def _add_model_item(self, label: str, data: str | None, tooltip: str) -> None:
+        self.combo_model.addItem(label, data)
+        self.combo_model.setItemData(
+            self.combo_model.count() - 1, tooltip, Qt.ToolTipRole)
+
+    def _fit_model_popup(self) -> None:
+        metrics = self.combo_model.fontMetrics()
+        widest = max((metrics.horizontalAdvance(self.combo_model.itemText(i))
+                      for i in range(self.combo_model.count())), default=0)
+        self.combo_model.view().setMinimumWidth(min(560, widest + 64))
 
     def _reload_model_choices(self) -> None:
         self.combo_model.clear()
-        self.combo_model.addItem(NO_MODEL_TEXT, None)
+        self._add_model_item(NO_MODEL_TEXT, None,
+                             "不加载模型，使用手工威胁评估（无网络）")
+        registry = self._registry_index()
+        formal: list[tuple[str, str, str]] = []
+        history: list[tuple[str, str, str]] = []
+        candidates: list[tuple[str, str, str, float]] = []
         for path in discover_models():
-            self.combo_model.addItem(self._model_display(path), str(path))
+            resolved = str(path.resolve())
+            entry = registry.get(resolved)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            if entry is not None:
+                version = str(entry.get("version", "?"))
+                tooltip = (f"{'当前正式版本' if entry.get('current') else '冻结历史版本'} "
+                           f"{version} · {entry.get('model_id', '?')[:12]}\n{resolved}")
+                item = (("正式 " if entry.get("current") else "历史 ") + version,
+                        str(path), tooltip)
+                (formal if entry.get("current") else history).append(item)
+            else:
+                candidates.append((self._candidate_label(path), str(path),
+                                   f"候选（未晋级）\n{resolved}", mtime))
+        history.sort(key=lambda item: item[0], reverse=True)
+        candidates.sort(key=lambda item: item[3], reverse=True)
+        for label, data, tooltip in formal + history:
+            self._add_model_item(label, data, tooltip)
+        for label, data, tooltip, _ in candidates:
+            self._add_model_item(label, data, tooltip)
         index = self.combo_model.findData(self._model)
         if index < 0 and self._model:
-            self.combo_model.addItem(self._model_display(Path(self._model)),
-                                     self._model)
+            self._add_model_item(self._candidate_label(Path(self._model)),
+                                 self._model, self._model)
             index = self.combo_model.count() - 1
-        self.combo_model.addItem("浏览模型文件…", "__browse__")
+        self._add_model_item("浏览模型文件…", "__browse__",
+                             "从磁盘选择任意 GMVALUE1 文件")
         self.combo_model.setCurrentIndex(max(0, index))
+        self._fit_model_popup()
 
     def _update_eval_label(self) -> None:
         about = self._about or {}
@@ -1105,8 +1244,11 @@ class MainWindow(QMainWindow):
             return
         index = self.combo_model.findData(path)
         if index < 0:
-            self.combo_model.addItem(self._model_display(Path(path)), path)
+            self._add_model_item(
+                self._candidate_label(Path(path)), path,
+                f"候选（未晋级）\n{Path(path).resolve()}")
             index = self.combo_model.count() - 1
+            self._fit_model_popup()
         self.combo_model.setCurrentIndex(index)
         self._apply_model_path(path)
 
@@ -1137,7 +1279,7 @@ class MainWindow(QMainWindow):
         self._client = client
         self._about = about
         self._model = candidate
-        self.history_panel.edit_candidate.setText(candidate or "")
+        self._sync_history_candidate()
         try:
             old.close()
         except Exception:  # noqa: BLE001 - switching models must not fail
@@ -1150,6 +1292,89 @@ class MainWindow(QMainWindow):
             "模型已应用：" + (NO_MODEL_TEXT if candidate is None else candidate))
         self._new_game()
         return True
+
+    # ---- model cleanup --------------------------------------------------
+
+    def _sync_history_candidate(self) -> None:
+        """Fill the evaluation candidate with a challenger, never the champion.
+
+        The capsule often shows the current formal version; copying that path
+        into the evaluation panel would guarantee a backend rejection
+        ("candidate is identical to a selected historical model").
+        """
+        path = self._model
+        if path:
+            try:
+                current = self._registry.resolve()
+            except (ValueError, OSError):
+                current = None
+            if (current is not None
+                    and Path(current["path"]).resolve() == Path(path).resolve()):
+                path = None
+        panel = getattr(self, "history_panel", None)
+        if panel is not None:
+            panel.edit_candidate.setText(str(path) if path else "")
+
+    def _cleanup_keep(self) -> int:
+        try:
+            return max(0, int(self._settings.value("models/keep_candidates", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _refresh_cleanup_summary(self) -> None:
+        try:
+            bundles = model_cleanup.scan(
+                self._weights_root, registry_root=self._registry.root,
+                loaded_model=self._model, keep=self._cleanup_keep())
+        except ValueError:
+            self.cleanup_summary.setText("没有可清理的模型目录")
+            self.btn_cleanup_models.setEnabled(False)
+            return
+        self.btn_cleanup_models.setEnabled(bool(bundles))
+        models = model_cleanup.summary(bundles)
+        lines = [f"候选 {models['total']} 个 · "
+                 f"{model_cleanup.human_size(models['total_bytes'])}；"
+                 f"可清理 {models['removable']} 个 · "
+                 f"{model_cleanup.human_size(models['removable_bytes'])}"
+                 f"（默认勾选 {models['default_selected']} 个）"]
+        try:
+            data = storage_cleanup.summary(storage_cleanup.scan(
+                self._weights_root, self._evaluations,
+                registry_root=self._registry.root))
+        except ValueError:
+            data = None
+        if data is not None and data["total"]:
+            lines.append(f"历史数据 {data['total']} 项 · "
+                         f"{model_cleanup.human_size(data['total_bytes'])}；"
+                         f"可清理 {data['removable']} 项 · "
+                         f"{model_cleanup.human_size(data['removable_bytes'])}"
+                         f"（默认勾选 {data['default_selected']} 项）")
+        self.cleanup_summary.setText("\n".join(lines))
+
+    def _open_cleanup(self) -> None:
+        if self._phase not in ("idle", "game_over"):
+            self._show_error("任务运行中，请先停止后再清理")
+            return
+        dialog = CleanupDialog(
+            self._weights_root, self._registry.root, self._evaluations,
+            loaded_model=self._model, keep=self._cleanup_keep(), parent=self)
+        dialog.cleaned.connect(self._cleanup_done)
+        dialog.exec()
+        self._settings.setValue("models/keep_candidates", dialog.keep)
+        self._reload_model_choices()
+        self._refresh_cleanup_summary()
+
+    def _cleanup_done(self, count: int, freed: int) -> None:
+        if count:
+            self.status_label.setText(
+                f"已清理 {count} 项 · "
+                f"释放 {model_cleanup.human_size(freed)}")
+        self._reload_model_choices()
+        self._refresh_cleanup_summary()
+        try:
+            self.history_panel.refresh()
+        except Exception:  # noqa: BLE001 - refreshing a view must never fail
+            pass
 
     # ---- game flow -----------------------------------------------------
 
@@ -1392,6 +1617,18 @@ class MainWindow(QMainWindow):
             self.vcf_label.setText("算杀：未运行")
             return
         self.vcf_label.setText("算杀：" + vcf_tactics.describe(report))
+
+    def _show_search_summary(self, response: dict) -> None:
+        """Expose the search horizon so "how far ahead" is observable."""
+        depth = int(response.get("depth") or 0)
+        nodes = int(response.get("nodes") or 0)
+        score = response.get("score")
+        text = (f"AI 搜索：深度 {depth} 层（约 {depth / 2:.1f} 手）"
+                f" · {nodes / 1000:.0f}k 节点 · 评分 {score}")
+        if response.get("from_vcf"):
+            text += " · 着法来自算杀（VCF）"
+        self.search_label.setText(text)
+        self.activity_label.setText(text)
 
     def _pool_status_text(self) -> str:
         path = self._pool_path
@@ -1722,6 +1959,7 @@ class MainWindow(QMainWindow):
             self._show_error("引擎选点失败：" + str(response.get("error", response)))
             return
         self._show_vcf(response.get("vcf"))
+        self._show_search_summary(response)
         x, y = response["move"]
         try:
             result = self._client.play(x, y)
@@ -1825,7 +2063,9 @@ class MainWindow(QMainWindow):
         if self._live_showing():
             return
         if self._background_active:
-            self.activity_label.setText("后台任务运行中 · 点 LIVE 查看")
+            self.activity_label.setText(
+                "后台任务运行中" if not self._board_visible
+                else "后台任务运行中 · 点 LIVE 查看")
         elif self._phase == "thinking":
             self.activity_label.setText("引擎思考中…")
         elif state["result"] != "ongoing":
@@ -1835,6 +2075,10 @@ class MainWindow(QMainWindow):
             self.activity_label.setText("轮到你落子")
         else:
             self.activity_label.setText("引擎行棋中…")
+
+    def _show_settings(self) -> None:
+        self._refresh_cleanup_summary()
+        self.settings_sheet.show()
 
     def _show_error(self, message: str) -> None:
         self.error_label.setText("错误：" + message)

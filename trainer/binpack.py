@@ -29,9 +29,12 @@ import mmap
 import os
 import struct
 import sys
-from dataclasses import dataclass, replace
+from array import array
+from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable
+from typing import Iterator
 
 MAGIC = b"GOMOKU07"
 VERSION = 1
@@ -267,8 +270,6 @@ class BinpackReader:
         Used by the trainer to split train/validation by WHOLE games without
         materialising every Record object (important for 10M-record files).
         """
-        from array import array
-
         mapping = array("I")
         game = 0
         for index in range(self.available):

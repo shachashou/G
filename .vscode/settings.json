@@ -1,0 +1,54 @@
+{
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    },
+    "editor.suggest.filterGraceful": true,
+    "editor.suggest.matchOnWordStartOnly": false,
+    "editor.suggestSelection": "recentlyUsed",
+    "editor.tabSize": 4
+  },
+  "editor.accessibilitySupport": "off",
+  "editor.detectIndentation": false,
+  "editor.wordWrapColumn": 999,
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true,
+  "files.exclude": {
+    "**/.venv": true,
+    "**/__pycache__": true,
+    "**/build": true,
+    "**/target": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true
+  },
+  "git.autofetch": true,
+  "git.confirmSync": false,
+  "git.openRepositoryInParentFolders": "always",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/tools",
+    "${workspaceFolder}/trainer",
+    "${workspaceFolder}/gui"
+  ],
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+  "python.languageServer": "Pylance",
+  "ruff.configuration": "${workspaceFolder}/ruff.toml",
+  "search.exclude": {
+    "**/.venv": true,
+    "**/__pycache__": true,
+    "**/build": true,
+    "**/target": true,
+    "**/data": true,
+    "**/weights": true
+  },
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/build/**": true,
+    "**/target/**": true,
+    "**/data/**": true,
+    "**/weights/**": true
+  }
+}

@@ -1,0 +1,50 @@
+# Ruff configuration for the Python side of the workbench.
+#
+# The desktop client, CLIs and tests are plain scripts that insert their
+# sibling directories into sys.path; there are no installable packages.
+# Style follows the project's existing code: keep long lines intact
+# (line-length 999), preserve quote style, and sort imports the same way
+# PyCharm's "Optimize Imports" does (case-insensitive, one name per line).
+
+line-length = 999
+target-version = "py312"
+
+# Top-level directories that contain first-party modules imported by the
+# scripts.  Used by isort to separate project imports from third-party ones.
+src = ["tools", "trainer", "gui"]
+
+exclude = [
+    ".git/**",
+    ".venv/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "build/**",
+    "vendor/**",
+    "data/**",
+    "weights/**",
+    "tools/rapfi/**",
+]
+
+[lint]
+# E/W: pycodestyle, F: pyflakes, I: isort.
+select = ["E", "W", "F", "I"]
+fixable = ["ALL"]
+unfixable = []
+
+[lint.isort]
+case-sensitive = false
+force-single-line = true
+force-sort-within-sections = false
+
+[lint.per-file-ignores]
+# These entry scripts insert sibling directories into sys.path before
+# importing first-party modules, so the imports cannot live at the top.
+"engine/tests/*.py" = ["E402"]
+"tools/history_evaluation.py" = ["E402"]
+"tools/training_task.py" = ["E402"]
+"trainer/export.py" = ["E402"]
+"trainer/train.py" = ["E402"]
+
+[format]
+indent-style = "space"
+quote-style = "preserve"

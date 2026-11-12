@@ -57,7 +57,10 @@ match_results*.json
 
 # OS / editor junk
 .vs/
-.vscode/
+# Keep the shared editor configuration, ignore local VSCode state.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
 .idea/
 Thumbs.db
 desktop.ini

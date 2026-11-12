@@ -1,0 +1,6 @@
+# Development-only tooling.  Runtime and build dependencies live in
+# requirements.txt (plus one backend file); this file is for the editor and
+# command-line checks.
+#
+#   .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+ruff==0.17.4

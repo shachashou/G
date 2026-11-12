@@ -89,6 +89,17 @@ AMD 的支持范围与驱动要求以[官方兼容矩阵](https://rocm.docs.amd.
 
 `build.py` 使用 venv 的 cmake + Ninja，并把 Zig 缓存、Rust 工具链与链接器都指向 `.venv`。链接步骤在 Ninja 中串行执行，避免 Zig/lld 并行链接耗尽内存。Linux / macOS 仍使用系统 C++ 编译器与 Rust 工具链，直接执行同样的 `build.py`（脚本只在 Windows 设置 venv 工具链变量）。
 
+### 编辑器（VSCode + Ruff）
+
+`.vscode/settings.json` 在保存 Python 时用 Ruff 格式化并整理 import，解释器指向 `.venv`；推荐扩展见 `.vscode/extensions.json`。Ruff 规则在 `ruff.toml`，沿用现有代码风格（行长上限 999、E/W/F/I、import 大小写不敏感）。开发依赖单独安装：
+
+~~~powershell
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\ruff.exe check tools gui trainer engine/tests
+~~~
+
+Ruff 是首次引入：旧文件仍可能带 import 顺序或未使用变量告警，保存时会按文件自动整理，不需要为了清零而重排整个仓库。
+
 技能目录 `.agents/skills/` 由根目录 `skills-lock.json` 记录的来源安装，属于安装物而非项目源码，因此不纳入版本控制；新克隆后按该锁文件重装技能即可，版本仍由锁文件固定。
 
 ## 启动对弈
@@ -402,6 +413,7 @@ CLI 仍默认单路采集；32 线程机器可使用[高吞吐示例](tools/high
 | trainer/ | PyTorch 数据、训练、验证与导出 |
 | tools/ | 采集、对战、任务编排工具及权威执行器共享客户端 |
 | gui/ | PySide6 桌面客户端与启动入口 |
+| .vscode/ | 共享的 VSCode 设置与推荐扩展 |
 | .scratch/gomoku-nnue/ | 当前主规格及审核后发布的本地工单 |
 | data/ | 本地产生的数据，不纳入版本控制 |
 | weights/ | 本地产生的模型，不纳入版本控制 |

@@ -932,11 +932,6 @@ class MainWindow(QMainWindow):
             return
         self._apply_model_path(data if data else None)
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if hasattr(self, "settings_sheet"):
-            self.settings_sheet.reposition()
-
     def keyPressEvent(self, event) -> None:
         if (hasattr(self, "settings_sheet")
                 and self.settings_sheet.visible()
